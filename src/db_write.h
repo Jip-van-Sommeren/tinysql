@@ -55,7 +55,28 @@ size_t valueEncodedSize(const Value &value);
 size_t rowPayloadSize(const Row &row);
 
 size_t encodedRowSize(const Row &row);
-size_t encodedPageHeaderSize();
-size_t encodedSlotSize();
+constexpr size_t encodedPageHeaderSize()
+{
+
+    //     struct PageHeader
+    // {
+    //     uint32_t pageId;
+    //     PageType pageType;
+    //     uint16_t slotCount;
+    //     uint16_t freeSpaceStart;
+    //     uint16_t freeSpaceEnd;
+    //     uint32_t nextPageId;
+    // };
+    return sizeof(uint32_t) +
+           sizeof(uint8_t) +
+           sizeof(uint16_t) +
+           sizeof(uint16_t) +
+           sizeof(uint16_t) +
+           sizeof(uint32_t);
+}
+constexpr size_t encodedSlotSize()
+{
+    return sizeof(uint16_t) + sizeof(uint16_t) + sizeof(uint8_t);
+}
 
 std::vector<std::byte> encodeRowPayload(const Row &row);

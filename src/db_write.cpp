@@ -381,16 +381,7 @@ size_t encodedRowSize(const Row &row)
 
 size_t encodedPageHeaderSize()
 {
-    PageHeader dummy{
-        .pageId = 0,
-        .pageType = PageType::Data,
-        .slotCount = 0,
-        .freeSpaceStart = 0,
-        .freeSpaceEnd = PAGE_SIZE,
-        .nextPageId = 0};
 
-    std::vector<std::byte> buffer;
-    writePageHeader(buffer, dummy);
     //     struct PageHeader
     // {
     //     uint32_t pageId;
@@ -400,7 +391,12 @@ size_t encodedPageHeaderSize()
     //     uint16_t freeSpaceEnd;
     //     uint32_t nextPageId; // 0 could mean "no next page"
     // };
-    return sizeof(dummy.nextPageId);
+    return sizeof(uint32_t) +
+           sizeof(uint8_t) +
+           sizeof(uint16_t) +
+           sizeof(uint16_t) +
+           sizeof(uint16_t) +
+           sizeof(uint32_t);
 }
 
 std::vector<std::byte> encodeRowPayload(const Row &row)
