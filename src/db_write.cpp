@@ -168,11 +168,6 @@ void writeSlot(std::vector<std::byte> &buffer, const Slot &slot)
     writeUInt8(buffer, slot.deleted);
 }
 
-size_t encodedSlotSize()
-{
-    return sizeof(uint16_t) + sizeof(uint16_t) + sizeof(uint8_t);
-}
-
 void writeDataPage(std::vector<std::byte> &buffer, const DataPage &dataPage)
 {
     // At this point, encodePage already wrote:
@@ -377,26 +372,6 @@ size_t rowPayloadSize(const Row &row)
 size_t encodedRowSize(const Row &row)
 {
     return sizeof(uint32_t) + rowPayloadSize(row);
-}
-
-size_t encodedPageHeaderSize()
-{
-
-    //     struct PageHeader
-    // {
-    //     uint32_t pageId;
-    //     PageType pageType;
-    //     uint16_t slotCount;
-    //     uint16_t freeSpaceStart;
-    //     uint16_t freeSpaceEnd;
-    //     uint32_t nextPageId; // 0 could mean "no next page"
-    // };
-    return sizeof(uint32_t) +
-           sizeof(uint8_t) +
-           sizeof(uint16_t) +
-           sizeof(uint16_t) +
-           sizeof(uint16_t) +
-           sizeof(uint32_t);
 }
 
 std::vector<std::byte> encodeRowPayload(const Row &row)
