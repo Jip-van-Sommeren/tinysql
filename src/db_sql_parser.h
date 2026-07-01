@@ -33,6 +33,10 @@ struct StringExpr : Expr
     explicit StringExpr(std::string value);
 };
 
+struct NullExpr : Expr
+{
+};
+
 enum class LogicalOp
 {
     And,

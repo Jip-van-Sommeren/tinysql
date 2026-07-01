@@ -11,7 +11,7 @@ int main()
         "SELECT users.* FROM users WHERE age >= 18;",
         "SELECT * FROM users JOIN orders ON users.id = orders.user_id;",
         "DELETE FROM users WHERE age < 18;",
-        "INSERT INTO users (name, age) VALUES ('Ada', 37);",
+        "INSERT INTO users (name, age) VALUES ('Ada', NULL);",
         "UPDATE users SET age = age + 1 WHERE name = 'Ada';"};
 
     for (const std::string &sql : sqlStatements)

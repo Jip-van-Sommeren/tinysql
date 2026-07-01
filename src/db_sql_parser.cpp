@@ -665,6 +665,11 @@ std::unique_ptr<Expr> Parser::parsePrimary()
         return std::make_unique<StringExpr>(std::move(value));
     }
 
+    if (matchKeyword("NULL"))
+    {
+        return std::make_unique<NullExpr>();
+    }
+
     throw std::runtime_error("Expected expression, got: " + peek().text);
 }
 

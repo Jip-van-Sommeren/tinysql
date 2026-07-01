@@ -196,6 +196,7 @@ bool Lexer::isKeyword(const std::string &word) const
            word == "UPDATE" ||
            word == "SET" ||
            word == "DELETE" ||
+           word == "NULL" ||
            word == "AND" ||
            word == "IS" ||
            word == "NOT" ||
