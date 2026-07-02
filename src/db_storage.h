@@ -21,11 +21,24 @@ enum class DataType : uint8_t
     Text = 2
 };
 
+struct FixedColumnStorage {
+    uint32_t offset;
+    uint32_t size;
+};
+
+struct VarColumnStorage {
+    uint32_t varIndex;
+};
+
+using ColumnStorage = std::variant<FixedColumnStorage, VarColumnStorage>;
+
 struct Column
 {
     std::string name;
     DataType type;
     bool nullable;
+    uint32_t columnIndex;
+    ColumnStorage storage;
 };
 
 struct Row
