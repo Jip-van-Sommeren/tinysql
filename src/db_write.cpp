@@ -246,6 +246,26 @@ void writeColumn(std::vector<std::byte> &buffer, const Column &column)
         column.nullable ? 1 : 0);
 }
 
+// void writeColumnDef(Writer& w, const ColumnDef& col) {
+//     w.writeString(col.name);
+//     w.writeU8(static_cast<uint8_t>(col.type));
+//     w.writeU8(col.nullable ? 1 : 0);
+//     w.writeU32(col.columnIndex);
+
+//     if (std::holds_alternative<FixedColumnStorage>(col.storage)) {
+//         const auto& fixed = std::get<FixedColumnStorage>(col.storage);
+
+//         w.writeU8(0); // storage kind: fixed
+//         w.writeU32(fixed.offset);
+//         w.writeU32(fixed.size);
+//     } else {
+//         const auto& var = std::get<VarColumnStorage>(col.storage);
+
+//         w.writeU8(1); // storage kind: variable
+//         w.writeU32(var.varIndex);
+//     }
+// }
+
 void writeHeaderPage(std::vector<std::byte> &buffer, const HeaderPage &header)
 {
 
