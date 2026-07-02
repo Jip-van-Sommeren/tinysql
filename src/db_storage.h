@@ -21,13 +21,27 @@ enum class DataType : uint8_t
     Text = 2
 };
 
-struct FixedColumnStorage {
+// struct Value
+// {
+//     DataType dataType;
+//     uint8_t isNull;
+//     ValueData value;
+// };
+struct FixedColumnStorage
+{
     uint32_t offset;
     uint32_t size;
 };
 
-struct VarColumnStorage {
+struct VarColumnStorage
+{
     uint32_t varIndex;
+};
+
+enum class ColumnStorageKind : std::uint8_t
+{
+    Fixed = 1,
+    Variable = 2
 };
 
 using ColumnStorage = std::variant<FixedColumnStorage, VarColumnStorage>;
@@ -57,9 +71,11 @@ RowValidationResult validateRowAgainstSchema(const std::vector<Column> &columns,
 
 enum class PageType : uint8_t
 {
-    TableHeader = 1,
-    Data = 2,
-    Index = 3
+    DataPage = 1,
+    IndexPage = 2,
+    OverflowPage = 3,
+    FreePage = 4,
+    HeaderPage = 5
 };
 
 struct PageHeader
@@ -71,6 +87,19 @@ struct PageHeader
     uint16_t freeSpaceEnd;
     uint32_t nextPageId; // 0 could mean "no next page"
 };
+
+namespace PageHeaderLayout
+{
+    constexpr std::size_t PageId = 0;         // uint32
+    constexpr std::size_t PageType = 4;       // uint8
+    constexpr std::size_t Reserved = 5;       // uint8
+    constexpr std::size_t SlotCount = 6;      // uint16
+    constexpr std::size_t FreeSpaceStart = 8; // uint16
+    constexpr std::size_t FreeSpaceEnd = 10;  // uint16
+    constexpr std::size_t NextPageId = 12;    // uint32
+
+    constexpr std::size_t Size = 16;
+}
 
 struct HeaderPage
 {
@@ -86,11 +115,38 @@ struct HeaderPage
     uint32_t nextUnusedPageId = 2;
 };
 // [PageHeader][slots...][free space...][row payload bytes...]
+enum class SlotFlag : std::uint16_t
+{
+    Deleted = 1u << 0,
+    Moved = 1u << 1,
+    Overflow = 1u << 2
+};
+
+inline std::uint16_t toMask(SlotFlag flag)
+{
+    return static_cast<std::uint16_t>(flag);
+}
+
 struct Slot
 {
-    uint16_t offset;
-    uint16_t size;
-    uint8_t deleted;
+    std::uint16_t offset;
+    std::uint16_t size;
+    std::uint16_t flags = 0;
+
+    void set(SlotFlag flag)
+    {
+        flags |= toMask(flag);
+    }
+
+    void clear(SlotFlag flag)
+    {
+        flags &= static_cast<std::uint16_t>(~toMask(flag));
+    }
+
+    bool has(SlotFlag flag) const
+    {
+        return (flags & toMask(flag)) != 0;
+    }
 };
 struct RowEntry
 {
@@ -123,6 +179,12 @@ struct PageFrame
     uint32_t pageId;
     Page page;
     bool dirty;
+};
+
+struct FreePageHeader
+{
+    PageType type;              // FreePage
+    std::uint32_t nextFreePage; // linked list
 };
 
 using RawPage = std::array<std::byte, PAGE_SIZE>;
