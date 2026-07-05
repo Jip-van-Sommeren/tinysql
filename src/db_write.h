@@ -69,6 +69,9 @@ public:
     RowWriter(PageWriter &writer, const HeaderPage &headerPage);
 
     void writeRow(const std::vector<Value> &values);
+    static std::size_t computeSerializedRowSize(
+        const HeaderPage &tableHeader,
+        const std::vector<Value> &values);
 
 private:
     PageWriter &writer;
@@ -175,8 +178,6 @@ private:
     PageHeaderWriter headerWriter;
     SlotWriter slotWriter;
     const HeaderPage &tableHeader;
-
-    std::size_t computeRowSize(const std::vector<Value> &values) const;
 };
 
 RawPage encodeHeaderPage(const PageHeader &pageHeader, const HeaderPage &headerPage);
@@ -190,13 +191,5 @@ RawPage encodeDataPage(
     const std::vector<Row> &rows);
 RawPage encodePage(const Page &page);
 
-std::uint16_t calculateFreeSpaceStart(const PageHeader &pageHeader);
 std::size_t encodedSlotSize();
 std::size_t encodedRowSize(const HeaderPage &tableHeader, const Row &row);
-
-// Compatibility helpers used by the current storage implementation.
-void writePageHeader(std::vector<std::byte> &buffer, const PageHeader &header);
-void writeHeaderPage(std::vector<std::byte> &buffer, const HeaderPage &header);
-void writeSlot(std::vector<std::byte> &buffer, const Slot &slot);
-std::size_t encodedRowSize(const Row &row);
-std::vector<std::byte> encodeRowPayload(const Row &row);

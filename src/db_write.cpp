@@ -6,82 +6,6 @@
 #include <stdexcept>
 #include <variant>
 
-namespace
-{
-constexpr std::size_t VarEntrySize = 8;
-
-template <typename T>
-void appendUnsigned(std::vector<std::byte> &buffer, T value)
-{
-    static_assert(std::is_unsigned_v<T>, "T must be an unsigned integer type");
-
-    for (std::size_t shift = 0; shift < sizeof(T) * 8; shift += 8)
-    {
-        buffer.push_back(static_cast<std::byte>((value >> shift) & 0xFF));
-    }
-}
-
-void appendString(std::vector<std::byte> &buffer, const std::string &value)
-{
-    if (value.size() > std::numeric_limits<std::uint32_t>::max())
-    {
-        throw std::runtime_error("String too large to write");
-    }
-
-    appendUnsigned<std::uint32_t>(buffer, static_cast<std::uint32_t>(value.size()));
-
-    const auto *data = reinterpret_cast<const std::byte *>(value.data());
-    buffer.insert(buffer.end(), data, data + value.size());
-}
-
-std::size_t computeSerializedRowSize(const HeaderPage &tableHeader, const std::vector<Value> &values)
-{
-    if (values.size() != tableHeader.columns.size())
-    {
-        throw std::runtime_error("value count does not match column count");
-    }
-
-    std::size_t nullBitmapSize = (tableHeader.columns.size() + 7) / 8;
-    std::size_t fixedAreaSize = 0;
-    std::size_t varColumnCount = 0;
-    std::size_t varDataSize = 0;
-
-    for (const Column &column : tableHeader.columns)
-    {
-        const Value &value = values[column.columnIndex];
-
-        if (std::holds_alternative<FixedColumnStorage>(column.storage))
-        {
-            const FixedColumnStorage &fixed = std::get<FixedColumnStorage>(column.storage);
-            fixedAreaSize = std::max<std::size_t>(fixedAreaSize, fixed.offset + fixed.size);
-            continue;
-        }
-
-        if (std::holds_alternative<VarColumnStorage>(column.storage))
-        {
-            ++varColumnCount;
-
-            if (std::holds_alternative<std::monostate>(value))
-            {
-                continue;
-            }
-
-            if (column.type != DataType::Text || !std::holds_alternative<std::string>(value))
-            {
-                throw std::runtime_error("unsupported variable-length column value: " + column.name);
-            }
-
-            varDataSize += std::get<std::string>(value).size();
-            continue;
-        }
-
-        throw std::runtime_error("unknown column storage type");
-    }
-
-    return nullBitmapSize + fixedAreaSize + (varColumnCount * VarEntrySize) + varDataSize;
-}
-}
-
 PageWriter::PageWriter(RawPage &buffer)
     : buffer(buffer) {}
 
@@ -331,6 +255,54 @@ void RowWriter::writeVariableValue(
 
     varDataPos = writer.position();
 }
+std::size_t RowWriter::computeSerializedRowSize(
+    const HeaderPage &tableHeader,
+    const std::vector<Value> &values)
+{
+    if (values.size() != tableHeader.columns.size())
+    {
+        throw std::runtime_error("value count does not match column count");
+    }
+
+    std::size_t nullBitmapSize = (tableHeader.columns.size() + 7) / 8;
+    std::size_t fixedAreaSize = 0;
+    std::size_t varColumnCount = 0;
+    std::size_t varDataSize = 0;
+
+    for (const Column &column : tableHeader.columns)
+    {
+        const Value &value = values[column.columnIndex];
+
+        if (std::holds_alternative<FixedColumnStorage>(column.storage))
+        {
+            const FixedColumnStorage &fixed = std::get<FixedColumnStorage>(column.storage);
+            fixedAreaSize = std::max<std::size_t>(fixedAreaSize, fixed.offset + fixed.size);
+            continue;
+        }
+
+        if (std::holds_alternative<VarColumnStorage>(column.storage))
+        {
+            ++varColumnCount;
+
+            if (std::holds_alternative<std::monostate>(value))
+            {
+                continue;
+            }
+
+            if (column.type != DataType::Text || !std::holds_alternative<std::string>(value))
+            {
+                throw std::runtime_error("unsupported variable-length column value: " + column.name);
+            }
+
+            varDataSize += std::get<std::string>(value).size();
+            continue;
+        }
+
+        throw std::runtime_error("unknown column storage type");
+    }
+
+    return nullBitmapSize + fixedAreaSize + (varColumnCount * VarEntrySize) + varDataSize;
+}
 
 BitmapWriter::BitmapWriter(std::span<std::uint8_t> bytes)
     : bytes(bytes) {}
@@ -528,7 +500,7 @@ void DataPageWriter::write(const PageHeader &pageHeader, const std::vector<Row> 
 
     for (const Row &row : rows)
     {
-        std::size_t rowSize = computeRowSize(row.values);
+        std::size_t rowSize = RowWriter::computeSerializedRowSize(tableHeader, row.values);
 
         if (rowSize > std::numeric_limits<std::uint16_t>::max())
         {
@@ -571,11 +543,6 @@ void DataPageWriter::write(const PageHeader &pageHeader, const std::vector<Row> 
     headerWriter.setSlotCount(slotIndex);
     headerWriter.setFreeSpaceStart(freeStart);
     headerWriter.setFreeSpaceEnd(freeEnd);
-}
-
-std::size_t DataPageWriter::computeRowSize(const std::vector<Value> &values) const
-{
-    return computeSerializedRowSize(tableHeader, values);
 }
 
 RawPage encodeHeaderPage(const PageHeader &pageHeader, const HeaderPage &headerPage)
@@ -632,25 +599,6 @@ RawPage encodePage(const Page &page)
     throw std::runtime_error("encoding data pages requires table header; use encodeDataPage");
 }
 
-std::uint16_t calculateFreeSpaceStart(const PageHeader &pageHeader)
-{
-    std::size_t freeSpaceStart =
-        PageHeaderLayout::Size +
-        encodedSlotSize() * static_cast<std::size_t>(pageHeader.slotCount);
-
-    if (freeSpaceStart > PAGE_SIZE)
-    {
-        throw std::runtime_error("Slots exceed page size");
-    }
-
-    if (freeSpaceStart > std::numeric_limits<std::uint16_t>::max())
-    {
-        throw std::runtime_error("freeSpaceStart too large for uint16_t");
-    }
-
-    return static_cast<std::uint16_t>(freeSpaceStart);
-}
-
 std::size_t encodedSlotSize()
 {
     return SlotWriter::SlotSize;
@@ -658,96 +606,5 @@ std::size_t encodedSlotSize()
 
 std::size_t encodedRowSize(const HeaderPage &tableHeader, const Row &row)
 {
-    return computeSerializedRowSize(tableHeader, row.values);
-}
-
-void writePageHeader(std::vector<std::byte> &buffer, const PageHeader &header)
-{
-    appendUnsigned<std::uint32_t>(buffer, header.pageId);
-    appendUnsigned<std::uint8_t>(buffer, static_cast<std::uint8_t>(header.pageType));
-    appendUnsigned<std::uint8_t>(buffer, 0);
-    appendUnsigned<std::uint16_t>(buffer, header.slotCount);
-    appendUnsigned<std::uint16_t>(buffer, header.freeSpaceStart);
-    appendUnsigned<std::uint16_t>(buffer, header.freeSpaceEnd);
-    appendUnsigned<std::uint32_t>(buffer, header.nextPageId);
-}
-
-void writeHeaderPage(std::vector<std::byte> &buffer, const HeaderPage &header)
-{
-    appendString(buffer, header.magic);
-    appendUnsigned<std::uint16_t>(buffer, header.version);
-    appendUnsigned<std::uint32_t>(buffer, header.pageSize);
-    appendString(buffer, header.tableName);
-    appendUnsigned<std::uint32_t>(buffer, static_cast<std::uint32_t>(header.columns.size()));
-
-    for (const Column &column : header.columns)
-    {
-        appendString(buffer, column.name);
-        appendUnsigned<std::uint8_t>(buffer, static_cast<std::uint8_t>(column.type));
-        appendUnsigned<std::uint8_t>(buffer, column.nullable ? 1 : 0);
-        appendUnsigned<std::uint32_t>(buffer, column.columnIndex);
-
-        if (std::holds_alternative<FixedColumnStorage>(column.storage))
-        {
-            const FixedColumnStorage &fixed = std::get<FixedColumnStorage>(column.storage);
-            appendUnsigned<std::uint8_t>(buffer, static_cast<std::uint8_t>(ColumnStorageKind::Fixed));
-            appendUnsigned<std::uint32_t>(buffer, fixed.offset);
-            appendUnsigned<std::uint32_t>(buffer, fixed.size);
-        }
-        else if (std::holds_alternative<VarColumnStorage>(column.storage))
-        {
-            const VarColumnStorage &var = std::get<VarColumnStorage>(column.storage);
-            appendUnsigned<std::uint8_t>(buffer, static_cast<std::uint8_t>(ColumnStorageKind::Variable));
-            appendUnsigned<std::uint32_t>(buffer, var.varIndex);
-        }
-        else
-        {
-            throw std::runtime_error("Unknown column storage type");
-        }
-    }
-
-    appendUnsigned<std::uint64_t>(buffer, header.totalRowCount);
-    appendUnsigned<std::uint32_t>(buffer, header.firstDataPageId);
-    appendUnsigned<std::uint32_t>(buffer, header.lastDataPageId);
-    appendUnsigned<std::uint32_t>(buffer, header.nextUnusedPageId);
-}
-
-void writeSlot(std::vector<std::byte> &buffer, const Slot &slot)
-{
-    appendUnsigned<std::uint16_t>(buffer, slot.offset);
-    appendUnsigned<std::uint16_t>(buffer, slot.size);
-    appendUnsigned<std::uint16_t>(buffer, slot.flags);
-}
-
-std::size_t encodedRowSize(const Row &row)
-{
-    return encodeRowPayload(row).size();
-}
-
-std::vector<std::byte> encodeRowPayload(const Row &row)
-{
-    std::vector<std::byte> buffer;
-    appendUnsigned<std::uint32_t>(buffer, static_cast<std::uint32_t>(row.values.size()));
-
-    for (const Value &value : row.values)
-    {
-        if (std::holds_alternative<std::monostate>(value))
-        {
-            appendUnsigned<std::uint8_t>(buffer, static_cast<std::uint8_t>(DataType::Null));
-        }
-        else if (std::holds_alternative<int>(value))
-        {
-            appendUnsigned<std::uint8_t>(buffer, static_cast<std::uint8_t>(DataType::Int));
-            appendUnsigned<std::uint32_t>(
-                buffer,
-                static_cast<std::uint32_t>(std::get<int>(value)));
-        }
-        else if (std::holds_alternative<std::string>(value))
-        {
-            appendUnsigned<std::uint8_t>(buffer, static_cast<std::uint8_t>(DataType::Text));
-            appendString(buffer, std::get<std::string>(value));
-        }
-    }
-
-    return buffer;
+    return RowWriter::computeSerializedRowSize(tableHeader, row.values);
 }

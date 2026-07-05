@@ -45,8 +45,8 @@ struct Column
     std::string name;
     DataType type;
     bool nullable;
-    uint32_t columnIndex;
-    ColumnStorage storage;
+    uint32_t columnIndex = 0;
+    ColumnStorage storage = FixedColumnStorage{.offset = 0, .size = 0};
 };
 
 struct Row
@@ -173,4 +173,52 @@ struct FreePageHeader
     std::uint32_t nextFreePage; // linked list
 };
 
-using RawPage = std::array<std::byte, PAGE_SIZE>;
+struct RawPage
+{
+    std::array<std::byte, PAGE_SIZE> bytes{};
+
+    constexpr std::size_t size() const noexcept
+    {
+        return bytes.size();
+    }
+
+    std::byte *data() noexcept
+    {
+        return bytes.data();
+    }
+
+    const std::byte *data() const noexcept
+    {
+        return bytes.data();
+    }
+
+    auto begin() noexcept
+    {
+        return bytes.begin();
+    }
+
+    auto begin() const noexcept
+    {
+        return bytes.begin();
+    }
+
+    auto end() noexcept
+    {
+        return bytes.end();
+    }
+
+    auto end() const noexcept
+    {
+        return bytes.end();
+    }
+
+    std::byte &operator[](std::size_t index)
+    {
+        return bytes[index];
+    }
+
+    const std::byte &operator[](std::size_t index) const
+    {
+        return bytes[index];
+    }
+};

@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <format>
+#include <limits>
 #include <cmath>
 #include "db_write.h"
 #include "db_storage.h"
@@ -142,6 +143,74 @@ RowValidationResult validateRowAgainstSchema(const std::vector<Column> &columns,
         .message = ""};
 }
 
+std::vector<Column> buildStoredColumns(const std::vector<Column> &columns)
+{
+    std::vector<Column> storedColumns;
+    storedColumns.reserve(columns.size());
+
+    std::uint32_t fixedOffset = 0;
+    std::uint32_t varIndex = 0;
+
+    for (std::size_t i = 0; i < columns.size(); ++i)
+    {
+        Column column = columns[i];
+        column.columnIndex = static_cast<std::uint32_t>(i);
+
+        switch (column.type)
+        {
+        case DataType::Int:
+            column.storage = FixedColumnStorage{
+                .offset = fixedOffset,
+                .size = static_cast<std::uint32_t>(sizeof(std::int32_t))};
+            fixedOffset += static_cast<std::uint32_t>(sizeof(std::int32_t));
+            break;
+
+        case DataType::Text:
+            column.storage = VarColumnStorage{.varIndex = varIndex};
+            ++varIndex;
+            break;
+
+        case DataType::Null:
+            column.storage = FixedColumnStorage{
+                .offset = fixedOffset,
+                .size = 0};
+            break;
+
+        default:
+            throw std::runtime_error("Unsupported column type in table schema");
+        }
+
+        storedColumns.push_back(std::move(column));
+    }
+
+    return storedColumns;
+}
+
+std::uint16_t calculateHeaderFreeSpaceStart(
+    const PageHeader &pageHeader,
+    const HeaderPage &headerPage)
+{
+    RawPage rawPage{};
+    PageWriter writer(rawPage);
+
+    PageHeaderWriter pageHeaderWriter(writer);
+    pageHeaderWriter.write(pageHeader);
+
+    writer.seek(PageHeaderLayout::Size);
+
+    HeaderPageWriter headerPageWriter(writer);
+    headerPageWriter.write(headerPage);
+
+    std::size_t freeSpaceStart = writer.position();
+
+    if (freeSpaceStart > std::numeric_limits<std::uint16_t>::max())
+    {
+        throw std::runtime_error("Header page freeSpaceStart too large for uint16_t");
+    }
+
+    return static_cast<std::uint16_t>(freeSpaceStart);
+}
+
 Page makeEmptyDataPage(uint32_t pageId)
 {
     DataPage dataPage{
@@ -152,11 +221,9 @@ Page makeEmptyDataPage(uint32_t pageId)
         .pageId = pageId,
         .pageType = PageType::DataPage,
         .slotCount = 0,
-        .freeSpaceStart = 0,
+        .freeSpaceStart = static_cast<uint16_t>(PageHeaderLayout::Size),
         .freeSpaceEnd = static_cast<uint16_t>(PAGE_SIZE),
         .nextPageId = 0};
-
-    pageHeader.freeSpaceStart = calculateFreeSpaceStart(pageHeader);
 
     return Page{
         .header = pageHeader,
@@ -178,29 +245,13 @@ Page makeHeaderPage(const std::string &name, const std::string &magic, const std
         .version = uint16_t{1},
         .pageSize = PAGE_SIZE,
         .tableName = name,
-        .columns = columns,
+        .columns = buildStoredColumns(columns),
         .totalRowCount = uint64_t{0},
         .firstDataPageId = uint32_t{0},
         .lastDataPageId = uint32_t{0},
-        .nextUnusedPageId = uint32_t{1}
+        .nextUnusedPageId = uint32_t{1}};
 
-    };
-
-    std::vector<std::byte> buffer;
-    writePageHeader(buffer, pageHeader);
-    writeHeaderPage(buffer, tableHeader);
-
-    if (buffer.size() > PAGE_SIZE)
-    {
-        throw std::runtime_error("Header page is larger than PAGE_SIZE");
-    }
-
-    if (buffer.size() > std::numeric_limits<uint16_t>::max())
-    {
-        throw std::runtime_error("Header page freeSpaceStart too large for uint16_t");
-    }
-
-    pageHeader.freeSpaceStart = static_cast<uint16_t>(buffer.size());
+    pageHeader.freeSpaceStart = calculateHeaderFreeSpaceStart(pageHeader, tableHeader);
 
     return Page{.header = pageHeader, .data = tableHeader};
 }
@@ -222,7 +273,7 @@ public:
             return it->second.page;
         }
 
-        RawPage rawPage = readPageFromFile(path, pageId);
+        RawPage rawPage = ::readPageFromFile(path, pageId);
         Page decodedPage = reader(rawPage);
 
         auto [insertedIt, inserted] = pages.emplace(
@@ -265,9 +316,8 @@ public:
                 throw std::runtime_error(validation.message);
             }
 
-            Page &dPage = getPage(curPageId, [&headerPage](const RawPage &rawPage) {
-                return decodeDataPage(rawPage, headerPage);
-            });
+            Page &dPage = getPage(curPageId, [&headerPage](const RawPage &rawPage)
+                                  { return decodeDataPage(rawPage, headerPage); });
             if (enoughSpaceForInsertCheck(dPage, encodedRowSize(headerPage, row)))
             {
                 appendRowToExistingDataPage(hPage, dPage, row);
@@ -279,9 +329,7 @@ public:
             }
             else
             {
-                curPageId = headerPage.nextUnusedPageId;
-
-                createDataPage(hPage);
+                curPageId = createDataPage(hPage);
             }
         }
     }
@@ -384,7 +432,7 @@ private:
 
     void writePageToFile(
         uint32_t pageId,
-        const std::array<std::byte, PAGE_SIZE> &pageData)
+        const RawPage &pageData)
     {
         std::fstream file{openOrCreateFile(path)};
         if (!file)
@@ -402,32 +450,6 @@ private:
         std::cout << "Page written\n";
     };
 
-    RawPage readPageFromFile(
-        const std::filesystem::path &tablePath,
-        uint32_t pageId)
-    {
-        RawPage page{};
-
-        std::ifstream file{tablePath, std::ios::binary};
-
-        if (!file)
-        {
-            throw std::runtime_error("Failed to open file: " + tablePath.string());
-        }
-
-        file.seekg(static_cast<std::streamoff>(pageId) * PAGE_SIZE);
-
-        file.read(
-            reinterpret_cast<char *>(page.data()),
-            static_cast<std::streamsize>(page.size()));
-
-        if (!file)
-        {
-            throw std::runtime_error("Failed to read page " + std::to_string(pageId));
-        }
-
-        return page;
-    }
     void appendRowToExistingDataPage(
         Page &hPage,
         Page &dPage,
@@ -454,17 +476,8 @@ private:
         const uint16_t rowSize = static_cast<uint16_t>(encodedSize);
         const size_t slotSize = encodedSlotSize();
 
-        // Make sure freeSpaceStart is up to date before checking space.
         dataPageHeader.slotCount =
             static_cast<uint16_t>(dataPage.slots.size());
-
-        dataPageHeader.freeSpaceStart =
-            calculateFreeSpaceStart(dataPageHeader);
-
-        if (rowSize > std::numeric_limits<uint16_t>::max())
-        {
-            throw std::runtime_error("Row too large for slot size");
-        }
 
         bool newSlot = true;
         if (!dataPage.slots.empty())
@@ -475,7 +488,7 @@ private:
 
                 if (slot.has(SlotFlag::Deleted) && slot.size >= rowSize)
                 {
-                    slot.set(SlotFlag::Deleted);
+                    slot.clear(SlotFlag::Deleted);
                     slot.size = static_cast<uint16_t>(rowSize);
 
                     dataPage.rows.push_back(RowEntry{
@@ -509,13 +522,12 @@ private:
             }
 
             uint16_t rowOffset =
-                static_cast<uint16_t>(dataPageHeader.freeSpaceEnd - rowSize);
+                dataPageHeader.freeSpaceStart;
 
             Slot slot{
                 .offset = rowOffset,
                 .size = rowSize,
                 .flags = 0};
-            slot.set(SlotFlag::Deleted);
 
             dataPage.slots.push_back(slot);
             dataPage.rows.push_back(RowEntry{
@@ -523,20 +535,19 @@ private:
                 .row = rowToInsert,
             });
 
-            dataPageHeader.freeSpaceEnd = rowOffset;
+            dataPageHeader.freeSpaceStart =
+                static_cast<uint16_t>(dataPageHeader.freeSpaceStart + rowSize);
+            dataPageHeader.freeSpaceEnd =
+                static_cast<uint16_t>(dataPageHeader.freeSpaceEnd - slotSize);
             dataPageHeader.slotCount =
                 static_cast<uint16_t>(dataPage.slots.size());
-
-            dataPageHeader.freeSpaceStart =
-                calculateFreeSpaceStart(dataPageHeader);
         }
         headerPage.totalRowCount++;
 
-        setPage(dPage, dataPageHeader.pageId);
-
-        setPage(hPage, headerPageHeader.pageId);
+        markDirty(dataPageHeader.pageId);
+        markDirty(headerPageHeader.pageId);
     };
-    void createDataPage(
+    uint32_t createDataPage(
         Page &hPage)
     {
         if (hPage.header.pageType != PageType::HeaderPage)
@@ -546,20 +557,35 @@ private:
         HeaderPage &headerPage = std::get<HeaderPage>(hPage.data);
         PageHeader &headerPageHeader = hPage.header;
 
-        uint32_t newPageId = headerPage.lastDataPageId + 1;
+        uint32_t previousPageId = headerPage.lastDataPageId;
+        uint32_t newPageId = headerPage.nextUnusedPageId;
+
+        if (newPageId == 0)
+        {
+            newPageId = previousPageId + 1;
+        }
+
+        if (previousPageId != 0)
+        {
+            Page &previousPage = getPage(previousPageId, [&headerPage](const RawPage &rawPage)
+                                         { return decodeDataPage(rawPage, headerPage); });
+            previousPage.header.nextPageId = newPageId;
+            markDirty(previousPageId);
+        }
+        else
+        {
+            headerPage.firstDataPageId = newPageId;
+        }
 
         Page newDataPage = makeEmptyDataPage(newPageId);
 
-        setPage(newDataPage, newPageId);
-
-        headerPage.firstDataPageId = newPageId;
         headerPage.lastDataPageId = newPageId;
         headerPage.nextUnusedPageId = newPageId + 1;
+        markDirty(headerPageHeader.pageId);
 
-        Page updatedHeaderPage = Page{.header = headerPageHeader, .data = headerPage};
-        setPage(updatedHeaderPage, headerPageHeader.pageId);
+        setPage(newDataPage, newPageId);
 
-        return;
+        return newPageId;
     };
     bool enoughSpaceForInsertCheck(const Page &page, size_t rowSize)
     {
@@ -691,9 +717,8 @@ private:
 
         while (pageId != 0)
         {
-            Page &dPage = bufferManager.getPage(pageId, [&headerPage](const RawPage &rawPage) {
-                return decodeDataPage(rawPage, headerPage);
-            });
+            Page &dPage = bufferManager.getPage(pageId, [&headerPage](const RawPage &rawPage)
+                                                { return decodeDataPage(rawPage, headerPage); });
             DataPage &dataPage = std::get<DataPage>(dPage.data);
 
             for (const RowEntry &entry : dataPage.rows)
