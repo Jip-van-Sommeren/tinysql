@@ -21,12 +21,6 @@ enum class DataType : uint8_t
     Text = 2
 };
 
-// struct Value
-// {
-//     DataType dataType;
-//     uint8_t isNull;
-//     ValueData value;
-// };
 struct FixedColumnStorage
 {
     uint32_t offset;
@@ -66,8 +60,6 @@ struct RowValidationResult
     std::optional<size_t> columnIndex;
     std::string message;
 };
-
-RowValidationResult validateRowAgainstSchema(const std::vector<Column> &columns, const Row &row);
 
 enum class PageType : uint8_t
 {
@@ -159,12 +151,6 @@ struct DataPage
     std::vector<Slot> slots;
     std::vector<RowEntry> rows;
 };
-
-// struct DataPage
-// {
-//     std::vector<Slot> slots;
-//     std::vector<Row> rows;
-// };
 
 using PageData = std::variant<HeaderPage, DataPage>;
 

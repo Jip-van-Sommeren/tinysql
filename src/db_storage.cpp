@@ -109,16 +109,15 @@ RowValidationResult validateRowAgainstSchema(const std::vector<Column> &columns,
                 columns.size())};
     }
 
-    for (size_t i = 0; i < columns.size(); ++i)
+    for (const Column &column : columns)
     {
-        const Column &column = columns[i];
-        const Value &value = row.values[i];
+        const Value &value = row.values[column.columnIndex];
 
         if (std::holds_alternative<std::monostate>(value) && !column.nullable)
         {
             return RowValidationResult{
                 .valid = false,
-                .columnIndex = i,
+                .columnIndex = column.columnIndex,
                 .message = std::format(
                     "column '{}' does not allow null values",
                     column.name)};
@@ -128,7 +127,7 @@ RowValidationResult validateRowAgainstSchema(const std::vector<Column> &columns,
         {
             return RowValidationResult{
                 .valid = false,
-                .columnIndex = i,
+                .columnIndex = column.columnIndex,
                 .message = std::format(
                     "column '{}' expects type '{}' but row value has type '{}'",
                     column.name,
@@ -151,7 +150,7 @@ Page makeEmptyDataPage(uint32_t pageId)
 
     PageHeader pageHeader{
         .pageId = pageId,
-        .pageType = PageType::Data,
+        .pageType = PageType::DataPage,
         .slotCount = 0,
         .freeSpaceStart = 0,
         .freeSpaceEnd = static_cast<uint16_t>(PAGE_SIZE),
@@ -168,7 +167,7 @@ Page makeHeaderPage(const std::string &name, const std::string &magic, const std
 {
     PageHeader pageHeader{
         .pageId = 0,
-        .pageType = PageType::TableHeader,
+        .pageType = PageType::HeaderPage,
         .slotCount = uint16_t{0},
         .freeSpaceStart = uint16_t{0},
         .freeSpaceEnd = static_cast<uint16_t>(PAGE_SIZE),
@@ -243,7 +242,7 @@ public:
 
     void insertAllRows(const std::vector<Row> &rows, Page &hPage)
     {
-        if (hPage.header.pageType != PageType::TableHeader)
+        if (hPage.header.pageType != PageType::HeaderPage)
         {
             throw std::runtime_error("No header page was passed");
         }
@@ -266,8 +265,10 @@ public:
                 throw std::runtime_error(validation.message);
             }
 
-            Page &dPage = getPage(curPageId, decodeDataPage);
-            if (enoughSpaceForInsertCheck(dPage, encodedRowSize(row)))
+            Page &dPage = getPage(curPageId, [&headerPage](const RawPage &rawPage) {
+                return decodeDataPage(rawPage, headerPage);
+            });
+            if (enoughSpaceForInsertCheck(dPage, encodedRowSize(headerPage, row)))
             {
                 appendRowToExistingDataPage(hPage, dPage, row);
                 rowIndex++;
@@ -294,7 +295,7 @@ public:
             return;
         }
 
-        RawPage encodedPage = encodePage(frame.page);
+        RawPage encodedPage = encodeCachedPage(frame.page);
 
         writePageToFile(pageId, encodedPage);
 
@@ -308,7 +309,7 @@ public:
             if (frame.dirty)
             {
                 RawPage encodedPage;
-                encodedPage = encodePage(frame.page);
+                encodedPage = encodeCachedPage(frame.page);
                 writePageToFile(pageId, encodedPage);
                 frame.dirty = false;
             }
@@ -326,7 +327,7 @@ public:
     void createHeaderPage(
         Page &hPage)
     {
-        if (hPage.header.pageType != PageType::TableHeader)
+        if (hPage.header.pageType != PageType::HeaderPage)
         {
             throw std::runtime_error("Incorrect page type passed");
         }
@@ -347,6 +348,40 @@ private:
     std::filesystem::path path;
     std::unordered_map<uint32_t, PageFrame> pages;
 
+    RawPage encodeCachedPage(const Page &page)
+    {
+        if (page.header.pageType == PageType::HeaderPage)
+        {
+            return encodePage(page);
+        }
+
+        if (page.header.pageType == PageType::DataPage)
+        {
+            auto headerIt = pages.find(0);
+            if (headerIt == pages.end())
+            {
+                throw std::runtime_error("Cannot encode data page without cached header page");
+            }
+
+            const HeaderPage &headerPage =
+                std::get<HeaderPage>(headerIt->second.page.data);
+
+            const DataPage &dataPage = std::get<DataPage>(page.data);
+
+            std::vector<Row> rows;
+            rows.reserve(dataPage.rows.size());
+
+            for (const RowEntry &entry : dataPage.rows)
+            {
+                rows.push_back(entry.row);
+            }
+
+            return encodeDataPage(page.header, headerPage, rows);
+        }
+
+        throw std::runtime_error("Unsupported page type while encoding cached page");
+    }
+
     void writePageToFile(
         uint32_t pageId,
         const std::array<std::byte, PAGE_SIZE> &pageData)
@@ -366,6 +401,33 @@ private:
 
         std::cout << "Page written\n";
     };
+
+    RawPage readPageFromFile(
+        const std::filesystem::path &tablePath,
+        uint32_t pageId)
+    {
+        RawPage page{};
+
+        std::ifstream file{tablePath, std::ios::binary};
+
+        if (!file)
+        {
+            throw std::runtime_error("Failed to open file: " + tablePath.string());
+        }
+
+        file.seekg(static_cast<std::streamoff>(pageId) * PAGE_SIZE);
+
+        file.read(
+            reinterpret_cast<char *>(page.data()),
+            static_cast<std::streamsize>(page.size()));
+
+        if (!file)
+        {
+            throw std::runtime_error("Failed to read page " + std::to_string(pageId));
+        }
+
+        return page;
+    }
     void appendRowToExistingDataPage(
         Page &hPage,
         Page &dPage,
@@ -377,19 +439,19 @@ private:
         DataPage &dataPage = std::get<DataPage>(dPage.data);
         PageHeader &dataPageHeader = dPage.header;
 
-        if (dataPageHeader.pageType != PageType::Data)
+        if (dataPageHeader.pageType != PageType::DataPage)
         {
             throw std::runtime_error("Page is not a data page");
         }
 
-        std::vector<std::byte> rowBuffer = encodeRowPayload(rowToInsert);
+        const std::size_t encodedSize = encodedRowSize(headerPage, rowToInsert);
 
-        if (rowBuffer.size() > std::numeric_limits<uint16_t>::max())
+        if (encodedSize > std::numeric_limits<uint16_t>::max())
         {
             throw std::runtime_error("Row is too large for uint16_t slot size");
         }
 
-        const uint16_t rowSize = static_cast<uint16_t>(rowBuffer.size());
+        const uint16_t rowSize = static_cast<uint16_t>(encodedSize);
         const size_t slotSize = encodedSlotSize();
 
         // Make sure freeSpaceStart is up to date before checking space.
@@ -411,9 +473,9 @@ private:
             {
                 Slot &slot = dataPage.slots[slotIndex];
 
-                if (slot.deleted && slot.size >= rowSize)
+                if (slot.has(SlotFlag::Deleted) && slot.size >= rowSize)
                 {
-                    slot.deleted = 0;
+                    slot.set(SlotFlag::Deleted);
                     slot.size = static_cast<uint16_t>(rowSize);
 
                     dataPage.rows.push_back(RowEntry{
@@ -452,7 +514,8 @@ private:
             Slot slot{
                 .offset = rowOffset,
                 .size = rowSize,
-                .deleted = 0};
+                .flags = 0};
+            slot.set(SlotFlag::Deleted);
 
             dataPage.slots.push_back(slot);
             dataPage.rows.push_back(RowEntry{
@@ -476,7 +539,7 @@ private:
     void createDataPage(
         Page &hPage)
     {
-        if (hPage.header.pageType != PageType::TableHeader)
+        if (hPage.header.pageType != PageType::HeaderPage)
         {
             throw std::runtime_error("Incorrect page type passed");
         }
@@ -500,7 +563,7 @@ private:
     };
     bool enoughSpaceForInsertCheck(const Page &page, size_t rowSize)
     {
-        if (page.header.pageType != PageType::Data)
+        if (page.header.pageType != PageType::DataPage)
         {
             throw std::runtime_error("Invalid page type for insert space check");
         }
@@ -527,7 +590,7 @@ private:
 
         for (const Slot &slot : dataPage.slots)
         {
-            if (slot.deleted && slot.size >= rowSize)
+            if (slot.has(SlotFlag::Deleted) && slot.size >= rowSize)
             {
                 return true;
             }
@@ -612,7 +675,7 @@ private:
     {
         Page &hPage = bufferManager.getPage(0, decodeHeaderPage);
 
-        if (hPage.header.pageType != PageType::TableHeader)
+        if (hPage.header.pageType != PageType::HeaderPage)
         {
             throw std::runtime_error("Page 0 is not a table header page");
         }
@@ -628,7 +691,9 @@ private:
 
         while (pageId != 0)
         {
-            Page &dPage = bufferManager.getPage(pageId, decodeDataPage);
+            Page &dPage = bufferManager.getPage(pageId, [&headerPage](const RawPage &rawPage) {
+                return decodeDataPage(rawPage, headerPage);
+            });
             DataPage &dataPage = std::get<DataPage>(dPage.data);
 
             for (const RowEntry &entry : dataPage.rows)
