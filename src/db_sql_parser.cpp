@@ -112,8 +112,189 @@ std::unique_ptr<Statement> Parser::parseStatement()
     {
         return parseUpdateStatement();
     }
+    if (checkKeyword("CREATE"))
+    {
+        return parseCreateTableStatement();
+    }
 
     throw std::runtime_error("Expected SQL statement, got: " + peek().text);
+}
+std::unique_ptr<CreateTableStatement> Parser::parseCreateTableStatement(){
+    expectKeyword("CREATE");
+    expectKeyword("TABLE");
+    auto tableNameToken = expect(TokenType::Identifier);
+    std::string tableName = std::move(tableNameToken.text);
+
+    auto columns = parseColumnDefinitions();
+    finishStatement();
+    return std::make_unique<CreateTableStatement>(
+        std::move(tableName),
+        std::move(columns));
+}
+
+std::vector<std::unique_ptr<ColumnDefExpr>> Parser::parseColumnDefinitions(){
+    std::vector<std::unique_ptr<ColumnDefExpr>> items;
+
+    items.push_back(parseColumnDefinition());
+
+    while (match(TokenType::Comma))
+    {
+        items.push_back(parseColumnDefinition());
+    }
+
+    return items;
+}
+
+std::unique_ptr<ColumnDefExpr> Parser::parseColumnDefinition(){
+    Token columnNameToken = expect(TokenType::Identifier);
+    std::string columnName = std::move(columnNameToken.text);
+
+    auto dataType = parseDataType();
+
+    std::vector<std::unique_ptr<ConstraintExpr>> constraints;
+    if (isColumnConstraintStart())
+    {
+        constraints = parseColumnConstraints();
+        
+    }
+
+    return std::make_unique<ColumnDefExpr>(
+        std::move(columnName),
+        std::move(dataType),
+        std::move(constraints));
+}
+
+std::unique_ptr<DataTypeExpr> Parser::parseDataType(){
+    Token dataTypeToken = expect(TokenType::Keyword);
+    std::string dataTypeName = std::move(dataTypeToken.text);
+
+    std::unique_ptr<Expr> length = nullptr;
+    if (match(TokenType::LeftParen))
+    {
+        length = parseExpression();
+        expect(TokenType::RightParen);
+    }
+
+    return std::make_unique<DataTypeExpr>(
+        std::move(dataTypeName),
+        std::move(length));
+}
+
+std::vector<std::unique_ptr<ConstraintExpr>>
+Parser::parseColumnConstraints()
+{
+    std::vector<std::unique_ptr<ConstraintExpr>> constraints;
+
+    while (
+        isColumnConstraintStart()
+    )
+    {
+        constraints.push_back(parseConstraint());
+    }
+
+    return constraints;
+}
+
+bool Parser::isColumnConstraintStart() const
+{
+    return checkKeyword("CONSTRAINT") ||
+           checkKeyword("DEFAULT") ||
+           checkKeyword("PRIMARY") ||
+           checkKeyword("NOT") ||
+           checkKeyword("UNIQUE") ||
+           checkKeyword("NULL") ||
+           checkKeyword("CHECK") ||
+           checkKeyword("REFERENCES");
+}
+
+bool Parser::isTableConstraintStart() const
+{
+    return checkKeyword("CONSTRAINT") ||
+           checkKeyword("PRIMARY") ||
+           checkKeyword("FOREIGN") ||
+           checkKeyword("UNIQUE") ||
+           checkKeyword("CHECK");
+}
+
+std::unique_ptr<ConstraintExpr> Parser::parseConstraint()
+{
+    std::optional<std::string> name;
+
+    if (matchKeyword("CONSTRAINT"))
+    {
+        name = parseIdentifier();
+    }
+
+    auto constraint = parseConstraintBody();
+    constraint->constraintName = std::move(name);
+
+    return constraint;
+}
+
+
+std::unique_ptr<ConstraintExpr> Parser::parseConstraintBody()
+{
+    if (matchKeyword("DEFAULT"))
+    {
+        return std::make_unique<ConstraintExpr>(
+            ConstraintType::Default,
+            parseExpression()
+        );
+    }
+
+    if (matchKeyword("PRIMARY"))
+    {
+        expectKeyword("KEY");
+
+        return std::make_unique<ConstraintExpr>(
+            ConstraintType::PrimaryKey,
+            nullptr
+        );
+    }
+
+    if (matchKeyword("NOT"))
+    {
+        expectKeyword("NULL");
+
+        return std::make_unique<ConstraintExpr>(
+            ConstraintType::NotNull,
+            nullptr
+        );
+    }
+
+    if (matchKeyword("UNIQUE"))
+    {
+        return std::make_unique<ConstraintExpr>(
+            ConstraintType::Unique,
+            nullptr
+        );
+    }
+
+    if (matchKeyword("NULL"))
+    {
+        return std::make_unique<ConstraintExpr>(
+            ConstraintType::Null,
+            nullptr
+        );
+    }
+
+    if (matchKeyword("CHECK"))
+    {
+        expect(TokenType::LeftParen);
+
+        auto condition = parseExpression();
+
+        expect(TokenType::RightParen);
+
+        return std::make_unique<ConstraintExpr>(
+            ConstraintType::Check,
+            std::move(condition)
+        );
+    }
+
+    throw ParserError(
+        "Expected column constraint, found: " + peek().text
+    );
 }
 
 std::unique_ptr<SelectStatement> Parser::parseSelectStatement()

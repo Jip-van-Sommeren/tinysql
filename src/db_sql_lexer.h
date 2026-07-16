@@ -50,4 +50,5 @@ private:
     Token readOperator();
     bool isOperatorStart(char c) const;
     bool isKeyword(const std::string &word) const;
+    bool isDataTypeKeyword(const std::string &word) const;
 };

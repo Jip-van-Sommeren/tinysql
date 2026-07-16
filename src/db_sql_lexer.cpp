@@ -196,6 +196,8 @@ bool Lexer::isKeyword(const std::string &word) const
            word == "UPDATE" ||
            word == "SET" ||
            word == "DELETE" ||
+           word == "CREATE" ||
+           word == "TABLE" ||
            word == "NULL" ||
            word == "AND" ||
            word == "IS" ||
@@ -209,4 +211,14 @@ bool Lexer::isKeyword(const std::string &word) const
            word == "FULL" ||
            word == "JOIN" ||
            word == "OR";
+}
+
+
+bool Lexer::isDataTypeKeyword(const std::string &word) const
+{
+    return word == "INT" ||
+           word == "VARCHAR" ||
+           word == "TEXT" ||
+           word == "DATE" ||
+           word == "BOOLEAN";
 }
