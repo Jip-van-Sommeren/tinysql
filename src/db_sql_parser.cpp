@@ -3,6 +3,44 @@
 #include <stdexcept>
 #include <utility>
 
+namespace
+{
+    DataTypeDef dataTypeDefFromKeyword(const std::string &keyword)
+    {
+        if (keyword == "INT")
+        {
+            return DataTypeDef::Int;
+        }
+
+        if (keyword == "VARCHAR" || keyword == "TEXT")
+        {
+            return DataTypeDef::Varchar;
+        }
+
+        if (keyword == "DATE")
+        {
+            return DataTypeDef::Date;
+        }
+
+        if (keyword == "DOUBLE")
+        {
+            return DataTypeDef::Double;
+        }
+
+        if (keyword == "BOOLEAN")
+        {
+            return DataTypeDef::Boolean;
+        }
+
+        if (keyword == "NULL")
+        {
+            return DataTypeDef::Null;
+        }
+
+        throw std::runtime_error("Unknown data type: " + keyword);
+    }
+}
+
 ColumnExpr::ColumnExpr(std::vector<std::string> parts)
     : parts(std::move(parts)) {}
 
@@ -36,6 +74,20 @@ ArithmeticExpr::ArithmeticExpr(
       left(std::move(left)),
       right(std::move(right)) {}
 
+DataTypeExpr::DataTypeExpr(
+    DataTypeDef type,
+    std::vector<std::unique_ptr<Expr>> typeArguments)
+    : type(type),
+      typeArguments(std::move(typeArguments)) {}
+
+ColumnDefExpr::ColumnDefExpr(
+    std::string columnName,
+    std::unique_ptr<DataTypeExpr> dataType,
+    std::vector<std::unique_ptr<ConstraintExpr>> constraints)
+    : columnName(std::move(columnName)),
+      dataType(std::move(dataType)),
+      constraints(std::move(constraints)) {}
+
 QualifiedWildcardSelectItem::QualifiedWildcardSelectItem(std::vector<std::string> qualifierParts)
     : qualifierParts(std::move(qualifierParts)) {}
 
@@ -68,6 +120,13 @@ DeleteStatement::DeleteStatement(
     std::unique_ptr<Expr> where)
     : from(std::move(from)),
       where(std::move(where)) {}
+
+CreateTableStatement::CreateTableStatement(
+    std::string tableName,
+    std::vector<std::unique_ptr<ColumnDefExpr>> columns)
+    : tableName(std::move(tableName)),
+      columns(std::move(columns)),
+      constraints() {}
 
 InsertStatement::InsertStatement(
     std::string tableName,
@@ -119,7 +178,8 @@ std::unique_ptr<Statement> Parser::parseStatement()
 
     throw std::runtime_error("Expected SQL statement, got: " + peek().text);
 }
-std::unique_ptr<CreateTableStatement> Parser::parseCreateTableStatement(){
+std::unique_ptr<CreateTableStatement> Parser::parseCreateTableStatement()
+{
     expectKeyword("CREATE");
     expectKeyword("TABLE");
     auto tableNameToken = expect(TokenType::Identifier);
@@ -132,7 +192,8 @@ std::unique_ptr<CreateTableStatement> Parser::parseCreateTableStatement(){
         std::move(columns));
 }
 
-std::vector<std::unique_ptr<ColumnDefExpr>> Parser::parseColumnDefinitions(){
+std::vector<std::unique_ptr<ColumnDefExpr>> Parser::parseColumnDefinitions()
+{
     std::vector<std::unique_ptr<ColumnDefExpr>> items;
 
     items.push_back(parseColumnDefinition());
@@ -145,7 +206,8 @@ std::vector<std::unique_ptr<ColumnDefExpr>> Parser::parseColumnDefinitions(){
     return items;
 }
 
-std::unique_ptr<ColumnDefExpr> Parser::parseColumnDefinition(){
+std::unique_ptr<ColumnDefExpr> Parser::parseColumnDefinition()
+{
     Token columnNameToken = expect(TokenType::Identifier);
     std::string columnName = std::move(columnNameToken.text);
 
@@ -155,7 +217,6 @@ std::unique_ptr<ColumnDefExpr> Parser::parseColumnDefinition(){
     if (isColumnConstraintStart())
     {
         constraints = parseColumnConstraints();
-        
     }
 
     return std::make_unique<ColumnDefExpr>(
@@ -164,20 +225,27 @@ std::unique_ptr<ColumnDefExpr> Parser::parseColumnDefinition(){
         std::move(constraints));
 }
 
-std::unique_ptr<DataTypeExpr> Parser::parseDataType(){
+std::unique_ptr<DataTypeExpr> Parser::parseDataType()
+{
     Token dataTypeToken = expect(TokenType::Keyword);
-    std::string dataTypeName = std::move(dataTypeToken.text);
+    DataTypeDef type = dataTypeDefFromKeyword(dataTypeToken.text);
 
-    std::unique_ptr<Expr> length = nullptr;
+    std::vector<std::unique_ptr<Expr>> typeArguments;
     if (match(TokenType::LeftParen))
     {
-        length = parseExpression();
+        typeArguments.push_back(parseExpression());
+
+        while (match(TokenType::Comma))
+        {
+            typeArguments.push_back(parseExpression());
+        }
+
         expect(TokenType::RightParen);
     }
 
     return std::make_unique<DataTypeExpr>(
-        std::move(dataTypeName),
-        std::move(length));
+        type,
+        std::move(typeArguments));
 }
 
 std::vector<std::unique_ptr<ConstraintExpr>>
@@ -186,8 +254,7 @@ Parser::parseColumnConstraints()
     std::vector<std::unique_ptr<ConstraintExpr>> constraints;
 
     while (
-        isColumnConstraintStart()
-    )
+        isColumnConstraintStart())
     {
         constraints.push_back(parseConstraint());
     }
@@ -231,15 +298,12 @@ std::unique_ptr<ConstraintExpr> Parser::parseConstraint()
     return constraint;
 }
 
-
 std::unique_ptr<ConstraintExpr> Parser::parseConstraintBody()
 {
     if (matchKeyword("DEFAULT"))
     {
-        return std::make_unique<ConstraintExpr>(
-            ConstraintType::Default,
-            parseExpression()
-        );
+        return std::make_unique<DefaultConstraintExpr>(
+            parseExpression());
     }
 
     if (matchKeyword("PRIMARY"))
@@ -247,9 +311,7 @@ std::unique_ptr<ConstraintExpr> Parser::parseConstraintBody()
         expectKeyword("KEY");
 
         return std::make_unique<ConstraintExpr>(
-            ConstraintType::PrimaryKey,
-            nullptr
-        );
+            ConstraintType::PrimaryKey);
     }
 
     if (matchKeyword("NOT"))
@@ -257,25 +319,19 @@ std::unique_ptr<ConstraintExpr> Parser::parseConstraintBody()
         expectKeyword("NULL");
 
         return std::make_unique<ConstraintExpr>(
-            ConstraintType::NotNull,
-            nullptr
-        );
+            ConstraintType::NotNull);
     }
 
     if (matchKeyword("UNIQUE"))
     {
         return std::make_unique<ConstraintExpr>(
-            ConstraintType::Unique,
-            nullptr
-        );
+            ConstraintType::Unique);
     }
 
     if (matchKeyword("NULL"))
     {
         return std::make_unique<ConstraintExpr>(
-            ConstraintType::Null,
-            nullptr
-        );
+            ConstraintType::Null);
     }
 
     if (matchKeyword("CHECK"))
@@ -286,15 +342,12 @@ std::unique_ptr<ConstraintExpr> Parser::parseConstraintBody()
 
         expect(TokenType::RightParen);
 
-        return std::make_unique<ConstraintExpr>(
-            ConstraintType::Check,
-            std::move(condition)
-        );
+        return std::make_unique<CheckConstraintExpr>(
+            std::move(condition));
     }
 
-    throw ParserError(
-        "Expected column constraint, found: " + peek().text
-    );
+    throw std::runtime_error(
+        "Expected column constraint, found: " + peek().text);
 }
 
 std::unique_ptr<SelectStatement> Parser::parseSelectStatement()
@@ -499,6 +552,13 @@ std::unique_ptr<Expr> Parser::parseOptionalWhere()
     }
 
     return nullptr;
+}
+
+std::string Parser::parseIdentifier()
+{
+
+    Token name = expect(TokenType::Identifier);
+    return std::string{std::move(name.text)};
 }
 
 std::vector<std::string> Parser::parseIdentifierParts()
@@ -733,6 +793,15 @@ bool Parser::isArithmeticOperator(const Token &token)
 std::unique_ptr<Expr> Parser::parseComparison()
 {
     auto left = parsePrimary();
+    if (matchKeyword("IS"))
+    {
+        bool negated = matchKeyword("NOT");
+        expectKeyword("NULL");
+
+        return std::make_unique<IsNullExpr>(
+            std::move(left),
+            negated);
+    }
 
     if (isComparisonOperator(peek()))
     {

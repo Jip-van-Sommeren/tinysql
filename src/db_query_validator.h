@@ -32,12 +32,24 @@ struct BoundColumnExpr : BoundExpr
 {
     std::uint32_t columnIndex;
     DataType type;
+
+    BoundColumnExpr(std::uint32_t columnIndex, DataType type)
+        : columnIndex(columnIndex),
+          type(type)
+    {
+    }
 };
 
 struct BoundLiteralExpr : BoundExpr
 {
     Value value;
     DataType type;
+
+    BoundLiteralExpr(Value value, DataType type)
+        : value(std::move(value)),
+          type(type)
+    {
+    }
 };
 
 struct BoundComparisonExpr : BoundExpr
@@ -45,6 +57,16 @@ struct BoundComparisonExpr : BoundExpr
     ComparisonOp op;
     std::unique_ptr<BoundExpr> left;
     std::unique_ptr<BoundExpr> right;
+
+    BoundComparisonExpr(
+        ComparisonOp op,
+        std::unique_ptr<BoundExpr> left,
+        std::unique_ptr<BoundExpr> right)
+        : op(op),
+          left(std::move(left)),
+          right(std::move(right))
+    {
+    }
 };
 
 struct BoundLogicalExpr : BoundExpr
@@ -52,6 +74,28 @@ struct BoundLogicalExpr : BoundExpr
     LogicalOp op;
     std::unique_ptr<BoundExpr> left;
     std::unique_ptr<BoundExpr> right;
+
+    BoundLogicalExpr(
+        LogicalOp op,
+        std::unique_ptr<BoundExpr> left,
+        std::unique_ptr<BoundExpr> right)
+        : op(op),
+          left(std::move(left)),
+          right(std::move(right))
+    {
+    }
+};
+
+struct BoundIsNullExpr : BoundExpr
+{
+    std::unique_ptr<BoundExpr> operand;
+    bool negated;
+
+    BoundIsNullExpr(std::unique_ptr<BoundExpr> operand, bool negated)
+        : operand(std::move(operand)),
+          negated(negated)
+    {
+    }
 };
 
 struct BoundInsert

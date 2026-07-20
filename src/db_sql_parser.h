@@ -4,7 +4,9 @@
 
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 struct Expr
@@ -107,17 +109,16 @@ struct ArithmeticExpr : Expr
         std::unique_ptr<Expr> right);
 };
 
-struct ColumnDefExpr : Expr
+struct IsNullExpr : Expr
 {
-    std::string columnName;
-    std::unique_ptr<DataTypeExpr> dataType;
-    std::vector<std::unique_ptr<ConstraintExpr>> constraints;
+    std::unique_ptr<Expr> operand;
+    bool negated; // false = IS NULL, true = IS NOT NULL
 
-    ColumnDefExpr(
-        std::string columnName,
-        std::unique_ptr<DataTypeExpr> dataType,
-        std::vector<std::unique_ptr<ConstraintExpr>> constraints
-    );
+    IsNullExpr(std::unique_ptr<Expr> operand, bool negated)
+        : operand(std::move(operand)),
+          negated(negated)
+    {
+    }
 };
 
 enum class ConstraintType
@@ -127,6 +128,7 @@ enum class ConstraintType
     Unique,
     NotNull,
     Null,
+    Default,
     Check
 };
 struct ConstraintExpr : Expr
@@ -169,8 +171,7 @@ struct ForeignKeyConstraintExpr : ConstraintExpr
 
     ForeignKeyConstraintExpr(
         std::string referencedTable,
-        std::vector<std::string> referencedColumns
-    )
+        std::vector<std::string> referencedColumns)
         : ConstraintExpr(ConstraintType::ForeignKey),
           referencedTable(std::move(referencedTable)),
           referencedColumns(std::move(referencedColumns))
@@ -185,8 +186,19 @@ struct DataTypeExpr : Expr
 
     explicit DataTypeExpr(
         DataTypeDef type,
-        std::vector<std::unique_ptr<Expr>> typeArguments = {}
-    );
+        std::vector<std::unique_ptr<Expr>> typeArguments = {});
+};
+
+struct ColumnDefExpr : Expr
+{
+    std::string columnName;
+    std::unique_ptr<DataTypeExpr> dataType;
+    std::vector<std::unique_ptr<ConstraintExpr>> constraints;
+
+    ColumnDefExpr(
+        std::string columnName,
+        std::unique_ptr<DataTypeExpr> dataType,
+        std::vector<std::unique_ptr<ConstraintExpr>> constraints);
 };
 
 struct SelectItem
@@ -277,12 +289,12 @@ struct DeleteStatement : Statement
 struct CreateTableStatement : Statement
 {
     std::string tableName;
-    std::vector<std::unique_ptr<ColumnDefExpr>> columns; // column name and data type
+    std::vector<std::unique_ptr<ColumnDefExpr>> columns;      // column name and data type
     std::vector<std::unique_ptr<ConstraintExpr>> constraints; // foreign key references, etc. column level constraint in columndefexpr
 
     CreateTableStatement(
         std::string tableName,
-        std::vector<std::unique_ptr<Expr>> columns);
+        std::vector<std::unique_ptr<ColumnDefExpr>> columns);
 };
 
 struct InsertStatement : Statement
@@ -329,7 +341,7 @@ public:
     std::unique_ptr<DeleteStatement> parseDeleteStatement();
     std::unique_ptr<InsertStatement> parseInsertStatement();
     std::unique_ptr<UpdateStatement> parseUpdateStatement();
-    std::unique_ptr<SelectStatement> parseCreateTableStatement();
+    std::unique_ptr<CreateTableStatement> parseCreateTableStatement();
 
 private:
     std::vector<Token> tokens;
@@ -373,4 +385,16 @@ private:
     std::unique_ptr<Expr> parseExpression();
     std::unique_ptr<Expr> parseOr();
     std::unique_ptr<Expr> parseAnd();
+
+    std::unique_ptr<ConstraintExpr> parseConstraintBody();
+    std::unique_ptr<ConstraintExpr> parseConstraint();
+    bool isColumnConstraintStart() const;
+
+    bool isTableConstraintStart() const;
+
+    std::vector<std::unique_ptr<ConstraintExpr>> parseColumnConstraints();
+    std::unique_ptr<DataTypeExpr> parseDataType();
+    std::unique_ptr<ColumnDefExpr> parseColumnDefinition();
+    std::vector<std::unique_ptr<ColumnDefExpr>> parseColumnDefinitions();
+    std::string parseIdentifier();
 };

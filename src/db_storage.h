@@ -93,6 +93,13 @@ namespace PageHeaderLayout
     constexpr std::size_t Size = 16;
 }
 
+struct QueryResult
+{
+    std::vector<Row> rows;
+    std::uint64_t affectedRows = 0;
+    bool returnsRows = false;
+};
+
 struct HeaderPage
 {
     std::string magic = "MYDB";

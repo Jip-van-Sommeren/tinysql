@@ -300,6 +300,13 @@ std::unique_ptr<BoundExpr> QueryValidator::bindExpr(
             DataType::Null);
     }
 
+    if (const auto *isNull = dynamic_cast<const IsNullExpr *>(&expr))
+    {
+        return std::make_unique<BoundIsNullExpr>(
+            bindExpr(*isNull->operand, schema, tableName),
+            isNull->negated);
+    }
+
     if (const auto *cmp = dynamic_cast<const ComparisonExpr *>(&expr))
     {
         auto left = bindExpr(*cmp->left, schema, tableName);

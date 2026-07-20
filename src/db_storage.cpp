@@ -10,9 +10,11 @@
 #include <format>
 #include <limits>
 #include <cmath>
+#include <type_traits>
 #include "db_write.h"
 #include "db_storage.h"
 #include "db_read.h"
+#include "db_query_validator.h"
 // magic = "MYDB"
 // version = 1
 // page_size = 4096
@@ -25,235 +27,373 @@
 // 05 00 00 00      // table name length = 5
 // 75 73 65 72 73   // "users"
 // 02 00 00 00      // column count = 2
-std::fstream openOrCreateFile(const std::filesystem::path &path)
+
+namespace
 {
-    if (!std::filesystem::exists(path))
+    Value evaluateValue(const BoundExpr &expr, const Row &row)
     {
-        std::ofstream createFile{path, std::ios::binary};
-    }
-
-    std::fstream file{
-        path,
-        std::ios::in | std::ios::out | std::ios::binary};
-
-    return file;
-}
-
-bool valueMatchesColumn(const Column &column, const Value &value)
-{
-    if (std::holds_alternative<std::monostate>(value))
-    {
-        return column.nullable;
-    }
-
-    switch (column.type)
-    {
-    case DataType::Int:
-        return std::holds_alternative<int>(value);
-
-    case DataType::Text:
-        return std::holds_alternative<std::string>(value);
-
-    case DataType::Null:
-        return std::holds_alternative<std::monostate>(value);
-
-    default:
-        return false;
-    }
-}
-
-std::string dataTypeName(DataType type)
-{
-    switch (type)
-    {
-    case DataType::Null:
-        return "null";
-    case DataType::Int:
-        return "int";
-    case DataType::Text:
-        return "text";
-    default:
-        return "unknown";
-    }
-}
-
-std::string valueTypeName(const Value &value)
-{
-    if (std::holds_alternative<std::monostate>(value))
-    {
-        return "null";
-    }
-
-    if (std::holds_alternative<int>(value))
-    {
-        return "int";
-    }
-
-    if (std::holds_alternative<std::string>(value))
-    {
-        return "text";
-    }
-
-    return "unknown";
-}
-
-RowValidationResult validateRowAgainstSchema(const std::vector<Column> &columns, const Row &row)
-{
-    if (columns.size() != row.values.size())
-    {
-        return RowValidationResult{
-            .valid = false,
-            .columnIndex = std::nullopt,
-            .message = std::format(
-                "row has {} values but schema expects {} columns",
-                row.values.size(),
-                columns.size())};
-    }
-
-    for (const Column &column : columns)
-    {
-        const Value &value = row.values[column.columnIndex];
-
-        if (std::holds_alternative<std::monostate>(value) && !column.nullable)
+        if (const auto *column = dynamic_cast<const BoundColumnExpr *>(&expr))
         {
-            return RowValidationResult{
-                .valid = false,
-                .columnIndex = column.columnIndex,
-                .message = std::format(
-                    "column '{}' does not allow null values",
-                    column.name)};
+            return row.values[column->columnIndex];
         }
 
-        if (!valueMatchesColumn(column, value))
+        if (const auto *literal = dynamic_cast<const BoundLiteralExpr *>(&expr))
         {
-            return RowValidationResult{
-                .valid = false,
-                .columnIndex = column.columnIndex,
-                .message = std::format(
-                    "column '{}' expects type '{}' but row value has type '{}'",
-                    column.name,
-                    dataTypeName(column.type),
-                    valueTypeName(value))};
+            return literal->value;
         }
+
+        throw std::runtime_error("Expression does not evaluate to a value");
     }
 
-    return RowValidationResult{
-        .valid = true,
-        .columnIndex = std::nullopt,
-        .message = ""};
-}
-
-std::vector<Column> buildStoredColumns(const std::vector<Column> &columns)
-{
-    std::vector<Column> storedColumns;
-    storedColumns.reserve(columns.size());
-
-    std::uint32_t fixedOffset = 0;
-    std::uint32_t varIndex = 0;
-
-    for (std::size_t i = 0; i < columns.size(); ++i)
+    bool compareValues(ComparisonOp op, const Value &left, const Value &right)
     {
-        Column column = columns[i];
-        column.columnIndex = static_cast<std::uint32_t>(i);
+        if (std::holds_alternative<int>(left) && std::holds_alternative<int>(right))
+        {
+            int leftInt = std::get<int>(left);
+            int rightInt = std::get<int>(right);
+
+            switch (op)
+            {
+            case ComparisonOp::Gt:
+                return leftInt > rightInt;
+            case ComparisonOp::Ge:
+                return leftInt >= rightInt;
+            case ComparisonOp::Lt:
+                return leftInt < rightInt;
+            case ComparisonOp::Le:
+                return leftInt <= rightInt;
+            case ComparisonOp::Eq:
+                return leftInt == rightInt;
+            case ComparisonOp::Ne:
+                return leftInt != rightInt;
+            default:
+                throw std::runtime_error("Unsupported comparison operator");
+            }
+        }
+
+        if (std::holds_alternative<std::string>(left) && std::holds_alternative<std::string>(right))
+        {
+            const std::string &leftStr = std::get<std::string>(left);
+            const std::string &rightStr = std::get<std::string>(right);
+
+            switch (op)
+            {
+            case ComparisonOp::Gt:
+                return leftStr > rightStr;
+            case ComparisonOp::Ge:
+                return leftStr >= rightStr;
+            case ComparisonOp::Lt:
+                return leftStr < rightStr;
+            case ComparisonOp::Le:
+                return leftStr <= rightStr;
+            case ComparisonOp::Eq:
+                return leftStr == rightStr;
+            case ComparisonOp::Ne:
+                return leftStr != rightStr;
+            default:
+                throw std::runtime_error("Unsupported comparison operator");
+            }
+        }
+
+        throw std::runtime_error("Cannot compare values of different types");
+    }
+
+    bool evaluatePredicate(const BoundExpr &expr, const Row &row)
+    {
+        if (const auto *comparison = dynamic_cast<const BoundComparisonExpr *>(&expr))
+        {
+            Value left = evaluateValue(*comparison->left, row);
+            Value right = evaluateValue(*comparison->right, row);
+
+            return compareValues(comparison->op, left, right);
+        }
+
+        if (const auto *logical = dynamic_cast<const BoundLogicalExpr *>(&expr))
+        {
+            if (logical->op == LogicalOp::And)
+            {
+                return evaluatePredicate(*logical->left, row) &&
+                       evaluatePredicate(*logical->right, row);
+            }
+
+            return evaluatePredicate(*logical->left, row) ||
+                   evaluatePredicate(*logical->right, row);
+        }
+        if (const auto *isNull = dynamic_cast<const BoundIsNullExpr *>(&expr))
+        {
+            Value value = evaluateValue(*isNull->operand, row);
+            bool result = std::holds_alternative<std::monostate>(value);
+
+            return isNull->negated ? !result : result;
+        }
+
+        throw std::runtime_error("WHERE expression does not evaluate to a predicate");
+    }
+    std::fstream openOrCreateFile(const std::filesystem::path &path)
+    {
+        if (!std::filesystem::exists(path))
+        {
+            std::ofstream createFile{path, std::ios::binary};
+        }
+
+        std::fstream file{
+            path,
+            std::ios::in | std::ios::out | std::ios::binary};
+
+        return file;
+    }
+
+    bool valueMatchesColumn(const Column &column, const Value &value)
+    {
+        if (std::holds_alternative<std::monostate>(value))
+        {
+            return column.nullable;
+        }
 
         switch (column.type)
         {
         case DataType::Int:
-            column.storage = FixedColumnStorage{
-                .offset = fixedOffset,
-                .size = static_cast<std::uint32_t>(sizeof(std::int32_t))};
-            fixedOffset += static_cast<std::uint32_t>(sizeof(std::int32_t));
-            break;
+            return std::holds_alternative<int>(value);
 
         case DataType::Text:
-            column.storage = VarColumnStorage{.varIndex = varIndex};
-            ++varIndex;
-            break;
+            return std::holds_alternative<std::string>(value);
 
         case DataType::Null:
-            column.storage = FixedColumnStorage{
-                .offset = fixedOffset,
-                .size = 0};
-            break;
+            return std::holds_alternative<std::monostate>(value);
 
         default:
-            throw std::runtime_error("Unsupported column type in table schema");
+            return false;
+        }
+    }
+
+    std::string dataTypeName(DataType type)
+    {
+        switch (type)
+        {
+        case DataType::Null:
+            return "null";
+        case DataType::Int:
+            return "int";
+        case DataType::Text:
+            return "text";
+        default:
+            return "unknown";
+        }
+    }
+
+    std::string valueTypeName(const Value &value)
+    {
+        if (std::holds_alternative<std::monostate>(value))
+        {
+            return "null";
         }
 
-        storedColumns.push_back(std::move(column));
+        if (std::holds_alternative<int>(value))
+        {
+            return "int";
+        }
+
+        if (std::holds_alternative<std::string>(value))
+        {
+            return "text";
+        }
+
+        return "unknown";
     }
 
-    return storedColumns;
-}
-
-std::uint16_t calculateHeaderFreeSpaceStart(
-    const PageHeader &pageHeader,
-    const HeaderPage &headerPage)
-{
-    RawPage rawPage{};
-    PageWriter writer(rawPage);
-
-    PageHeaderWriter pageHeaderWriter(writer);
-    pageHeaderWriter.write(pageHeader);
-
-    writer.seek(PageHeaderLayout::Size);
-
-    HeaderPageWriter headerPageWriter(writer);
-    headerPageWriter.write(headerPage);
-
-    std::size_t freeSpaceStart = writer.position();
-
-    if (freeSpaceStart > std::numeric_limits<std::uint16_t>::max())
+    void printValue(const Value &value)
     {
-        throw std::runtime_error("Header page freeSpaceStart too large for uint16_t");
+        std::visit([](const auto &innerValue)
+                   {
+                       using T = std::decay_t<decltype(innerValue)>;
+
+                       if constexpr (std::is_same_v<T, std::monostate>)
+                       {
+                           std::cout << "NULL";
+                       }
+                       else
+                       {
+                           std::cout << innerValue;
+                       } },
+                   value);
     }
 
-    return static_cast<std::uint16_t>(freeSpaceStart);
-}
+    void printRows(const std::vector<Row> &rows)
+    {
+        for (const Row &row : rows)
+        {
+            for (std::size_t i = 0; i < row.values.size(); ++i)
+            {
+                if (i != 0)
+                {
+                    std::cout << "\t";
+                }
 
-Page makeEmptyDataPage(uint32_t pageId)
-{
-    DataPage dataPage{
-        .slots = {},
-        .rows = {}};
+                printValue(row.values[i]);
+            }
 
-    PageHeader pageHeader{
-        .pageId = pageId,
-        .pageType = PageType::DataPage,
-        .slotCount = 0,
-        .freeSpaceStart = static_cast<uint16_t>(PageHeaderLayout::Size),
-        .freeSpaceEnd = static_cast<uint16_t>(PAGE_SIZE),
-        .nextPageId = 0};
+            std::cout << "\n";
+        }
+    }
 
-    return Page{
-        .header = pageHeader,
-        .data = dataPage};
-}
+    RowValidationResult validateRowAgainstSchema(const std::vector<Column> &columns, const Row &row)
+    {
+        if (columns.size() != row.values.size())
+        {
+            return RowValidationResult{
+                .valid = false,
+                .columnIndex = std::nullopt,
+                .message = std::format(
+                    "row has {} values but schema expects {} columns",
+                    row.values.size(),
+                    columns.size())};
+        }
 
-Page makeHeaderPage(const std::string &name, const std::string &magic, const std::vector<Column> &columns)
-{
-    PageHeader pageHeader{
-        .pageId = 0,
-        .pageType = PageType::HeaderPage,
-        .slotCount = uint16_t{0},
-        .freeSpaceStart = uint16_t{0},
-        .freeSpaceEnd = static_cast<uint16_t>(PAGE_SIZE),
-        .nextPageId = uint32_t{0}};
+        for (const Column &column : columns)
+        {
+            const Value &value = row.values[column.columnIndex];
 
-    HeaderPage tableHeader{
-        .magic = magic,
-        .version = uint16_t{1},
-        .pageSize = PAGE_SIZE,
-        .tableName = name,
-        .columns = buildStoredColumns(columns),
-        .totalRowCount = uint64_t{0},
-        .firstDataPageId = uint32_t{0},
-        .lastDataPageId = uint32_t{0},
-        .nextUnusedPageId = uint32_t{1}};
+            if (std::holds_alternative<std::monostate>(value) && !column.nullable)
+            {
+                return RowValidationResult{
+                    .valid = false,
+                    .columnIndex = column.columnIndex,
+                    .message = std::format(
+                        "column '{}' does not allow null values",
+                        column.name)};
+            }
 
-    pageHeader.freeSpaceStart = calculateHeaderFreeSpaceStart(pageHeader, tableHeader);
+            if (!valueMatchesColumn(column, value))
+            {
+                return RowValidationResult{
+                    .valid = false,
+                    .columnIndex = column.columnIndex,
+                    .message = std::format(
+                        "column '{}' expects type '{}' but row value has type '{}'",
+                        column.name,
+                        dataTypeName(column.type),
+                        valueTypeName(value))};
+            }
+        }
 
-    return Page{.header = pageHeader, .data = tableHeader};
+        return RowValidationResult{
+            .valid = true,
+            .columnIndex = std::nullopt,
+            .message = ""};
+    }
+
+    std::vector<Column> buildStoredColumns(const std::vector<Column> &columns)
+    {
+        std::vector<Column> storedColumns;
+        storedColumns.reserve(columns.size());
+
+        std::uint32_t fixedOffset = 0;
+        std::uint32_t varIndex = 0;
+
+        for (std::size_t i = 0; i < columns.size(); ++i)
+        {
+            Column column = columns[i];
+            column.columnIndex = static_cast<std::uint32_t>(i);
+
+            switch (column.type)
+            {
+            case DataType::Int:
+                column.storage = FixedColumnStorage{
+                    .offset = fixedOffset,
+                    .size = static_cast<std::uint32_t>(sizeof(std::int32_t))};
+                fixedOffset += static_cast<std::uint32_t>(sizeof(std::int32_t));
+                break;
+
+            case DataType::Text:
+                column.storage = VarColumnStorage{.varIndex = varIndex};
+                ++varIndex;
+                break;
+
+            case DataType::Null:
+                column.storage = FixedColumnStorage{
+                    .offset = fixedOffset,
+                    .size = 0};
+                break;
+
+            default:
+                throw std::runtime_error("Unsupported column type in table schema");
+            }
+
+            storedColumns.push_back(std::move(column));
+        }
+
+        return storedColumns;
+    }
+
+    std::uint16_t calculateHeaderFreeSpaceStart(
+        const PageHeader &pageHeader,
+        const HeaderPage &headerPage)
+    {
+        RawPage rawPage{};
+        PageWriter writer(rawPage);
+
+        PageHeaderWriter pageHeaderWriter(writer);
+        pageHeaderWriter.write(pageHeader);
+
+        writer.seek(PageHeaderLayout::Size);
+
+        HeaderPageWriter headerPageWriter(writer);
+        headerPageWriter.write(headerPage);
+
+        std::size_t freeSpaceStart = writer.position();
+
+        if (freeSpaceStart > std::numeric_limits<std::uint16_t>::max())
+        {
+            throw std::runtime_error("Header page freeSpaceStart too large for uint16_t");
+        }
+
+        return static_cast<std::uint16_t>(freeSpaceStart);
+    }
+
+    Page makeEmptyDataPage(uint32_t pageId)
+    {
+        DataPage dataPage{
+            .slots = {},
+            .rows = {}};
+
+        PageHeader pageHeader{
+            .pageId = pageId,
+            .pageType = PageType::DataPage,
+            .slotCount = 0,
+            .freeSpaceStart = static_cast<uint16_t>(PageHeaderLayout::Size),
+            .freeSpaceEnd = static_cast<uint16_t>(PAGE_SIZE),
+            .nextPageId = 0};
+
+        return Page{
+            .header = pageHeader,
+            .data = dataPage};
+    }
+
+    Page makeHeaderPage(const std::string &name, const std::string &magic, const std::vector<Column> &columns)
+    {
+        PageHeader pageHeader{
+            .pageId = 0,
+            .pageType = PageType::HeaderPage,
+            .slotCount = uint16_t{0},
+            .freeSpaceStart = uint16_t{0},
+            .freeSpaceEnd = static_cast<uint16_t>(PAGE_SIZE),
+            .nextPageId = uint32_t{0}};
+
+        HeaderPage tableHeader{
+            .magic = magic,
+            .version = uint16_t{1},
+            .pageSize = PAGE_SIZE,
+            .tableName = name,
+            .columns = buildStoredColumns(columns),
+            .totalRowCount = uint64_t{0},
+            .firstDataPageId = uint32_t{0},
+            .lastDataPageId = uint32_t{0},
+            .nextUnusedPageId = uint32_t{1}};
+
+        pageHeader.freeSpaceStart = calculateHeaderFreeSpaceStart(pageHeader, tableHeader);
+
+        return Page{.header = pageHeader, .data = tableHeader};
+    }
 }
 
 class BufferManager
@@ -446,8 +586,6 @@ private:
         file.write(
             reinterpret_cast<const char *>(pageData.data()),
             static_cast<std::streamsize>(pageData.size()));
-
-        std::cout << "Page written\n";
     };
 
     void appendRowToExistingDataPage(
@@ -651,11 +789,11 @@ public:
         return table;
     }
 
-    void insertRows(const std::vector<Row> &rows)
+    void insertRows(const BoundInsert &insert)
     {
         Page &hPage = bufferManager.getPage(0, decodeHeaderPage);
 
-        bufferManager.insertAllRows(rows, hPage);
+        bufferManager.insertAllRows({insert.row}, hPage);
 
         bufferManager.flushAll();
     }
@@ -665,6 +803,32 @@ public:
         Page &hPage = bufferManager.getPage(0, decodeHeaderPage);
 
         return selectAllRowsFromPages(hPage);
+    }
+
+    std::vector<Row> selectRows(const BoundSelect &select)
+    {
+        Page &hPage = bufferManager.getPage(0, decodeHeaderPage);
+        std::vector<Row> rows = selectAllRowsFromPages(hPage);
+
+        std::vector<Row> result;
+
+        for (const Row &row : rows)
+        {
+            if (select.where && !evaluatePredicate(*select.where, row))
+            {
+                continue;
+            }
+
+            Row projected;
+            for (std::uint32_t index : select.projectedColumnIndexes)
+            {
+                projected.values.push_back(row.values[index]);
+            }
+
+            result.push_back(std::move(projected));
+        }
+
+        return result;
     }
 
 private:
@@ -770,6 +934,11 @@ public:
         return Table::open(tablePath);
     }
 
+    const std::filesystem::path &getTablesPath() const
+    {
+        return tablesPath;
+    }
+
 private:
     std::filesystem::path dbPath;
     std::filesystem::path tablesPath;
@@ -801,7 +970,13 @@ public:
         const std::vector<Row> &rows)
     {
         Table table = storageEngine.openTable(tableName);
-        table.insertRows(rows);
+
+        for (const Row &row : rows)
+        {
+            table.insertRows(BoundInsert{
+                .tableName = tableName,
+                .row = row});
+        }
     }
 
     std::vector<Row> selectAllRows(const std::string &tableName)
@@ -810,51 +985,109 @@ public:
         return table.selectAllRows();
     }
 
+    QueryResult execute(const BoundQuery &query)
+    {
+        return std::visit(
+            [this](const auto &boundQuery) -> QueryResult
+            {
+                using T = std::decay_t<decltype(boundQuery)>;
+
+                if constexpr (std::is_same_v<T, BoundInsert>)
+                {
+                    return executeInsert(boundQuery);
+                }
+                else if constexpr (std::is_same_v<T, BoundSelect>)
+                {
+                    return executeSelect(boundQuery);
+                }
+            },
+            query);
+    }
+
+    QueryResult executeSql(const std::string &sql)
+    {
+        Lexer lexer(sql);
+        Parser parser(lexer.tokenize());
+        std::unique_ptr<Statement> statement = parser.parseStatement();
+
+        FileCatalog catalog{storageEngine.getTablesPath()};
+        QueryValidator validator{catalog};
+        BoundQuery query = validator.validate(*statement);
+
+        return execute(query);
+    }
+
+    void executeAndPrint(const std::string &sql)
+    {
+        std::cout << "SQL> " << sql << "\n";
+
+        QueryResult result = executeSql(sql);
+        printQueryResult(result);
+
+        std::cout << "\n";
+    }
+
+    void printQueryResult(const QueryResult &result) const
+    {
+        if (result.returnsRows)
+        {
+            printRows(result.rows);
+            std::cout << result.rows.size() << " row(s) selected\n";
+            return;
+        }
+
+        std::cout << result.affectedRows << " row(s) affected\n";
+    }
+
+    QueryResult executeInsert(const BoundInsert &insert)
+    {
+        Table table = storageEngine.openTable(insert.tableName);
+        table.insertRows(insert);
+
+        return QueryResult{
+            .rows = {},
+            .affectedRows = 1,
+            .returnsRows = false};
+    }
+
+    QueryResult executeSelect(const BoundSelect &select)
+    {
+        Table table = storageEngine.openTable(select.tableName);
+
+        return QueryResult{
+            .rows = table.selectRows(select),
+            .affectedRows = 0,
+            .returnsRows = true};
+    }
+
 private:
     std::string dbName;
 
     StorageEngine storageEngine;
 };
 
-void printValue(const Value &v)
-{
-    std::visit([](const auto &x)
-               {
-          using T = std::decay_t<decltype(x)>;
-
-          if constexpr (std::is_same_v<T, std::monostate>) {
-              std::cout << "NULL";
-          } else {
-              std::cout << x;
-          } }, v);
-}
-
 int main()
 {
-    Database db{std::filesystem::path("mydb"), std::string("mydb")};
+    std::filesystem::path dbPath{"/tmp/query_test_db"};
+    std::filesystem::remove_all(dbPath);
+
+    Database db{dbPath, std::string("query_test_db")};
     std::vector<Column> columns{Column{"a", DataType::Int, false}, Column{"b", DataType::Text, false}, Column{"c", DataType::Text, true}};
     db.createTable("test", columns);
-    std::vector<Row> rows{
-        Row{
-            std::vector<Value>{
-                Value{1},
-                Value{std::string{"Appel"}},
-                Value{std::string{"Peer"}}}},
-        Row{
-            std::vector<Value>{
-                Value{2},
-                Value{std::string{"Mandarijn"}},
-                Value{std::string{"Banaan"}}}}};
-    db.insertRows("test", rows);
-    std::vector<Row> rowsReturned = db.selectAllRows("test");
-    for (const Row &row : rowsReturned)
+
+    std::vector<std::string> testQueries{
+        "INSERT INTO test (a, b, c) VALUES (1, 'Appel', 'Peer');",
+        "INSERT INTO test (a, b, c) VALUES (2, 'Mandarijn', 'Banaan');",
+        "INSERT INTO test (a, b, c) VALUES (3, 'Kiwi', NULL);",
+        "SELECT * FROM test;",
+        "SELECT a, b FROM test WHERE a >= 2;",
+        "SELECT b, c FROM test WHERE c IS NULL;",
+        "SELECT test.* FROM test WHERE b >= 'Mandarijn';",
+        "SELECT a, c FROM test WHERE a > 1 AND c IS NOT NULL;"};
+
+    for (const std::string &query : testQueries)
     {
-        for (const Value &value : row.values)
-        {
-            printValue(value);
-            std::cout << "\t\t";
-        }
-        std::cout << "\n";
+        db.executeAndPrint(query);
     }
 }
 // { int32_t{1}, std::string("Alice"), std::monostate{} }
