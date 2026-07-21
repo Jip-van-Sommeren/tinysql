@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <fstream>
 #include <format>
+#include "db_sql_parser.h"
 
 constexpr size_t PAGE_SIZE = 4096;
 using Value = std::variant<std::monostate, int, std::string>;
@@ -40,13 +41,21 @@ enum class ColumnStorageKind : std::uint8_t
 
 using ColumnStorage = std::variant<FixedColumnStorage, VarColumnStorage>;
 
+struct Constraint
+{
+    std::string name;
+    DataType type;
+    ConstraintType constraintType;
+};
 struct Column
 {
     std::string name;
     DataType type;
     bool nullable;
-    uint32_t columnIndex = 0;
-    ColumnStorage storage = FixedColumnStorage{.offset = 0, .size = 0};
+    uint32_t columnIndex;
+    // Constraint constraint;
+    ColumnStorage storage;
+    
 };
 
 struct Row
@@ -107,6 +116,7 @@ struct HeaderPage
     uint32_t pageSize = PAGE_SIZE;
     std::string tableName;
     std::vector<Column> columns;
+    std::vector<Constraint> constraints;
 
     uint64_t totalRowCount = 0;
     uint32_t firstDataPageId = 1;

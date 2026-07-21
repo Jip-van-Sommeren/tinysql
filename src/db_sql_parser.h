@@ -142,6 +142,29 @@ struct ConstraintExpr : Expr
     }
 };
 
+
+struct PrimaryKeyConstraintExpr : ConstraintExpr
+{
+    std::vector<std::string> columns;
+
+    explicit PrimaryKeyConstraintExpr(std::vector<std::string> columns)
+        : ConstraintExpr(ConstraintType::PrimaryKey),
+          columns(std::move(columns))
+    {
+    }
+};
+
+struct UniqueConstraintExpr : ConstraintExpr
+{
+    std::vector<std::string> columns;
+
+    explicit UniqueConstraintExpr(std::vector<std::string> columns)
+        : ConstraintExpr(ConstraintType::Unique),
+          columns(std::move(columns))
+    {
+    }
+};
+
 struct CheckConstraintExpr : ConstraintExpr
 {
     std::unique_ptr<Expr> condition;
@@ -164,13 +187,21 @@ struct DefaultConstraintExpr : ConstraintExpr
     }
 };
 
+struct NotNullConstraintExpr : ConstraintExpr
+{
+    explicit NotNullConstraintExpr()
+        : ConstraintExpr(ConstraintType::NotNull)
+    {
+    }
+};
+
 struct ForeignKeyConstraintExpr : ConstraintExpr
 {
-    std::string referencedTable;
+    NamedTableRef referencedTable;
     std::vector<std::string> referencedColumns;
 
     ForeignKeyConstraintExpr(
-        std::string referencedTable,
+        NamedTableRef referencedTable,
         std::vector<std::string> referencedColumns)
         : ConstraintExpr(ConstraintType::ForeignKey),
           referencedTable(std::move(referencedTable)),
@@ -236,6 +267,17 @@ struct NamedTableRef : TableRef
     explicit NamedTableRef(std::string name);
 };
 
+struct ForeignKeyTableRef : TableRef
+{
+    std::string tableName;
+    std::vector<std::string> columns;
+    explicit ForeignKeyTableRef(std::string tableName, std::vector<std::string> columns)
+        : tableName(std::move(tableName)),
+          columns(std::move(columns))
+    {
+    }
+};
+
 enum class JoinType
 {
     Inner,
@@ -294,7 +336,8 @@ struct CreateTableStatement : Statement
 
     CreateTableStatement(
         std::string tableName,
-        std::vector<std::unique_ptr<ColumnDefExpr>> columns);
+        std::vector<std::unique_ptr<ColumnDefExpr>> columns,
+        std::vector<std::unique_ptr<ConstraintExpr>> constraints);
 };
 
 struct InsertStatement : Statement
@@ -330,6 +373,19 @@ struct UpdateStatement : Statement
         std::vector<Assignment> assignments,
         std::unique_ptr<Expr> where);
 };
+
+struct ParsedCreateTableElements
+{
+    std::vector<std::unique_ptr<ColumnDefExpr>> columns;
+    std::vector<std::unique_ptr<ConstraintExpr>> constraints;
+};
+
+struct ParsedColumnDefinition
+{
+    std::unique_ptr<ColumnDefExpr> column;
+    std::vector<std::unique_ptr<ConstraintExpr>> constraints;
+};
+
 
 class Parser
 {
@@ -386,15 +442,33 @@ private:
     std::unique_ptr<Expr> parseOr();
     std::unique_ptr<Expr> parseAnd();
 
-    std::unique_ptr<ConstraintExpr> parseConstraintBody();
-    std::unique_ptr<ConstraintExpr> parseConstraint();
+    // std::unique_ptr<ConstraintExpr> parseConstraintBody();
+    // std::unique_ptr<ConstraintExpr> parseConstraint();
     bool isColumnConstraintStart() const;
 
     bool isTableConstraintStart() const;
 
-    std::vector<std::unique_ptr<ConstraintExpr>> parseColumnConstraints();
+    // std::vector<std::unique_ptr<ConstraintExpr>> parseColumnConstraints();
+
+    std::optional<std::string> parseOptionalConstraintName();
+    std::unique_ptr<ConstraintExpr> parseColumnConstraint(const std::string& columnName);
+    std::unique_ptr<ConstraintExpr> parseColumnConstraintBody(const std::string& columnName);
+
+
+    std::vector<std::string> parseParenthesizedIdentifierList();
+
+
     std::unique_ptr<DataTypeExpr> parseDataType();
-    std::unique_ptr<ColumnDefExpr> parseColumnDefinition();
-    std::vector<std::unique_ptr<ColumnDefExpr>> parseColumnDefinitions();
+    ParsedColumnDefinition parseColumnDefinition();
+    // std::vector<std::unique_ptr<ColumnDefExpr>> parseColumnDefinitions();
     std::string parseIdentifier();
+    std::vector<std::unique_ptr<ConstraintExpr>> parseTableConstraints();
+
+    ParsedCreateTableElements parseCreateTableElements();
+
+    std::unique_ptr<ConstraintExpr> parseTableConstraint();
+
+    std::unique_ptr<ConstraintExpr> parseTableConstraintBody();
+    ForeignKeyTableRef parseReferenceClause();
+
 };

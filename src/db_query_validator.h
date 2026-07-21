@@ -111,7 +111,19 @@ struct BoundSelect
     std::unique_ptr<BoundExpr> where;
 };
 
-using BoundQuery = std::variant<BoundSelect, BoundInsert>;
+struct BoundDelete
+{
+    std::string tableName;
+    std::unique_ptr<BoundExpr> where;
+};
+
+struct BoundCreateTable
+{
+    std::string tableName;
+    std::vector<Column> columns;
+};
+
+using BoundQuery = std::variant<BoundSelect, BoundInsert, BoundDelete, BoundCreateTable>;
 
 class Catalog
 {
@@ -170,6 +182,8 @@ private:
 
     BoundSelect validateSelect(const SelectStatement &statement);
     BoundInsert validateInsert(const InsertStatement &statement);
+    BoundDelete validateDelete(const DeleteStatement &statement);
+    BoundCreateTable validateCreateTable(const CreateTableStatement &statement);
     std::unique_ptr<BoundExpr> bindExpr(
         const Expr &expr,
         const HeaderPage &schema,

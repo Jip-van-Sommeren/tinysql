@@ -49,7 +49,41 @@ BoundQuery QueryValidator::validate(const Statement &statement)
         return validateSelect(*select);
     }
 
+        if (const auto *deleteStmt = dynamic_cast<const DeleteStatement *>(&statement))
+    {
+        return validateDelete(*deleteStmt);
+    }
+
+
     throw std::runtime_error("Unsupported statement type");
+}
+
+BoundDelete QueryValidator::validateDelete(const DeleteStatement &statement)
+{
+    if (!statement.from)
+    {
+        throw std::runtime_error("DELETE requires a FROM clause");
+    }
+
+    const NamedTableRef &tableRef = requireNamedTableRef(*statement.from);
+
+    if (!catalog.tableExists(tableRef.name))
+    {
+        throw std::runtime_error("Table does not exist: " + tableRef.name);
+    }
+
+    HeaderPage schema = catalog.getTableHeader(tableRef.name);
+
+    std::unique_ptr<BoundExpr> where;
+
+    if (statement.where)
+    {
+        where = bindExpr(*statement.where, schema, tableRef.name);
+    }
+
+    return BoundDelete{
+        .tableName = tableRef.name,
+        .where = std::move(where)};
 }
 
 BoundSelect QueryValidator::validateSelect(const SelectStatement &statement)
@@ -129,6 +163,52 @@ BoundSelect QueryValidator::validateSelect(const SelectStatement &statement)
         .tableName = tableRef.name,
         .projectedColumnIndexes = std::move(projectedColumnIndexes),
         .where = std::move(where)};
+}
+
+// Constraint QueryValidator(const std::string &name, DataType type, const ColumnDefExpr &colDef)
+// {
+//     Constraint constraint;
+//     for (const auto &constraintExpr : colDef.constraints)
+//         {
+//             if (constraintExpr->constraintType == ConstraintType::NotNull)
+//             {
+//                 constraint.type = type;
+//                 constraint.constraintType = ConstraintType::NotNull;
+//             }
+//             else if (constraintExpr->constraintType == ConstraintType::PrimaryKey)
+//             {
+//                 constraint.type = type;
+//                 constraint.constraintType = ConstraintType::PrimaryKey;
+//             }
+//             // Handle other constraint types as needed
+//         }
+//     return Constraint{name, type};
+// }
+
+
+BoundCreateTable QueryValidator::validateCreateTable(const CreateTableStatement &statement)
+{
+    std::vector<Column> columns;
+    columns.reserve(statement.columns.size());
+
+    for (const auto &colDef : statement.columns)
+    {
+
+        Column column;
+        column.name = colDef->columnName;
+        column.type = colDef->dataType->type;
+        column.nullable = true; // Default to nullable unless specified otherwise
+        column.columnIndex = 0; // Will be set later
+        column.constraint = Constraint{}; // Default constraint
+        column.storage = FixedColumnStorage{.offset = 0, .size = 0}; // Placeholder
+
+
+
+        columns.push_back(std::move(column));
+    }
+    return BoundCreateTable{
+        .tableName = statement.tableName,
+        .columns = statement.columns};
 }
 
 BoundInsert QueryValidator::validateInsert(const InsertStatement &statement)
