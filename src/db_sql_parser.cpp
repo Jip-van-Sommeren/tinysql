@@ -5,36 +5,36 @@
 
 namespace
 {
-    DataTypeDef dataTypeDefFromKeyword(const std::string &keyword)
+    DataType dataTypeDefFromKeyword(const std::string &keyword)
     {
         if (keyword == "INT")
         {
-            return DataTypeDef::Int;
+            return DataType::Int;
         }
 
         if (keyword == "VARCHAR" || keyword == "TEXT")
         {
-            return DataTypeDef::Varchar;
+            return DataType::Varchar;
         }
 
         if (keyword == "DATE")
         {
-            return DataTypeDef::Date;
+            return DataType::Date;
         }
 
         if (keyword == "DOUBLE")
         {
-            return DataTypeDef::Double;
+            return DataType::Double;
         }
 
         if (keyword == "BOOLEAN")
         {
-            return DataTypeDef::Boolean;
+            return DataType::Boolean;
         }
 
         if (keyword == "NULL")
         {
-            return DataTypeDef::Null;
+            return DataType::Null;
         }
 
         throw std::runtime_error("Unknown data type: " + keyword);
@@ -50,43 +50,35 @@ NumberExpr::NumberExpr(double value)
 StringExpr::StringExpr(std::string value)
     : value(std::move(value)) {}
 
-LogicalExpr::LogicalExpr(
-    LogicalOp op,
+
+BinaryExpr::BinaryExpr(
+    BinaryOperator op,
     std::unique_ptr<Expr> left,
     std::unique_ptr<Expr> right)
     : op(op),
       left(std::move(left)),
       right(std::move(right)) {}
 
-ComparisonExpr::ComparisonExpr(
-    ComparisonOp op,
-    std::unique_ptr<Expr> left,
-    std::unique_ptr<Expr> right)
-    : op(op),
-      left(std::move(left)),
-      right(std::move(right)) {}
 
-ArithmeticExpr::ArithmeticExpr(
-    ArithmeticOp op,
-    std::unique_ptr<Expr> left,
-    std::unique_ptr<Expr> right)
+UnaryExpr::UnaryExpr(
+    UnaryOperator op,
+    std::unique_ptr<Expr> operand)
     : op(op),
-      left(std::move(left)),
-      right(std::move(right)) {}
+      operand(std::move(operand)) {}
+
+
 
 DataTypeExpr::DataTypeExpr(
-    DataTypeDef type,
+    DataType type,
     std::vector<std::unique_ptr<Expr>> typeArguments)
     : type(type),
       typeArguments(std::move(typeArguments)) {}
 
 ColumnDefExpr::ColumnDefExpr(
     std::string columnName,
-    std::unique_ptr<DataTypeExpr> dataType,
-    std::vector<std::unique_ptr<ConstraintExpr>> constraints)
+    std::unique_ptr<DataTypeExpr> dataType)
     : columnName(std::move(columnName)),
-      dataType(std::move(dataType)),
-      constraints(std::move(constraints)) {}
+      dataType(std::move(dataType)) {}
 
 QualifiedWildcardSelectItem::QualifiedWildcardSelectItem(std::vector<std::string> qualifierParts)
     : qualifierParts(std::move(qualifierParts)) {}
@@ -215,7 +207,7 @@ std::vector<std::unique_ptr<ConstraintExpr>> Parser::parseTableConstraints()
 
     while (isTableConstraintStart())
     {
-        constraints.push_back(parseConstraint());
+        constraints.push_back(parseTableConstraint());
     }
 
     return constraints;
@@ -241,6 +233,7 @@ ParsedCreateTableElements Parser::parseCreateTableElements()
 
             for (auto& constraint : parsedColumn.constraints)
             {
+
                 result.constraints.push_back(std::move(constraint));
             }
         }
@@ -316,7 +309,7 @@ ParsedColumnDefinition Parser::parseColumnDefinition()
 std::unique_ptr<DataTypeExpr> Parser::parseDataType()
 {
     Token dataTypeToken = expect(TokenType::Keyword);
-    DataTypeDef type = dataTypeDefFromKeyword(dataTypeToken.text);
+    DataType type = dataTypeDefFromKeyword(dataTypeToken.text);
 
     std::vector<std::unique_ptr<Expr>> typeArguments;
     if (match(TokenType::LeftParen))
@@ -570,7 +563,7 @@ std::unique_ptr<ConstraintExpr> Parser::parseTableConstraintBody()
 
         return std::make_unique<ForeignKeyConstraintExpr>(
             std::move(localColumns),
-            NamedTableRef(std::move(reference.tableName)),
+            std::move(reference.tableName),
             std::move(reference.columns));
     }
 
@@ -1070,110 +1063,133 @@ bool Parser::isArithmeticOperator(const Token &token)
            token.text == "/";
 }
 
-std::unique_ptr<Expr> Parser::parseComparison()
+bool Parser::isBinaryOperator(const Token &token)
 {
-    auto left = parsePrimary();
-    if (matchKeyword("IS"))
+    if (token.type != TokenType::Operator)
     {
-        bool negated = matchKeyword("NOT");
-        expectKeyword("NULL");
-
-        return std::make_unique<IsNullExpr>(
-            std::move(left),
-            negated);
+        return false;
     }
 
-    if (isComparisonOperator(peek()))
-    {
-        ComparisonOp op = parseComparisonOp();
-        auto right = parsePrimary();
-
-        return std::make_unique<ComparisonExpr>(
-            op,
-            std::move(left),
-            std::move(right));
-    }
-    if (isArithmeticOperator(peek()))
-    {
-        ArithmeticOp op = parseArithmeticOp();
-        auto right = parsePrimary();
-        return std::make_unique<ArithmeticExpr>(
-            op,
-            std::move(left),
-            std::move(right));
-    }
-
-    return left;
+    return token.text == "AND" ||
+           token.text == "OR" ||
+           isComparisonOperator(token) ||
+           isArithmeticOperator(token);
 }
 
-ComparisonOp Parser::comparisonOpFromToken(const Token &token)
+bool Parser::isUnaryOperator(const Token &token)
+{
+    if (token.type != TokenType::Operator)
+    {
+        return false;
+    }
+
+    return token.text == "NOT" ||
+           token.text == "-" ||
+           token.text == "+";
+}
+
+
+
+
+// parseExpression()
+    // -> parseLogicalOr()
+    // -> parseLogicalAnd()
+    // -> parseComparison()
+    // -> parseAdditive()
+    // -> parseMultiplicative()
+    // -> parseUnary()
+    // -> parsePrimary()
+
+
+BinaryOperator Parser::binaryOpFromToken(const Token &token)
 {
     if (token.type != TokenType::Operator)
     {
         throw std::runtime_error("Incorrect token type was passed");
     }
-    if (token.text == "=")
+    if (token.text == "AND")
     {
-        return ComparisonOp::Eq;
+        return BinaryOperator::And;
     }
-    if (token.text == ">=")
+    if (token.text == "OR")
     {
-        return ComparisonOp::Ge;
+        return BinaryOperator::Or;
     }
-    if (token.text == ">")
+        if (token.text == "+")
     {
-        return ComparisonOp::Gt;
-    }
-    if (token.text == "<=")
-    {
-        return ComparisonOp::Le;
-    }
-    if (token.text == "<")
-    {
-        return ComparisonOp::Lt;
-    }
-    if (token.text == "<>")
-    {
-        return ComparisonOp::Ne;
-    }
-    throw std::runtime_error("Unknown comparison token");
-}
-
-ComparisonOp Parser::parseComparisonOp()
-{
-    Token token = expect(TokenType::Operator);
-    return comparisonOpFromToken(token);
-}
-
-ArithmeticOp Parser::arithmeticOpFromToken(const Token &token)
-{
-    if (token.type != TokenType::Operator)
-    {
-        throw std::runtime_error("Incorrect token type was passed");
-    }
-    if (token.text == "+")
-    {
-        return ArithmeticOp::Add;
+        return BinaryOperator::Add;
     }
     if (token.text == "-")
     {
-        return ArithmeticOp::Subtract;
+        return BinaryOperator::Subtract;
     }
     if (token.text == "*")
     {
-        return ArithmeticOp::Multiply;
+        return BinaryOperator::Multiply;
     }
     if (token.text == "/")
     {
-        return ArithmeticOp::Divide;
+        return BinaryOperator::Divide;
     }
-    throw std::runtime_error("Unknown arithmetic token");
+
+    if (token.text == "=")
+    {
+        return BinaryOperator::Eq;
+    }
+    if (token.text == ">=")
+    {
+        return BinaryOperator::Ge;
+    }
+    if (token.text == ">")
+    {
+        return BinaryOperator::Gt;
+    }
+    if (token.text == "<=")
+    {
+        return BinaryOperator::Le;
+    }
+    if (token.text == "<")
+    {
+        return BinaryOperator::Lt;
+    }
+    if (token.text == "<>")
+    {
+        return BinaryOperator::Ne;
+    }
+    throw std::runtime_error("Unknown binary operator token");
 }
 
-ArithmeticOp Parser::parseArithmeticOp()
+BinaryOperator Parser::parseBinaryOp()
 {
     Token token = expect(TokenType::Operator);
-    return arithmeticOpFromToken(token);
+    return binaryOpFromToken(token);
+}
+
+UnaryOperator Parser::unaryOpFromToken(const Token &token)
+{
+    if (token.type != TokenType::Operator)
+    {
+        throw std::runtime_error("Incorrect token type was passed");
+    }
+    if (token.text == "-")
+    {
+        return UnaryOperator::Negate;
+    }
+        if (token.text == "+")
+    {
+        return UnaryOperator::Positive;
+    }
+    if (token.text == "NOT")
+    {
+        return UnaryOperator::Not;
+    }
+    throw std::runtime_error("Unknown unary operator token");
+}
+
+UnaryOperator Parser::parseUnaryOp()
+{
+    Token token = expect(TokenType::Operator);
+    return unaryOpFromToken(token);
 }
 
 std::unique_ptr<Expr> Parser::parsePrimary()
@@ -1215,8 +1231,8 @@ std::unique_ptr<Expr> Parser::parseOr()
     while (matchKeyword("OR"))
     {
         auto right = parseAnd();
-        left = std::make_unique<LogicalExpr>(
-            LogicalOp::Or,
+        left = std::make_unique<BinaryExpr>(
+            BinaryOperator::Or,
             std::move(left),
             std::move(right));
     }
@@ -1231,11 +1247,99 @@ std::unique_ptr<Expr> Parser::parseAnd()
     while (matchKeyword("AND"))
     {
         auto right = parseComparison();
-        left = std::make_unique<LogicalExpr>(
-            LogicalOp::And,
+        left = std::make_unique<BinaryExpr>(
+            BinaryOperator::And,
             std::move(left),
             std::move(right));
     }
 
     return left;
 }
+
+
+
+
+std::unique_ptr<Expr> Parser::parseNot(){
+    if (matchKeyword("NOT"))
+    {
+        auto operand = parseNot();
+        return std::make_unique<UnaryExpr>(
+            UnaryOperator::Not,
+            std::move(operand));
+    }
+
+    return parseComparison();
+}
+
+std::unique_ptr<Expr> Parser::parseComparison()
+{
+    auto left = parseAdditive();
+
+
+    while (isComparisonOperator(peek()))
+    {
+        BinaryOperator op = parseBinaryOp();
+        auto right = parseAdditive();
+
+        left = std::make_unique<BinaryExpr>(
+            op,
+            std::move(left),
+            std::move(right));
+    }
+
+
+    return left;
+}
+
+
+std::unique_ptr<Expr> Parser::parseAdditive()
+{
+    auto left = parseMultiplicative();
+
+    while (isArithmeticOperator(peek()) && (peek().text == "+" || peek().text == "-"))
+    {
+        BinaryOperator op = parseBinaryOp();
+        auto right = parseMultiplicative();
+
+        left = std::make_unique<BinaryExpr>(
+            op,
+            std::move(left),
+            std::move(right));
+    }
+
+    return left;
+}
+
+std::unique_ptr<Expr> Parser::parseMultiplicative()
+{
+    auto left = parsePrimary();
+
+    while (isArithmeticOperator(peek()) && (peek().text == "*" || peek().text == "/"))
+    {
+        BinaryOperator op = parseBinaryOp();
+        auto right = parsePrimary();
+
+        left = std::make_unique<BinaryExpr>(
+            op,
+            std::move(left),
+            std::move(right));
+    }
+
+    return left;
+}
+
+std::unique_ptr<Expr> Parser::parseArithmeticUnary()
+{
+    if (isUnaryOperator(peek()))
+    {
+        UnaryOperator op = parseUnaryOp();
+        auto operand = parsePrimary();
+
+        return std::make_unique<UnaryExpr>(
+            op,
+            std::move(operand));
+    }
+
+    return parsePrimary();
+}
+

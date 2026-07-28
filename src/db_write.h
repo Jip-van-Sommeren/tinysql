@@ -180,6 +180,14 @@ private:
     const HeaderPage &tableHeader;
 };
 
+class ExpressionSerializer
+{
+public:
+    static void serialize(
+        const BoundExpr& expression,
+        PageWriter& writer);
+};
+
 RawPage encodeHeaderPage(const PageHeader &pageHeader, const HeaderPage &headerPage);
 RawPage encodeDataPage(
     const PageHeader &pageHeader,

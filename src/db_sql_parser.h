@@ -1,6 +1,7 @@
 #pragma once
 
 #include "db_sql_lexer.h"
+#include "db_storage.h"
 
 #include <cstddef>
 #include <memory>
@@ -55,15 +56,7 @@ enum class ComparisonOp
     Ne
 };
 
-enum class DataTypeDef
-{
-    Int,
-    Varchar,
-    Date,
-    Double,
-    Boolean,
-    Null
-};
+
 
 enum class ArithmeticOp
 {
@@ -73,38 +66,51 @@ enum class ArithmeticOp
     Divide
 };
 
-struct LogicalExpr : Expr
+enum class BinaryOperator : std::uint8_t
 {
-    LogicalOp op;
-    std::unique_ptr<Expr> left;
-    std::unique_ptr<Expr> right;
-
-    LogicalExpr(
-        LogicalOp op,
-        std::unique_ptr<Expr> left,
-        std::unique_ptr<Expr> right);
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    And,
+    Or,
+    Eq,
+    Ne,
+    Gt,
+    Ge,
+    Lt,
+    Le
 };
 
-struct ComparisonExpr : Expr
+enum class UnaryOperator
 {
-    ComparisonOp op;
-    std::unique_ptr<Expr> left;
-    std::unique_ptr<Expr> right;
-
-    ComparisonExpr(
-        ComparisonOp op,
-        std::unique_ptr<Expr> left,
-        std::unique_ptr<Expr> right);
+    Not,
+    Negate,
+    Positive
 };
 
-struct ArithmeticExpr : Expr
+
+
+
+
+struct UnaryExpr : Expr
 {
-    ArithmeticOp op;
+    UnaryOperator op;
+    std::unique_ptr<Expr> operand;
+
+    UnaryExpr(
+        UnaryOperator op,
+        std::unique_ptr<Expr> operand);
+};
+
+struct BinaryExpr : Expr
+{
+    BinaryOperator op;
     std::unique_ptr<Expr> left;
     std::unique_ptr<Expr> right;
 
-    ArithmeticExpr(
-        ArithmeticOp op,
+    BinaryExpr(
+        BinaryOperator op,
         std::unique_ptr<Expr> left,
         std::unique_ptr<Expr> right);
 };
@@ -121,7 +127,7 @@ struct IsNullExpr : Expr
     }
 };
 
-enum class ConstraintType
+enum class ConstraintType: std::uint8_t
 {
     PrimaryKey,
     ForeignKey,
@@ -131,7 +137,10 @@ enum class ConstraintType
     Default,
     Check
 };
-struct ConstraintExpr : Expr
+
+
+
+struct ConstraintExpr
 {
     ConstraintType constraintType;
     std::optional<std::string> constraintName;
@@ -140,6 +149,16 @@ struct ConstraintExpr : Expr
         : constraintType(type)
     {
     }
+
+    virtual ~ConstraintExpr() = default;
+
+    ConstraintType kind() const noexcept
+    {
+        return kind_;
+    }
+
+private:
+    ConstraintType kind_;
 };
 
 
@@ -179,31 +198,38 @@ struct CheckConstraintExpr : ConstraintExpr
 struct DefaultConstraintExpr : ConstraintExpr
 {
     std::unique_ptr<Expr> value;
+    std::string columnName;
 
-    explicit DefaultConstraintExpr(std::unique_ptr<Expr> value)
+    explicit DefaultConstraintExpr(std::unique_ptr<Expr> value, std::string columnName)
         : ConstraintExpr(ConstraintType::Default),
-          value(std::move(value))
+          value(std::move(value)), columnName(std::move(columnName))
     {
     }
 };
 
 struct NotNullConstraintExpr : ConstraintExpr
 {
-    explicit NotNullConstraintExpr()
-        : ConstraintExpr(ConstraintType::NotNull)
+    std::string columnName;
+
+    explicit NotNullConstraintExpr(std::string columnName)
+        : ConstraintExpr(ConstraintType::NotNull),
+          columnName(std::move(columnName))
     {
     }
 };
 
 struct ForeignKeyConstraintExpr : ConstraintExpr
 {
-    NamedTableRef referencedTable;
+    std::vector<std::string> localColumns;
+    std::string referencedTable;
     std::vector<std::string> referencedColumns;
 
     ForeignKeyConstraintExpr(
-        NamedTableRef referencedTable,
+        std::vector<std::string> localColumns,
+        std::string referencedTable,
         std::vector<std::string> referencedColumns)
         : ConstraintExpr(ConstraintType::ForeignKey),
+            localColumns(std::move(localColumns)),
           referencedTable(std::move(referencedTable)),
           referencedColumns(std::move(referencedColumns))
     {
@@ -212,11 +238,11 @@ struct ForeignKeyConstraintExpr : ConstraintExpr
 
 struct DataTypeExpr : Expr
 {
-    DataTypeDef type;
+    DataType type;
     std::vector<std::unique_ptr<Expr>> typeArguments;
 
     explicit DataTypeExpr(
-        DataTypeDef type,
+        DataType type,
         std::vector<std::unique_ptr<Expr>> typeArguments = {});
 };
 
@@ -224,12 +250,10 @@ struct ColumnDefExpr : Expr
 {
     std::string columnName;
     std::unique_ptr<DataTypeExpr> dataType;
-    std::vector<std::unique_ptr<ConstraintExpr>> constraints;
 
     ColumnDefExpr(
         std::string columnName,
-        std::unique_ptr<DataTypeExpr> dataType,
-        std::vector<std::unique_ptr<ConstraintExpr>> constraints);
+        std::unique_ptr<DataTypeExpr> dataType);
 };
 
 struct SelectItem
@@ -432,23 +456,36 @@ private:
     std::unique_ptr<TableRef> parseTableRef();
     bool isComparisonOperator(const Token &token);
     bool isArithmeticOperator(const Token &token);
-    std::unique_ptr<Expr> parseComparison();
-    ComparisonOp comparisonOpFromToken(const Token &token);
-    ComparisonOp parseComparisonOp();
-    ArithmeticOp arithmeticOpFromToken(const Token &token);
-    ArithmeticOp parseArithmeticOp();
-    std::unique_ptr<Expr> parsePrimary();
+    bool isBinaryOperator(const Token &token);
+    bool isUnaryOperator(const Token &token);
+
+
+
+    BinaryOperator binaryOpFromToken(const Token &token);
+    BinaryOperator parseBinaryOp();
+
+    UnaryOperator unaryOpFromToken(const Token &token);
+    UnaryOperator parseUnaryOp();
+
+
     std::unique_ptr<Expr> parseExpression();
     std::unique_ptr<Expr> parseOr();
     std::unique_ptr<Expr> parseAnd();
 
-    // std::unique_ptr<ConstraintExpr> parseConstraintBody();
-    // std::unique_ptr<ConstraintExpr> parseConstraint();
+    std::unique_ptr<Expr> parseNot();
+
+    std::unique_ptr<Expr> parseAdditive();
+    std::unique_ptr<Expr> parseMultiplicative();
+    std::unique_ptr<Expr> parseComparison();
+    std::unique_ptr<Expr> parseArithmeticUnary();
+
+    std::unique_ptr<Expr> parsePrimary();
+
+
     bool isColumnConstraintStart() const;
 
     bool isTableConstraintStart() const;
 
-    // std::vector<std::unique_ptr<ConstraintExpr>> parseColumnConstraints();
 
     std::optional<std::string> parseOptionalConstraintName();
     std::unique_ptr<ConstraintExpr> parseColumnConstraint(const std::string& columnName);
@@ -460,7 +497,6 @@ private:
 
     std::unique_ptr<DataTypeExpr> parseDataType();
     ParsedColumnDefinition parseColumnDefinition();
-    // std::vector<std::unique_ptr<ColumnDefExpr>> parseColumnDefinitions();
     std::string parseIdentifier();
     std::vector<std::unique_ptr<ConstraintExpr>> parseTableConstraints();
 

@@ -1,4 +1,5 @@
 #include "db_write.h"
+#include "db_query_validator.h"
 
 #include <algorithm>
 #include <cstring>
@@ -543,6 +544,60 @@ void DataPageWriter::write(const PageHeader &pageHeader, const std::vector<Row> 
     headerWriter.setSlotCount(slotIndex);
     headerWriter.setFreeSpaceStart(freeStart);
     headerWriter.setFreeSpaceEnd(freeEnd);
+}
+
+void ExpressionSerializer::serialize(
+    const BoundExpr& expression,
+    PageWriter& writer)
+{
+    writer.writeUnsigned<std::uint8_t>(
+        static_cast<std::uint8_t>(expression.kind()));
+
+    switch (expression.kind())
+    {
+        case BoundExprKind::ColumnReference:
+        {
+            const auto& column =
+                static_cast<const BoundColumnRefExpr&>(expression);
+
+            writer.writeUnsigned<std::uint32_t>(column.columnId());
+            break;
+        }
+
+        case BoundExprKind::Literal:
+        {
+            const auto& literal =
+                static_cast<const BoundLiteralExpr&>(expression);
+
+            ValueSerializer::serialize(literal.value(), writer);
+            break;
+        }
+
+        case BoundExprKind::Binary:
+        {
+            const auto& binary =
+                static_cast<const BoundBinaryExpr&>(expression);
+
+            writer.writeUnsigned<std::uint8_t>(
+                static_cast<std::uint8_t>(binary.op()));
+
+            serialize(binary.left(), writer);
+            serialize(binary.right(), writer);
+            break;
+        }
+
+        case BoundExprKind::Unary:
+        {
+            const auto& unary =
+                static_cast<const BoundUnaryExpr&>(expression);
+
+            writer.writeUnsigned<std::uint8_t>(
+                static_cast<std::uint8_t>(unary.op()));
+
+            serialize(unary.operand(), writer);
+            break;
+        }
+    }
 }
 
 RawPage encodeHeaderPage(const PageHeader &pageHeader, const HeaderPage &headerPage)
