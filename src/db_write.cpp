@@ -61,9 +61,7 @@ void PageWriter::ensureCapacity(std::size_t size) const
     }
 }
 
-void ValueSerializer::writeFixed(
-    PageWriter &writer,
-    std::size_t absoluteOffset,
+std::vector<std::byte> ValueSerializer::serializeValue(
     DataType type,
     const Value &value)
 {
@@ -74,23 +72,11 @@ void ValueSerializer::writeFixed(
         {
             throw std::runtime_error("Expected int value");
         }
+        const int intValue = std::get<int>(value);
+        const auto *data = reinterpret_cast<const std::byte *>(&intValue);
 
-        writer.writeUnsignedAt<std::uint32_t>(
-            absoluteOffset,
-            static_cast<std::uint32_t>(std::get<int>(value)));
-        return;
-
-    default:
-        throw std::runtime_error("Unsupported fixed-width type");
-    }
-}
-
-std::vector<std::byte> ValueSerializer::serializeVariable(
-    DataType type,
-    const Value &value)
-{
-    switch (type)
-    {
+        return std::vector<std::byte>(data, data + sizeof(intValue));
+    
     case DataType::Text:
     {
         if (!std::holds_alternative<std::string>(value))
@@ -102,11 +88,22 @@ std::vector<std::byte> ValueSerializer::serializeVariable(
         const auto *data = reinterpret_cast<const std::byte *>(s.data());
         return std::vector<std::byte>(data, data + s.size());
     }
+    case DataType::Null:
+        {
+            if (!std::holds_alternative<std::monostate>(value))
+            {
+                throw std::runtime_error("Expected NULL value");
+            }
+
+            return {};
+        }
 
     default:
-        throw std::runtime_error("Unsupported variable-width type");
+        throw std::runtime_error("Unsupported fixed-width type");
     }
 }
+
+
 
 RowWriter::RowWriter(PageWriter &writer, const HeaderPage &headerPage)
     : writer(writer), headerPage(headerPage) {}
@@ -209,11 +206,27 @@ void RowWriter::writeFixedValues(const std::vector<Value> &values)
 void RowWriter::writeFixedValue(
     const Column &column,
     const FixedColumnStorage &fixed,
-    const Value &value)
-{
+    const Value &value){
     std::size_t absoluteOffset = rowStart + fixedAreaStartOffset + fixed.offset;
-    ValueSerializer::writeFixed(writer, absoluteOffset, column.type, value);
-}
+    
+    switch (column.type)
+    {
+    case DataType::Int:
+        if (!std::holds_alternative<int>(value))
+        {
+            throw std::runtime_error("Expected int value");
+        }
+
+        writer.writeUnsignedAt<std::uint32_t>(
+            absoluteOffset,
+            static_cast<std::uint32_t>(std::get<int>(value)));
+        return;
+
+    default:
+        throw std::runtime_error("Unsupported fixed-width type");
+    }
+};
+
 
 void RowWriter::writeVariableValues(const std::vector<Value> &values)
 {
@@ -241,7 +254,7 @@ void RowWriter::writeVariableValue(
     const VarColumnStorage &var,
     const Value &value)
 {
-    std::vector<std::byte> bytes = ValueSerializer::serializeVariable(column.type, value);
+    std::vector<std::byte> bytes = ValueSerializer::serializeValue(column.type, value);
 
     std::uint32_t relativeOffset = static_cast<std::uint32_t>(varDataPos - rowStart);
     std::uint32_t length = static_cast<std::uint32_t>(bytes.size());
@@ -546,6 +559,8 @@ void DataPageWriter::write(const PageHeader &pageHeader, const std::vector<Row> 
     headerWriter.setFreeSpaceEnd(freeEnd);
 }
 
+
+
 void ExpressionSerializer::serialize(
     const BoundExpr& expression,
     PageWriter& writer)
@@ -558,9 +573,9 @@ void ExpressionSerializer::serialize(
         case BoundExprKind::ColumnReference:
         {
             const auto& column =
-                static_cast<const BoundColumnRefExpr&>(expression);
+                static_cast<const BoundColumnExpr&>(expression);
 
-            writer.writeUnsigned<std::uint32_t>(column.columnId());
+            writer.writeUnsigned<std::uint32_t>(column.columnIndex);
             break;
         }
 
@@ -569,7 +584,9 @@ void ExpressionSerializer::serialize(
             const auto& literal =
                 static_cast<const BoundLiteralExpr&>(expression);
 
-            ValueSerializer::serialize(literal.value(), writer);
+            writer.writeUnsigned<std::uint8_t>(
+                static_cast<std::uint8_t>(literal.type()));
+            ValueSerializer::serializeValue(literal.type(), literal.value);
             break;
         }
 
@@ -579,10 +596,10 @@ void ExpressionSerializer::serialize(
                 static_cast<const BoundBinaryExpr&>(expression);
 
             writer.writeUnsigned<std::uint8_t>(
-                static_cast<std::uint8_t>(binary.op()));
+                static_cast<std::uint8_t>(binary.op));
 
-            serialize(binary.left(), writer);
-            serialize(binary.right(), writer);
+            serialize(*binary.left, writer);
+            serialize(*binary.right, writer);
             break;
         }
 
@@ -592,9 +609,9 @@ void ExpressionSerializer::serialize(
                 static_cast<const BoundUnaryExpr&>(expression);
 
             writer.writeUnsigned<std::uint8_t>(
-                static_cast<std::uint8_t>(unary.op()));
+                static_cast<std::uint8_t>(unary.op));
 
-            serialize(unary.operand(), writer);
+            serialize(*unary.operand, writer);
             break;
         }
     }

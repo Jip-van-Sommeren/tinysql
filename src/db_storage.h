@@ -19,7 +19,12 @@ enum class DataType : uint8_t
 {
     Null = 0,
     Int = 1,
-    Text = 2
+    Text = 2,
+    Double = 3,
+    Float = 4,
+    Decimal = 5,
+    BigInt = 6,
+    Boolean = 7
 };
 
 struct FixedColumnStorage
@@ -44,8 +49,8 @@ using ColumnStorage = std::variant<FixedColumnStorage, VarColumnStorage>;
 struct Constraint
 {
     std::string name;
-    DataType type;
     ConstraintType constraintType;
+    BoundConstraintExpr expr;
 };
 struct Column
 {

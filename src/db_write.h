@@ -52,15 +52,10 @@ private:
 class ValueSerializer
 {
 public:
-    static void writeFixed(
-        PageWriter &writer,
-        std::size_t absoluteOffset,
+    static std::vector<std::byte> serializeValue(
         DataType type,
         const Value &value);
 
-    static std::vector<std::byte> serializeVariable(
-        DataType type,
-        const Value &value);
 };
 
 class RowWriter

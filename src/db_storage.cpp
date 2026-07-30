@@ -771,11 +771,12 @@ public:
         std::filesystem::path tablePath,
         const std::string &tableName,
         const std::string &magic,
-        const std::vector<Column> &columns)
+        const std::vector<Column> &columns,
+        const std::vector<std::unique_ptr<BoundConstraintExpr>>  &constraints)
     {
         Table table{std::move(tablePath)};
 
-        table.initializeNewTable(tableName, magic, columns);
+        table.initializeNewTable(tableName, magic, columns, constraints);
 
         return table;
     }
@@ -842,7 +843,8 @@ private:
     void initializeNewTable(
         const std::string &tableName,
         const std::string &magic,
-        const std::vector<Column> &columns)
+        const std::vector<Column> &columns,
+        const std::vector<std::unique_ptr<BoundConstraintExpr>>  &constraints)
     {
         Page headerPage = makeHeaderPage(tableName, magic, columns);
         Page firstDataPage = makeEmptyDataPage(uint32_t{1});
@@ -907,10 +909,11 @@ public:
         std::filesystem::create_directories(tablesPath);
     }
 
-    void createTable(
+    Table createTable(
         const std::string &tableName,
         const std::string &magic,
-        const std::vector<Column> &columns)
+        const std::vector<Column> &columns,
+        const std::vector<std::unique_ptr<BoundConstraintExpr>> &constraints)
     {
         std::filesystem::path tablePath = getTablePath(tableName);
 
@@ -919,7 +922,7 @@ public:
             throw std::runtime_error("Table already exists: " + tableName);
         }
 
-        Table::create(tablePath, tableName, magic, columns);
+        return Table::create(tablePath, tableName, magic, columns, constraints);
     }
 
     Table openTable(const std::string &tableName)
@@ -1058,6 +1061,26 @@ public:
             .rows = table.selectRows(select),
             .affectedRows = 0,
             .returnsRows = true};
+    }
+
+    QueryResult executeDelete(const BoundDelete &del)
+    {
+        Table table = storageEngine.openTable(del.tableName);
+
+        return QueryResult{
+            .rows = {},
+            .affectedRows = 0,
+            .returnsRows = false};
+    }
+
+    QueryResult executeCreateTable(const BoundCreateTable &createTable)
+    {
+        Table table = storageEngine.createTable(createTable.tableName, dbName, createTable.columns, createTable.constraints);
+
+        return QueryResult{
+            .rows = {},
+            .affectedRows = 0,
+            .returnsRows = false};
     }
 
 private:

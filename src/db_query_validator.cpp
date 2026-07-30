@@ -34,6 +34,227 @@ namespace
 
         throw std::runtime_error("Unsupported column reference");
     }
+
+    bool isNumericType(DataType type)
+    {
+        switch (type)
+        {
+            case DataType::Int:
+            case DataType::Double:
+            case DataType::Float:
+            case DataType::Decimal:
+            case DataType::BigInt:
+                return true;
+
+            default:
+                return false;
+        }
+    }
+
+    DataType resolveNumericResultType(
+        BinaryOperator op,
+        DataType leftType,
+        DataType rightType)
+    {
+        if (!isNumericType(leftType) ||
+            !isNumericType(rightType))
+        {
+            throw std::runtime_error(
+                "Arithmetic operands must be numeric");
+        }
+
+        if (op == BinaryOperator::Divide)
+        {
+            if (leftType == DataType::Decimal ||
+                rightType == DataType::Decimal)
+            {
+                return DataType::Decimal;
+            }
+
+            if (leftType == DataType::Double ||
+                rightType == DataType::Double ||
+                leftType == DataType::Float ||
+                rightType == DataType::Float)
+            {
+                return DataType::Double;
+            }
+
+            return DataType::Int;
+        }
+
+        if (leftType == DataType::Double ||
+            rightType == DataType::Double)
+        {
+            return DataType::Double;
+        }
+
+        if (leftType == DataType::Decimal ||
+            rightType == DataType::Decimal)
+        {
+            return DataType::Decimal;
+        }
+
+        if (leftType == DataType::Float ||
+            rightType == DataType::Float)
+        {
+            return DataType::Float;
+        }
+
+        if (leftType == DataType::BigInt ||
+            rightType == DataType::BigInt)
+        {
+            return DataType::BigInt;
+        }
+
+        return DataType::Int;
+    }
+
+    bool canAssign(DataType source, DataType target)
+    {
+        if (source == target)
+        {
+            return true;
+        }
+
+        if (source == DataType::Null)
+        {
+            return true; // NULL can be assigned to any type
+        }
+
+        return false;
+    }
+
+    DataType resolveBinaryResultType(
+        BinaryOperator op,
+        DataType leftType,
+        DataType rightType)
+    {
+        switch (op)
+        {
+            case BinaryOperator::Eq:
+            case BinaryOperator::Ne:
+            case BinaryOperator::Lt:
+            case BinaryOperator::Le:
+            case BinaryOperator::Gt:
+            case BinaryOperator::Ge:
+            case BinaryOperator::And:
+            case BinaryOperator::Or:
+                return DataType::Boolean;
+
+            case BinaryOperator::Add:
+            case BinaryOperator::Subtract:
+            case BinaryOperator::Multiply:
+            case BinaryOperator::Divide:
+                return resolveNumericResultType(op,
+                    leftType,
+                    rightType);
+        }
+
+        throw std::runtime_error(
+            "Unsupported binary operator");
+    }
+
+
+    DataType resolveUnaryResultType(
+        UnaryOperator op,
+        DataType operandType)
+    {
+        switch (op)
+        {
+            case UnaryOperator::Positive:
+            case UnaryOperator::Negate:
+            {
+                if (!isNumericType(operandType))
+                {
+                    throw std::runtime_error(
+                        "Unary '+' and '-' require a numeric operand");
+                }
+
+                return operandType;
+            }
+
+            case UnaryOperator::Not:
+            {
+                if (operandType != DataType::Boolean &&
+                    operandType != DataType::Null)
+                {
+                    throw std::runtime_error(
+                        "NOT requires a boolean operand");
+                }
+
+                return DataType::Boolean;
+            }
+        }
+
+        throw std::runtime_error("Unsupported unary operator");
+    }
+
+
+    std::string_view constraintTypeToString(ConstraintType type)
+    {
+        switch (type)
+        {
+            case ConstraintType::NotNull:
+                return "NN";
+
+            case ConstraintType::Default:
+                return "DF";
+
+            case ConstraintType::PrimaryKey:
+                return "PK";
+
+            case ConstraintType::Unique:
+                return "UK";
+
+            case ConstraintType::Check:
+                return "CK";
+            case ConstraintType::ForeignKey:
+                return "FK";
+        }
+
+        return "UNKNOWN";
+    }
+
+
+    std::string join(
+        const std::vector<std::string>& values,
+        std::string_view separator)
+    {
+        std::string result;
+
+        for (std::size_t i = 0; i < values.size(); ++i)
+        {
+            if (i != 0)
+            {
+                result += separator;
+            }
+
+            result += values[i];
+        }
+
+        return result;
+    }
+
+    bool containsColumnReference(const BoundExpr &expr)
+    {
+        if (dynamic_cast<const BoundColumnExpr *>(&expr))
+        {
+            return true;
+        }
+
+        if (const auto *binary = dynamic_cast<const BoundBinaryExpr *>(&expr))
+        {
+            return containsColumnReference(*binary->left) ||
+                containsColumnReference(*binary->right);
+        }
+
+        if (const auto *unary = dynamic_cast<const BoundUnaryExpr *>(&expr))
+        {
+            return containsColumnReference(*unary->operand);
+        }
+
+        return false;
+    }
 }
 
 QueryValidator::QueryValidator(const Catalog &catalog)
@@ -74,13 +295,14 @@ BoundDelete QueryValidator::validateDelete(const DeleteStatement &statement)
         throw std::runtime_error("Table does not exist: " + tableRef.name);
     }
 
-    HeaderPage schema = catalog.getTableHeader(tableRef.name);
+    // HeaderPage schema = catalog.getTableHeader(tableRef.name);
+    BindContext context = catalog.createBindContext(tableRef.name);
 
     std::unique_ptr<BoundExpr> where;
 
     if (statement.where)
     {
-        where = bindExpr(*statement.where, schema, tableRef.name);
+        where = bindExpr(*statement.where, context);
     }
 
     return BoundDelete{
@@ -102,7 +324,7 @@ BoundSelect QueryValidator::validateSelect(const SelectStatement &statement)
         throw std::runtime_error("Table does not exist: " + tableRef.name);
     }
 
-    HeaderPage schema = catalog.getTableHeader(tableRef.name);
+    // HeaderPage schema = catalog.getTableHeader(tableRef.name);
     BindContext context = catalog.createBindContext(tableRef.name);
     std::unique_ptr<BoundExpr> where;
 
@@ -117,7 +339,7 @@ BoundSelect QueryValidator::validateSelect(const SelectStatement &statement)
     {
         if (dynamic_cast<const WildcardSelectItem *>(item.get()))
         {
-            for (const Column &column : schema.columns)
+            for (const Column &column : context.columns)
             {
                 projectedColumnIndexes.push_back(column.columnIndex);
             }
@@ -133,7 +355,7 @@ BoundSelect QueryValidator::validateSelect(const SelectStatement &statement)
                 throw std::runtime_error("Unknown table qualifier in wildcard");
             }
 
-            for (const Column &column : schema.columns)
+            for (const Column &column : context.columns)
             {
                 projectedColumnIndexes.push_back(column.columnIndex);
             }
@@ -167,25 +389,7 @@ BoundSelect QueryValidator::validateSelect(const SelectStatement &statement)
         .where = std::move(where)};
 }
 
-// Constraint QueryValidator(const std::string &name, DataType type, const ColumnDefExpr &colDef)
-// {
-//     Constraint constraint;
-//     for (const auto &constraintExpr : colDef.constraints)
-//         {
-//             if (constraintExpr->constraintType == ConstraintType::NotNull)
-//             {
-//                 constraint.type = type;
-//                 constraint.constraintType = ConstraintType::NotNull;
-//             }
-//             else if (constraintExpr->constraintType == ConstraintType::PrimaryKey)
-//             {
-//                 constraint.type = type;
-//                 constraint.constraintType = ConstraintType::PrimaryKey;
-//             }
-//             // Handle other constraint types as needed
-//         }
-//     return Constraint{name, type};
-// }
+
 Column QueryValidator::bindColumnDefinition(
     const ColumnDefExpr &colDef,
     std::uint32_t columnIndex)
@@ -222,56 +426,18 @@ BoundCreateTable QueryValidator::bindCreateTable(
     // Second pass: bind constraints.
     for (const auto& constraint : statement.constraints)
     {
+        
         result.constraints.push_back(
             bindConstraintExpr(*constraint, context));
+        
     }
 
     return result;
 }
 
-std::string_view constraintTypeToString(ConstraintType type)
-{
-    switch (type)
-    {
-        case ConstraintType::NotNull:
-            return "NN";
 
-        case ConstraintType::Default:
-            return "DF";
 
-        case ConstraintType::PrimaryKey:
-            return "PK";
 
-        case ConstraintType::Unique:
-            return "UK";
-
-        case ConstraintType::Check:
-            return "CK";
-        case ConstraintType::ForeignKey:
-            return "FK";
-    }
-
-    return "UNKNOWN";
-}
-
-std::string join(
-    const std::vector<std::string>& values,
-    std::string_view separator)
-{
-    std::string result;
-
-    for (std::size_t i = 0; i < values.size(); ++i)
-    {
-        if (i != 0)
-        {
-            result += separator;
-        }
-
-        result += values[i];
-    }
-
-    return result;
-}
 
 std::unique_ptr<BoundConstraintExpr> QueryValidator::bindConstraintExpr(
     const ConstraintExpr &expr, BindContext &context) 
@@ -304,6 +470,18 @@ std::unique_ptr<BoundConstraintExpr> QueryValidator::bindConstraintExpr(
             std::format("{}_{}", constraintTypeToString(defaultExpr.constraintType), defaultExpr.columnName)); // Use a format for the constraint name if not provided
 
             auto boundValue = bindExpr(*defaultExpr.value, context);
+            if (containsColumnReference(*boundValue))
+            {
+                throw std::runtime_error(
+                    "DEFAULT expressions cannot reference table columns");
+            }
+            if (!canAssign(boundValue->type(), column.type))
+            {
+                throw std::runtime_error(
+                    std::format(
+                        "Default value type is incompatible with column '{}'",
+                        column.name));
+            }
 
             return std::make_unique<BoundDefaultConstraintExpr>(
                 std::move(constraintName), 
@@ -445,17 +623,18 @@ BoundInsert QueryValidator::validateInsert(const InsertStatement &statement)
         throw std::runtime_error("Table does not exist: " + statement.tableName);
     }
 
-    HeaderPage schema = catalog.getTableHeader(statement.tableName);
+    // HeaderPage schema = catalog.getTableHeader(statement.tableName);
+    BindContext context = catalog.createBindContext(statement.tableName);
 
     std::vector<const Column *> targetColumns;
     targetColumns.reserve(
         statement.columns.empty()
-            ? schema.columns.size()
+            ? context.columns.size()
             : statement.columns.size());
 
     if (statement.columns.empty())
     {
-        for (const Column &column : schema.columns)
+        for (const Column &column : context.columns)
         {
             targetColumns.push_back(&column);
         }
@@ -464,7 +643,7 @@ BoundInsert QueryValidator::validateInsert(const InsertStatement &statement)
     {
         for (const std::string &columnName : statement.columns)
         {
-            targetColumns.push_back(&resolveColumn(schema, columnName));
+            targetColumns.push_back(&context.resolveColumn(columnName));
         }
     }
 
@@ -474,7 +653,7 @@ BoundInsert QueryValidator::validateInsert(const InsertStatement &statement)
     }
 
     Row row{
-        .values = std::vector<Value>(schema.columns.size(), std::monostate{})};
+        .values = std::vector<Value>(context.columns.size(), std::monostate{})};
 
     for (std::size_t i = 0; i < targetColumns.size(); ++i)
     {
@@ -483,7 +662,7 @@ BoundInsert QueryValidator::validateInsert(const InsertStatement &statement)
         row.values[column.columnIndex] = bindLiteralValue(expr, column);
     }
 
-    for (const Column &column : schema.columns)
+    for (const Column &column : context.columns)
     {
         if (!column.nullable &&
             std::holds_alternative<std::monostate>(row.values[column.columnIndex]))
@@ -498,21 +677,6 @@ BoundInsert QueryValidator::validateInsert(const InsertStatement &statement)
         .row = std::move(row)};
 }
 
-const Column &QueryValidator::resolveColumn(
-    const HeaderPage &schema,
-    const std::string &columnName) const
-{
-    for (const Column &column : schema.columns)
-    {
-        if (column.name == columnName)
-        {
-            return column;
-        }
-    }
-
-    throw std::runtime_error(
-        std::format("Column does not exist: {}", columnName));
-}
 
 Value QueryValidator::bindLiteralValue(
     const Expr &expr,
@@ -578,9 +742,12 @@ std::unique_ptr<BoundExpr> QueryValidator::bindExpr(
     if (const auto* column =
             dynamic_cast<const ColumnExpr*>(&expr))
     {
+        std::string_view view = context.tableName;
+
+        const std::string str{view};
         std::string columnName = resolveColumnName(
             column->parts,
-            context.tableName);
+            view);
 
         const Column& resolved =
             context.resolveColumn(columnName);
@@ -621,17 +788,34 @@ std::unique_ptr<BoundExpr> QueryValidator::bindExpr(
 
     if (const auto *binary = dynamic_cast<const BinaryExpr *>(&expr))
     {
+        auto leftBound = bindExpr(*binary->left, context);
+        auto rightBound = bindExpr(*binary->right, context);
+        DataType resultType = resolveBinaryResultType(
+            binary->op,
+            leftBound->type(),
+            rightBound->type());
+
         return std::make_unique<BoundBinaryExpr>(
             binary->op,
-            bindExpr(*binary->left, context),
-            bindExpr(*binary->right, context));
+            std::move(leftBound),
+            std::move(rightBound),
+            resultType);
     }
 
     if (const auto *unary = dynamic_cast<const UnaryExpr *>(&expr))
     {
+        auto operand = bindExpr(
+        *unary->operand,
+        context);
+
+        DataType resultType = resolveUnaryResultType(
+        unary->op,
+        operand->type());
+
         return std::make_unique<BoundUnaryExpr>(
             unary->op,
-            bindExpr(*unary->operand, context));
+            std::move(operand),
+            resultType);
     }
 
     throw std::runtime_error("Unsupported expression");

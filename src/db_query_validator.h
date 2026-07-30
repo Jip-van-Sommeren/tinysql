@@ -34,8 +34,8 @@ struct BoundLiteral
 
 struct BoundExpr
 {
-    explicit BoundExpr(BoundExprKind kind)
-        : kind_(kind)
+    explicit BoundExpr(BoundExprKind kind, DataType type)
+        : kind_(kind), type_(type)
     {
     }
 
@@ -45,9 +45,15 @@ struct BoundExpr
     {
         return kind_;
     }
+    
+    DataType type() const noexcept
+    {
+        return type_;
+    }
 
 private:
     BoundExprKind kind_;
+    DataType type_;
 };
 
 
@@ -57,8 +63,9 @@ struct BoundBinaryExpr final : BoundExpr
     BoundBinaryExpr(
         BinaryOperator op,
         std::unique_ptr<BoundExpr> left,
-        std::unique_ptr<BoundExpr> right)
-        : BoundExpr(BoundExprKind::Binary),
+        std::unique_ptr<BoundExpr> right,
+        DataType resultType)
+        : BoundExpr(BoundExprKind::Binary, resultType),
           op(op),
           left(std::move(left)),
           right(std::move(right))
@@ -74,8 +81,8 @@ struct BoundUnaryExpr final : BoundExpr
 {
     BoundUnaryExpr(
         UnaryOperator op,
-        std::unique_ptr<BoundExpr> operand)
-        : BoundExpr(BoundExprKind::Unary),
+        std::unique_ptr<BoundExpr> operand, DataType type)
+        : BoundExpr(BoundExprKind::Unary, type),
           op(op),
           operand(std::move(operand))
     {
@@ -91,7 +98,7 @@ struct BoundColumnExpr : BoundExpr
     DataType type;
 
     BoundColumnExpr(std::uint32_t columnIndex, DataType type)
-        : BoundExpr(BoundExprKind::ColumnReference), columnIndex(columnIndex), type(type)
+        : BoundExpr(BoundExprKind::ColumnReference, type), columnIndex(columnIndex), type(type)
     {
     }
 };
@@ -99,12 +106,11 @@ struct BoundColumnExpr : BoundExpr
 struct BoundLiteralExpr : BoundExpr
 {
     Value value;
-    DataType type;
+    // DataType type;
 
     BoundLiteralExpr(Value value, DataType type)
-        : BoundExpr(BoundExprKind::Literal),
-          value(std::move(value)),
-          type(type)
+        : BoundExpr(BoundExprKind::Literal, type),
+          value(std::move(value))
     {
     }
 };
@@ -353,6 +359,11 @@ private:
     Value bindLiteralValue(
         const Expr &expr,
         const Column &targetColumn) const;
+
+    DataType binaryResultType(
+    BinaryOperator op,
+    DataType leftType,
+    DataType rightType);
 };
 
 
