@@ -439,6 +439,12 @@ void HeaderPageWriter::write(const HeaderPage &header)
     {
         writeColumn(column);
     }
+    writer.writeUnsigned<std::uint32_t>(static_cast<std::uint32_t>(header.constraints.size()));
+
+    for (const Constraint &constraint : header.constraints)
+    {
+        writeConstraint(constraint);
+    }
 
     writer.writeUnsigned<std::uint64_t>(header.totalRowCount);
     writer.writeUnsigned<std::uint32_t>(header.firstDataPageId);
@@ -559,7 +565,66 @@ void DataPageWriter::write(const PageHeader &pageHeader, const std::vector<Row> 
     headerWriter.setFreeSpaceEnd(freeEnd);
 }
 
+void HeaderPageWriter::writeConstraint(
+    const Constraint& constraint)
+{
+    writer.writeUnsigned<std::uint8_t>(static_cast<std::uint8_t>(constraint.expr.constraintType));
 
+    writer.writeString(constraint.expr.constraintName);
+
+    switch(constraint.expr.constraintType)
+    {
+        case ConstraintType::Null:
+            break;
+        case ConstraintType::NotNull:
+            // No additional data needed for NotNull or Null constraints
+            writer.writeUnsigned<std::uint32_t>(static_cast<const BoundNotNullConstraintExpr&>(constraint.expr).columnId);
+            break;
+        
+        case ConstraintType::Default:
+            const auto& def =
+                static_cast<const BoundDefaultConstraintExpr&>(constraint.expr);
+            ExpressionSerializer::serialize(*def.value, writer);
+            writer.writeUnsigned<std::uint32_t>(def.columnId);
+            break;
+        case ConstraintType::PrimaryKey:
+            // Primary key constraints are represented by the unique constraint on the primary key columns.
+            const auto& pk = static_cast<const BoundUniqueConstraintExpr&>(constraint.expr);
+            for (ColumnId colId : pk.columnIds)
+            {
+                writer.writeUnsigned<std::uint32_t>(colId);
+            }
+            break;
+        case ConstraintType::Check:
+            const auto& ck =
+                static_cast<const BoundCheckConstraintExpr&>(constraint.expr);
+            ExpressionSerializer::serialize(*ck.condition, writer);
+            break;
+        case ConstraintType::Unique:
+            const auto& uq =
+                static_cast<const BoundUniqueConstraintExpr&>(constraint.expr);
+            for (ColumnId colId : uq.columnIds)
+            {
+                writer.writeUnsigned<std::uint32_t>(colId);
+            }
+            break;
+        case ConstraintType::ForeignKey:
+            const auto& fk =
+                static_cast<const BoundForeignKeyConstraintExpr&>(constraint.expr);
+            for (ColumnId colId : fk.localColumnIds)
+            {
+                writer.writeUnsigned<std::uint32_t>(colId);
+            }
+            writer.writeString(fk.referencedTableName);
+            for (ColumnId colId : fk.referencedColumnIds)
+            {
+                writer.writeUnsigned<std::uint32_t>(colId);
+            }
+            break;
+        default:
+            throw std::runtime_error("Unsupported constraint type for serialization");
+    }
+}
 
 void ExpressionSerializer::serialize(
     const BoundExpr& expression,

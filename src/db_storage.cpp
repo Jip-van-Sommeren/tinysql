@@ -45,7 +45,10 @@ namespace
         throw std::runtime_error("Expression does not evaluate to a value");
     }
 
-    bool compareValues(ComparisonOp op, const Value &left, const Value &right)
+
+
+
+    bool compareValues(BinaryOperator op, const Value &left, const Value &right)
     {
         if (std::holds_alternative<int>(left) && std::holds_alternative<int>(right))
         {
@@ -54,17 +57,17 @@ namespace
 
             switch (op)
             {
-            case ComparisonOp::Gt:
+            case BinaryOperator::Gt:
                 return leftInt > rightInt;
-            case ComparisonOp::Ge:
+            case BinaryOperator::Ge:
                 return leftInt >= rightInt;
-            case ComparisonOp::Lt:
+            case BinaryOperator::Lt:
                 return leftInt < rightInt;
-            case ComparisonOp::Le:
+            case BinaryOperator::Le:
                 return leftInt <= rightInt;
-            case ComparisonOp::Eq:
+            case BinaryOperator::Eq:
                 return leftInt == rightInt;
-            case ComparisonOp::Ne:
+            case BinaryOperator::Ne:
                 return leftInt != rightInt;
             default:
                 throw std::runtime_error("Unsupported comparison operator");
@@ -78,17 +81,17 @@ namespace
 
             switch (op)
             {
-            case ComparisonOp::Gt:
+            case BinaryOperator::Gt:
                 return leftStr > rightStr;
-            case ComparisonOp::Ge:
+            case BinaryOperator::Ge:
                 return leftStr >= rightStr;
-            case ComparisonOp::Lt:
+            case BinaryOperator::Lt:
                 return leftStr < rightStr;
-            case ComparisonOp::Le:
+            case BinaryOperator::Le:
                 return leftStr <= rightStr;
-            case ComparisonOp::Eq:
+            case BinaryOperator::Eq:
                 return leftStr == rightStr;
-            case ComparisonOp::Ne:
+            case BinaryOperator::Ne:
                 return leftStr != rightStr;
             default:
                 throw std::runtime_error("Unsupported comparison operator");
@@ -98,36 +101,56 @@ namespace
         throw std::runtime_error("Cannot compare values of different types");
     }
 
+    bool evaluateBinaryPredicate(const BoundBinaryExpr &expr, const Row &row)
+    {
+        switch (expr.op)
+        {
+            case BinaryOperator::And:
+                return evaluatePredicate(*expr.left, row) &&
+                       evaluatePredicate(*expr.right, row);
+            case BinaryOperator::Or:
+                return evaluatePredicate(*expr.left, row) ||
+                       evaluatePredicate(*expr.right, row);
+            
+            case BinaryOperator::Eq:
+            case BinaryOperator::Ne:
+            case BinaryOperator::Gt:
+            case BinaryOperator::Ge:
+            case BinaryOperator::Lt:
+            case BinaryOperator::Le:
+            {
+                Value leftValue = evaluateValue(*expr.left, row);
+                Value rightValue = evaluateValue(*expr.right, row);
+                return compareValues(expr.op, leftValue, rightValue);
+            }
+            case BinaryOperator::Add:
+            case BinaryOperator::Subtract:
+            case BinaryOperator::Multiply:
+            case BinaryOperator::Divide:
+                throw std::runtime_error("Arithmetic operations should be folded during binding, this should not be possible at this stage");
+        }
+    }
+
     bool evaluatePredicate(const BoundExpr &expr, const Row &row)
     {
-        if (const auto *comparison = dynamic_cast<const BoundComparisonExpr *>(&expr))
-        {
-            Value left = evaluateValue(*comparison->left, row);
-            Value right = evaluateValue(*comparison->right, row);
 
-            return compareValues(comparison->op, left, right);
-        }
-
-        if (const auto *logical = dynamic_cast<const BoundLogicalExpr *>(&expr))
-        {
-            if (logical->op == LogicalOp::And)
+            if (const auto *binary = dynamic_cast<const BoundBinaryExpr *>(&expr))
             {
-                return evaluatePredicate(*logical->left, row) &&
-                       evaluatePredicate(*logical->right, row);
+                return evaluateBinaryPredicate(*binary, row);
             }
 
-            return evaluatePredicate(*logical->left, row) ||
-                   evaluatePredicate(*logical->right, row);
-        }
-        if (const auto *isNull = dynamic_cast<const BoundIsNullExpr *>(&expr))
-        {
-            Value value = evaluateValue(*isNull->operand, row);
-            bool result = std::holds_alternative<std::monostate>(value);
+            if (const auto *unary = dynamic_cast<const BoundUnaryExpr *>(&expr)){
+                if (unary->op == UnaryOperator::Not)
+                {
+                    return !evaluatePredicate(*unary->operand, row);
+                }
+            }
 
-            return isNull->negated ? !result : result;
-        }
-
-        throw std::runtime_error("WHERE expression does not evaluate to a predicate");
+            if (const auto *isNull = dynamic_cast<const BoundIsNullExpr *>(&expr)){     
+                Value isNullValue = evaluateValue(*isNull->operand, row);
+                return std::holds_alternative<std::monostate>(isNullValue);
+            }
+            
     }
     std::fstream openOrCreateFile(const std::filesystem::path &path)
     {
@@ -282,6 +305,23 @@ namespace
             .message = ""};
     }
 
+    std::vector<Constraint> buildConstraints(const std::vector<std::unique_ptr<BoundConstraintExpr>> &boundConstraints)
+    {
+        std::vector<Constraint> constraints;
+        constraints.reserve(boundConstraints.size());
+
+        for (const auto &boundConstraint : boundConstraints)
+        {
+            constraints.push_back(
+                Constraint{
+                .expr = *boundConstraint
+                }
+            ); 
+        }
+
+        return constraints;
+    }
+
     std::vector<Column> buildStoredColumns(const std::vector<Column> &columns)
     {
         std::vector<Column> storedColumns;
@@ -369,7 +409,7 @@ namespace
             .data = dataPage};
     }
 
-    Page makeHeaderPage(const std::string &name, const std::string &magic, const std::vector<Column> &columns)
+    Page makeHeaderPage(const std::string &name, const std::string &magic, const std::vector<Column> &columns, const std::vector<std::unique_ptr<BoundConstraintExpr>> &boundConstraints)
     {
         PageHeader pageHeader{
             .pageId = 0,
@@ -385,6 +425,7 @@ namespace
             .pageSize = PAGE_SIZE,
             .tableName = name,
             .columns = buildStoredColumns(columns),
+            .constraints = buildConstraints(boundConstraints),
             .totalRowCount = uint64_t{0},
             .firstDataPageId = uint32_t{0},
             .lastDataPageId = uint32_t{0},

@@ -48,8 +48,6 @@ using ColumnStorage = std::variant<FixedColumnStorage, VarColumnStorage>;
 
 struct Constraint
 {
-    std::string name;
-    ConstraintType constraintType;
     BoundConstraintExpr expr;
 };
 struct Column

@@ -170,11 +170,11 @@ struct BoundPrimaryKeyConstraintExpr : BoundConstraintExpr
 
 struct BoundUniqueConstraintExpr : BoundConstraintExpr
 {
-    std::vector<ColumnId> columns;
+    std::vector<ColumnId> columnIds;
 
     explicit BoundUniqueConstraintExpr(std::string constraintName, std::vector<ColumnId> columns)
         : BoundConstraintExpr(ConstraintType::Unique, std::move(constraintName)),
-          columns(std::move(columns))
+          columnIds(std::move(columnIds))
     {
     }
 };
@@ -206,13 +206,13 @@ struct BoundDefaultConstraintExpr : BoundConstraintExpr
 struct BoundNotNullConstraintExpr : BoundConstraintExpr
 
 {
-    explicit BoundNotNullConstraintExpr(std::string constraintName, std::string columnName)
+    explicit BoundNotNullConstraintExpr(std::string constraintName, ColumnId columnId)
         : BoundConstraintExpr(ConstraintType::NotNull, std::move(constraintName)), 
-          columnName(std::move(columnName))
+          columnId(std::move(columnId))
     {
     }
 
-    std::string columnName;
+    ColumnId columnId;
 
 };
 

@@ -735,6 +735,56 @@ Value QueryValidator::bindLiteralValue(
     }
 }
 
+Value evaluateConstantBinary(
+    BinaryOperator op,
+    const Value& left,
+    const Value& right,
+    DataType resultType)
+{
+    if (resultType != DataType::Int)
+    {
+        throw std::runtime_error(
+            "Constant evaluation currently supports only integers");
+    }
+
+    if (!std::holds_alternative<int>(left) ||
+        !std::holds_alternative<int>(right))
+    {
+        throw std::runtime_error(
+            "Expected integer operands");
+    }
+
+    const int lhs = std::get<int>(left);
+    const int rhs = std::get<int>(right);
+
+    switch (op)
+    {
+        case BinaryOperator::Add:
+            return lhs + rhs;
+
+        case BinaryOperator::Subtract:
+            return lhs - rhs;
+
+        case BinaryOperator::Multiply:
+            return lhs * rhs;
+
+        case BinaryOperator::Divide:
+        {
+            if (rhs == 0)
+            {
+                throw std::runtime_error(
+                    "Division by zero in constant expression");
+            }
+
+            return lhs / rhs;
+        }
+
+        default:
+            throw std::runtime_error(
+                "Operator is not a constant arithmetic operator");
+    }
+}
+
 std::unique_ptr<BoundExpr> QueryValidator::bindExpr(
     const Expr &expr,
     const BindContext &context) const
@@ -795,6 +845,26 @@ std::unique_ptr<BoundExpr> QueryValidator::bindExpr(
             leftBound->type(),
             rightBound->type());
 
+        if (leftBound->kind() == BoundExprKind::Literal &&
+            rightBound->kind() == BoundExprKind::Literal)
+        {
+            const auto& leftLiteral =
+                static_cast<const BoundLiteralExpr&>(*leftBound);
+
+        const auto& rightLiteral =
+            static_cast<const BoundLiteralExpr&>(*rightBound);
+
+        Value result = evaluateConstantBinary(
+            binary->op,
+            leftLiteral.value,
+            rightLiteral.value,
+            resultType);
+
+        return std::make_unique<BoundLiteralExpr>(
+            std::move(result),
+            resultType);
+    }
+
         return std::make_unique<BoundBinaryExpr>(
             binary->op,
             std::move(leftBound),
@@ -811,6 +881,32 @@ std::unique_ptr<BoundExpr> QueryValidator::bindExpr(
         DataType resultType = resolveUnaryResultType(
         unary->op,
         operand->type());
+        if (operand->kind() == BoundExprKind::Literal)
+        {
+            const auto& literal =
+                static_cast<const BoundLiteralExpr&>(*operand);
+
+            if (unary->op == UnaryOperator::Positive)
+            {
+                return std::make_unique<BoundLiteralExpr>(
+                    literal.value,
+                    resultType);
+            }
+
+            if (unary->op == UnaryOperator::Negate)
+            {
+                if (resultType == DataType::Int)
+                {
+                    const int value =
+                        std::get<int>(literal.value);
+
+                    return std::make_unique<BoundLiteralExpr>(
+                        Value{-value},
+                        DataType::Int);
+                }
+            }
+        }
+
 
         return std::make_unique<BoundUnaryExpr>(
             unary->op,
