@@ -14,7 +14,21 @@
 #include <stdfloat>
 
 constexpr size_t PAGE_SIZE = 4096;
-using Value = std::variant<std::monostate, std::int32_t, std::string, std::float32_t, std::float64_t, bool, std::int64_t>;
+
+#ifdef __STDCPP_FLOAT32_T__
+using Float32 = std::float32_t;
+#else
+using Float32 = float;
+static_assert(sizeof(Float32) == 4);
+#endif
+#ifdef __STDCPP_FLOAT64_T__
+using Float64 = std::float64_t;
+#else
+using Float64 = double;
+static_assert(sizeof(Float64) == 8);
+#endif
+
+using Value = std::variant<std::monostate, std::int32_t, std::string, Float32, Float64, bool, std::int64_t>;
 
 enum class DataType : uint8_t
 {

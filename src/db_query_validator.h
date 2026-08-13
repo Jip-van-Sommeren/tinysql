@@ -132,7 +132,7 @@ struct BoundIsNullExpr : BoundExpr
     bool negated;
 
     BoundIsNullExpr(std::unique_ptr<BoundExpr> operand, bool negated)
-        : BoundExpr(BoundExprKind::IsNull),
+        : BoundExpr(BoundExprKind::IsNull, DataType::Boolean),
           operand(std::move(operand)),
           negated(negated)
     {
