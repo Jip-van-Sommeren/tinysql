@@ -45,60 +45,120 @@ namespace
         throw std::runtime_error("Expression does not evaluate to a value");
     }
 
-
-
-
-    bool compareValues(BinaryOperator op, const Value &left, const Value &right)
+    bool compareValues(
+        BinaryOperator op,
+        const Value& left,
+        const Value& right)
     {
-        if (std::holds_alternative<int>(left) && std::holds_alternative<int>(right))
-        {
-            int leftInt = std::get<int>(left);
-            int rightInt = std::get<int>(right);
-
-            switch (op)
+        return std::visit(
+            [&](const auto& lhs, const auto& rhs) -> bool
             {
-            case BinaryOperator::Gt:
-                return leftInt > rightInt;
-            case BinaryOperator::Ge:
-                return leftInt >= rightInt;
-            case BinaryOperator::Lt:
-                return leftInt < rightInt;
-            case BinaryOperator::Le:
-                return leftInt <= rightInt;
-            case BinaryOperator::Eq:
-                return leftInt == rightInt;
-            case BinaryOperator::Ne:
-                return leftInt != rightInt;
-            default:
-                throw std::runtime_error("Unsupported comparison operator");
-            }
+                using L = std::decay_t<decltype(lhs)>;
+                using R = std::decay_t<decltype(rhs)>;
+
+                if constexpr (!std::is_same_v<L, R>)
+                {
+                    throw std::runtime_error(
+                        "Cannot compare values of different types");
+                }
+                else if constexpr (std::is_same_v<L, std::monostate>)
+                {
+                    throw std::runtime_error(
+                        "Cannot directly compare NULL");
+                }
+                else
+                {
+                    switch (op)
+                    {
+                        case BinaryOperator::Gt:
+                            return lhs > rhs;
+
+                        case BinaryOperator::Ge:
+                            return lhs >= rhs;
+
+                        case BinaryOperator::Lt:
+                            return lhs < rhs;
+
+                        case BinaryOperator::Le:
+                            return lhs <= rhs;
+
+                        case BinaryOperator::Eq:
+                            return lhs == rhs;
+
+                        case BinaryOperator::Ne:
+                            return lhs != rhs;
+
+                        default:
+                            throw std::runtime_error(
+                                "Unsupported comparison operator");
+                    }
+                }
+            },
+            left,
+            right);
+    }
+
+    // bool compareValues(BinaryOperator op, const Value &left, const Value &right)
+    // {
+    //     if (std::holds_alternative<int>(left) && std::holds_alternative<int>(right))
+    //     {
+    //         int leftInt = std::get<int>(left);
+    //         int rightInt = std::get<int>(right);
+
+    //         switch (op)
+    //         {
+    //         case BinaryOperator::Gt:
+    //             return leftInt > rightInt;
+    //         case BinaryOperator::Ge:
+    //             return leftInt >= rightInt;
+    //         case BinaryOperator::Lt:
+    //             return leftInt < rightInt;
+    //         case BinaryOperator::Le:
+    //             return leftInt <= rightInt;
+    //         case BinaryOperator::Eq:
+    //             return leftInt == rightInt;
+    //         case BinaryOperator::Ne:
+    //             return leftInt != rightInt;
+    //         default:
+    //             throw std::runtime_error("Unsupported comparison operator");
+    //         }
+    //     }
+
+    //     if (std::holds_alternative<std::string>(left) && std::holds_alternative<std::string>(right))
+    //     {
+    //         const std::string &leftStr = std::get<std::string>(left);
+    //         const std::string &rightStr = std::get<std::string>(right);
+
+    //         switch (op)
+    //         {
+    //         case BinaryOperator::Gt:
+    //             return leftStr > rightStr;
+    //         case BinaryOperator::Ge:
+    //             return leftStr >= rightStr;
+    //         case BinaryOperator::Lt:
+    //             return leftStr < rightStr;
+    //         case BinaryOperator::Le:
+    //             return leftStr <= rightStr;
+    //         case BinaryOperator::Eq:
+    //             return leftStr == rightStr;
+    //         case BinaryOperator::Ne:
+    //             return leftStr != rightStr;
+    //         default:
+    //             throw std::runtime_error("Unsupported comparison operator");
+    //         }
+    //     }
+
+    //     throw std::runtime_error("Cannot compare values of different types");
+    // }
+
+    Value fetchValueFromRow(std::uint32_t columnIndex, const Row &row)
+    {
+        if (columnIndex >= row.values.size())
+        {
+            throw std::runtime_error("Column index out of bounds");
         }
 
-        if (std::holds_alternative<std::string>(left) && std::holds_alternative<std::string>(right))
-        {
-            const std::string &leftStr = std::get<std::string>(left);
-            const std::string &rightStr = std::get<std::string>(right);
-
-            switch (op)
-            {
-            case BinaryOperator::Gt:
-                return leftStr > rightStr;
-            case BinaryOperator::Ge:
-                return leftStr >= rightStr;
-            case BinaryOperator::Lt:
-                return leftStr < rightStr;
-            case BinaryOperator::Le:
-                return leftStr <= rightStr;
-            case BinaryOperator::Eq:
-                return leftStr == rightStr;
-            case BinaryOperator::Ne:
-                return leftStr != rightStr;
-            default:
-                throw std::runtime_error("Unsupported comparison operator");
-            }
-        }
-
-        throw std::runtime_error("Cannot compare values of different types");
+        return row.values[columnIndex];
     }
 
     bool evaluateBinaryPredicate(const BoundBinaryExpr &expr, const Row &row)
@@ -119,6 +179,7 @@ namespace
             case BinaryOperator::Lt:
             case BinaryOperator::Le:
             {
+
                 Value leftValue = evaluateValue(*expr.left, row);
                 Value rightValue = evaluateValue(*expr.right, row);
                 return compareValues(expr.op, leftValue, rightValue);
@@ -840,7 +901,7 @@ public:
         bufferManager.flushAll();
     }
 
-    std::vector<Row> selectAllRows()
+    std::vector<RowEntry> selectAllRows()
     {
         Page &hPage = bufferManager.getPage(0, decodeHeaderPage);
 
@@ -850,13 +911,13 @@ public:
     std::vector<Row> selectRows(const BoundSelect &select)
     {
         Page &hPage = bufferManager.getPage(0, decodeHeaderPage);
-        std::vector<Row> rows = selectAllRowsFromPages(hPage);
+        std::vector<RowEntry> rows = selectAllRowsFromPages(hPage);
 
         std::vector<Row> result;
 
-        for (const Row &row : rows)
+        for (const RowEntry &rowEntry : rows)
         {
-            if (select.where && !evaluatePredicate(*select.where, row))
+            if (select.where && !evaluatePredicate(*select.where, rowEntry.row))
             {
                 continue;
             }
@@ -864,7 +925,7 @@ public:
             Row projected;
             for (std::uint32_t index : select.projectedColumnIndexes)
             {
-                projected.values.push_back(row.values[index]);
+                projected.values.push_back(rowEntry.row.values[index]);
             }
 
             result.push_back(std::move(projected));
@@ -872,6 +933,38 @@ public:
 
         return result;
     }
+
+    std::uint32_t deleteRows(const BoundDelete &del)
+    {
+        Page &hPage = bufferManager.getPage(0, decodeHeaderPage);
+        std::uint32_t deletedCount = 0;
+        HeaderPage &headerPage = std::get<HeaderPage>(hPage.data);
+
+        uint32_t pageId = headerPage.firstDataPageId;
+
+        while (pageId != 0)
+        {
+            Page &dPage = bufferManager.getPage(pageId, [&headerPage](const RawPage &rawPage)
+                                                { return decodeDataPage(rawPage, headerPage); });
+            DataPage &dataPage = std::get<DataPage>(dPage.data);
+            for (const RowEntry &entry : dataPage.rows)
+            {
+                if (del.where && !evaluatePredicate(*del.where, entry.row))
+                {
+                    continue;
+                }
+                std::uint32_t slotIndex = entry.slotIndex;
+                dataPage.slots[slotIndex].set(SlotFlag::Deleted);
+                ++deletedCount;
+            }
+            pageId = dPage.header.nextPageId;
+        }
+        bufferManager.flushAll();
+
+
+        return deletedCount;
+    }
+    
 
 private:
     explicit Table(std::filesystem::path tablePath)
@@ -914,9 +1007,9 @@ private:
         }
     }
 
-    std::vector<Row> selectAllRowsFromPages(Page &hPage)
+    std::vector<RowEntry> selectAllRowsFromPages(Page &hPage)
     {
-        std::vector<Row> result;
+        std::vector<RowEntry> result;
 
         HeaderPage &headerPage = std::get<HeaderPage>(hPage.data);
 
@@ -930,7 +1023,13 @@ private:
 
             for (const RowEntry &entry : dataPage.rows)
             {
-                result.push_back(entry.row);
+                std::uint32_t slotIndex = entry.slotIndex;
+                const Slot &slot = dataPage.slots[slotIndex];
+                if (!slot.has(SlotFlag::Deleted))
+                {
+                    result.push_back(entry);
+
+                }
             }
 
             pageId = dPage.header.nextPageId;
@@ -1097,20 +1196,20 @@ public:
     QueryResult executeSelect(const BoundSelect &select)
     {
         Table table = storageEngine.openTable(select.tableName);
-
+        std::vector<Row> rows = table.selectRows(select);
         return QueryResult{
-            .rows = table.selectRows(select),
-            .affectedRows = 0,
+            .rows = rows,
+            .affectedRows = rows.size(),
             .returnsRows = true};
     }
 
     QueryResult executeDelete(const BoundDelete &del)
     {
         Table table = storageEngine.openTable(del.tableName);
-
+        std::uint32_t deletedCount = table.deleteRows(del);
         return QueryResult{
             .rows = {},
-            .affectedRows = 0,
+            .affectedRows = deletedCount,
             .returnsRows = false};
     }
 
