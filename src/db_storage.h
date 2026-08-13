@@ -11,9 +11,10 @@
 #include <fstream>
 #include <format>
 #include "db_sql_parser.h"
+#include <stdfloat>
 
 constexpr size_t PAGE_SIZE = 4096;
-using Value = std::variant<std::monostate, int, std::string>;
+using Value = std::variant<std::monostate, std::int32_t, std::string, std::float32_t, std::float64_t, bool, std::int64_t>;
 
 enum class DataType : uint8_t
 {

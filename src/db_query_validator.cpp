@@ -124,6 +124,86 @@ namespace
         return false;
     }
 
+    DataType commonNumericType(
+    DataType leftType,
+    DataType rightType)
+    {
+        if (!isNumericType(leftType) ||
+            !isNumericType(rightType))
+        {
+            throw std::runtime_error(
+                "Expected numeric operands");
+        }
+
+        if (leftType == DataType::Double ||
+            rightType == DataType::Double)
+        {
+            return DataType::Double;
+        }
+
+        if (leftType == DataType::Float ||
+            rightType == DataType::Float)
+        {
+            return DataType::Float;
+        }
+
+        return DataType::Int;
+    }
+
+    DataType resolveCommonOperandType(
+    BinaryOperator op,
+    DataType leftType,
+    DataType rightType)
+    {
+        switch (op)
+        {
+            case BinaryOperator::Add:
+            case BinaryOperator::Subtract:
+            case BinaryOperator::Multiply:
+            case BinaryOperator::Divide:
+
+            case BinaryOperator::Eq:
+            case BinaryOperator::Ne:
+            case BinaryOperator::Gt:
+            case BinaryOperator::Ge:
+            case BinaryOperator::Lt:
+            case BinaryOperator::Le:
+            {
+                if (isNumericType(leftType) &&
+                    isNumericType(rightType))
+                {
+                    return commonNumericType(
+                        leftType,
+                        rightType);
+                }
+
+                if (leftType == rightType)
+                {
+                    return leftType;
+                }
+
+                throw std::runtime_error(
+                    "Operands have incompatible types");
+            }
+
+            case BinaryOperator::And:
+            case BinaryOperator::Or:
+            {
+                if (leftType != DataType::Boolean ||
+                    rightType != DataType::Boolean)
+                {
+                    throw std::runtime_error(
+                        "AND/OR require boolean operands");
+                }
+
+                return DataType::Boolean;
+            }
+        }
+
+        throw std::runtime_error(
+            "Unsupported binary operator");
+    }
+
     DataType resolveBinaryResultType(
         BinaryOperator op,
         DataType leftType,
@@ -735,56 +815,224 @@ Value QueryValidator::bindLiteralValue(
     }
 }
 
+// Value evaluateConstantBinary(
+//     BinaryOperator op,
+//     const Value& left,
+//     const Value& right,
+//     DataType resultType)
+// {
+//     if (resultType != DataType::Int)
+//     {
+//         throw std::runtime_error(
+//             "Constant evaluation currently supports only integers");
+//     }
+
+//     if (!std::holds_alternative<int>(left) ||
+//         !std::holds_alternative<int>(right))
+//     {
+//         throw std::runtime_error(
+//             "Expected integer operands");
+//     }
+
+//     const int lhs = std::get<int>(left);
+//     const int rhs = std::get<int>(right);
+
+//     switch (op)
+//     {
+//         case BinaryOperator::Add:
+//             return lhs + rhs;
+
+//         case BinaryOperator::Subtract:
+//             return lhs - rhs;
+
+//         case BinaryOperator::Multiply:
+//             return lhs * rhs;
+
+//         case BinaryOperator::Divide:
+//         {
+//             if (rhs == 0)
+//             {
+//                 throw std::runtime_error(
+//                     "Division by zero in constant expression");
+//             }
+
+//             return lhs / rhs;
+//         }
+
+//         default:
+//             throw std::runtime_error(
+//                 "Operator is not a constant arithmetic operator");
+//     }
+// }
+
+
 Value evaluateConstantBinary(
     BinaryOperator op,
     const Value& left,
     const Value& right,
     DataType resultType)
 {
-    if (resultType != DataType::Int)
-    {
-        throw std::runtime_error(
-            "Constant evaluation currently supports only integers");
-    }
 
-    if (!std::holds_alternative<int>(left) ||
-        !std::holds_alternative<int>(right))
-    {
-        throw std::runtime_error(
-            "Expected integer operands");
-    }
-
-    const int lhs = std::get<int>(left);
-    const int rhs = std::get<int>(right);
-
-    switch (op)
-    {
-        case BinaryOperator::Add:
-            return lhs + rhs;
-
-        case BinaryOperator::Subtract:
-            return lhs - rhs;
-
-        case BinaryOperator::Multiply:
-            return lhs * rhs;
-
-        case BinaryOperator::Divide:
+    return std::visit(
+        [&](const auto& lhs, const auto& rhs) -> Value
         {
-            if (rhs == 0)
+            using L = std::decay_t<decltype(lhs)>;
+            using R = std::decay_t<decltype(rhs)>;
+
+            if constexpr (!std::is_same_v<L, R>)
             {
                 throw std::runtime_error(
-                    "Division by zero in constant expression");
+                    "Cannot compare values of different types");
             }
+            else if constexpr (std::is_same_v<L, std::monostate>)
+            {
+                throw std::runtime_error(
+                    "Cannot directly compare NULL");
+            } else if constexpr (std::is_same_v<L, std::string>)
+            {
+                throw std::runtime_error(
+                    "Cannot perform arithmetic on string values");
+            }
+            else 
+            {
+                switch (op)
+                {
+                    case BinaryOperator::Add:
+                        return lhs + rhs;
 
-            return lhs / rhs;
-        }
+                    case BinaryOperator::Subtract:
+                        return lhs - rhs;
 
-        default:
-            throw std::runtime_error(
-                "Operator is not a constant arithmetic operator");
-    }
+                    case BinaryOperator::Multiply:
+                        return lhs * rhs;
+
+                    case BinaryOperator::Divide:
+                        if (rhs == 0)
+                        {
+                            throw std::runtime_error(
+                                "Division by zero in constant expression");
+                        }
+                        return lhs / rhs;
+
+                    default:
+                        throw std::runtime_error(
+                            "Unsupported comparison operator");
+                }
+            }
+            
+        },
+        left,
+        right);
 }
 
+std::unique_ptr<BoundExpr> castIfNeeded(
+    std::unique_ptr<BoundExpr> expr,
+    DataType targetType)
+{
+    if (expr->type() == targetType)
+    {
+        return expr;
+    }
+
+    // Fold casts of literals immediately.
+    if (expr->kind() == BoundExprKind::Literal)
+    {
+        const auto& literal =
+            static_cast<const BoundLiteralExpr&>(*expr);
+
+        Value converted =
+            castValue(
+                literal.value,
+                expr->type(),
+                targetType);
+
+        return std::make_unique<BoundLiteralExpr>(
+            converted,
+            targetType);
+    }
+
+    // Runtime conversion needed, e.g. INT column -> FLOAT.
+    return std::make_unique<BoundCastExpr>(
+        std::move(expr),
+        targetType);
+}
+
+bool valueMatchesType(
+    const Value& value,
+    DataType type)
+{
+    switch (type)
+    {
+        case DataType::Int:
+            return std::holds_alternative<std::int32_t>(value);
+
+        case DataType::Float:
+            return std::holds_alternative<std::float32_t>(value);
+
+        case DataType::Double:
+            return std::holds_alternative<std::float64_t>(value);
+
+        case DataType::Text:
+            return std::holds_alternative<std::string>(value);
+
+        case DataType::Boolean:
+            return std::holds_alternative<bool>(value);
+        
+        case DataType::BigInt:
+            return std::holds_alternative<std::int64_t>(value);
+
+        case DataType::Null:
+            return std::holds_alternative<std::monostate>(value);
+    }
+
+    return false;
+}
+
+Value castValue(
+    const Value& value,
+    DataType from,
+    DataType to)
+{
+    if (std::holds_alternative<std::monostate>(value))
+    {
+        return value;
+    }
+
+    if (!valueMatchesType(value, from))
+    {
+        throw std::runtime_error(
+            "Value does not match source DataType");
+    }
+
+    if (from == to)
+    {
+        return value;
+    }
+
+    if (from == DataType::Int &&
+        to == DataType::Float)
+    {
+        return Value{static_cast<std::float32_t>(
+            std::get<std::int32_t>(value))};
+    }
+
+    if (from == DataType::Int &&
+        to == DataType::Double)
+    {
+        return Value{static_cast<std::float64_t>(
+            std::get<std::int32_t>(value))};
+    }
+
+    if (from == DataType::Float &&
+        to == DataType::Double)
+    {
+        return Value{static_cast<std::float64_t>(
+            std::get<std::float32_t>(value))};
+    }
+
+    throw std::runtime_error(
+        "Unsupported implicit cast");
+}
 std::unique_ptr<BoundExpr> QueryValidator::bindExpr(
     const Expr &expr,
     const BindContext &context) const
@@ -810,14 +1058,15 @@ std::unique_ptr<BoundExpr> QueryValidator::bindExpr(
     if (const auto *number = dynamic_cast<const NumberExpr *>(&expr))
     {
         return std::make_unique<BoundLiteralExpr>(
-            Value{static_cast<int>(number->value)},
+            Value{static_cast<std::int32_t>(number->value)},
             DataType::Int);
     }
 
     if (const auto *string = dynamic_cast<const StringExpr *>(&expr))
     {
+        Value value{string->value};
         return std::make_unique<BoundLiteralExpr>(
-            Value{string->value},
+            std::move(value),
             DataType::Text);
     }
 
@@ -836,34 +1085,59 @@ std::unique_ptr<BoundExpr> QueryValidator::bindExpr(
     }
 
 
-    if (const auto *binary = dynamic_cast<const BinaryExpr *>(&expr))
+        if (const auto* binary =
+            dynamic_cast<const BinaryExpr*>(&expr))
     {
-        auto leftBound = bindExpr(*binary->left, context);
-        auto rightBound = bindExpr(*binary->right, context);
-        DataType resultType = resolveBinaryResultType(
-            binary->op,
-            leftBound->type(),
-            rightBound->type());
+        auto leftBound =
+            bindExpr(*binary->left, context);
 
+        auto rightBound =
+            bindExpr(*binary->right, context);
+
+        // Type both operands should be converted to.
+        const DataType operandType =
+            resolveCommonOperandType(
+                binary->op,
+                leftBound->type(),
+                rightBound->type());
+
+        // Type produced by the whole expression.
+        const DataType resultType =
+            resolveBinaryResultType(
+                binary->op,
+                operandType,
+                operandType);
+
+        leftBound = castIfNeeded(
+            std::move(leftBound),
+            operandType);
+
+        rightBound = castIfNeeded(
+            std::move(rightBound),
+            operandType);
+
+        // Constant folding
         if (leftBound->kind() == BoundExprKind::Literal &&
             rightBound->kind() == BoundExprKind::Literal)
         {
             const auto& leftLiteral =
-                static_cast<const BoundLiteralExpr&>(*leftBound);
+                static_cast<const BoundLiteralExpr&>(
+                    *leftBound);
 
-        const auto& rightLiteral =
-            static_cast<const BoundLiteralExpr&>(*rightBound);
+            const auto& rightLiteral =
+                static_cast<const BoundLiteralExpr&>(
+                    *rightBound);
 
-        Value result = evaluateConstantBinary(
-            binary->op,
-            leftLiteral.value,
-            rightLiteral.value,
-            resultType);
+            Value result = evaluateConstantBinary(
+                binary->op,
+                leftLiteral.value,
+                rightLiteral.value,
+                operandType);
 
-        return std::make_unique<BoundLiteralExpr>(
-            std::move(result),
-            resultType);
-    }
+            return std::make_unique<BoundLiteralExpr>(
+                std::move(result),
+                resultType);
+        }
 
         return std::make_unique<BoundBinaryExpr>(
             binary->op,
@@ -871,6 +1145,7 @@ std::unique_ptr<BoundExpr> QueryValidator::bindExpr(
             std::move(rightBound),
             resultType);
     }
+
 
     if (const auto *unary = dynamic_cast<const UnaryExpr *>(&expr))
     {

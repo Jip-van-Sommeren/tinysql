@@ -98,58 +98,7 @@ namespace
             right);
     }
 
-    // bool compareValues(BinaryOperator op, const Value &left, const Value &right)
-    // {
-    //     if (std::holds_alternative<int>(left) && std::holds_alternative<int>(right))
-    //     {
-    //         int leftInt = std::get<int>(left);
-    //         int rightInt = std::get<int>(right);
 
-    //         switch (op)
-    //         {
-    //         case BinaryOperator::Gt:
-    //             return leftInt > rightInt;
-    //         case BinaryOperator::Ge:
-    //             return leftInt >= rightInt;
-    //         case BinaryOperator::Lt:
-    //             return leftInt < rightInt;
-    //         case BinaryOperator::Le:
-    //             return leftInt <= rightInt;
-    //         case BinaryOperator::Eq:
-    //             return leftInt == rightInt;
-    //         case BinaryOperator::Ne:
-    //             return leftInt != rightInt;
-    //         default:
-    //             throw std::runtime_error("Unsupported comparison operator");
-    //         }
-    //     }
-
-    //     if (std::holds_alternative<std::string>(left) && std::holds_alternative<std::string>(right))
-    //     {
-    //         const std::string &leftStr = std::get<std::string>(left);
-    //         const std::string &rightStr = std::get<std::string>(right);
-
-    //         switch (op)
-    //         {
-    //         case BinaryOperator::Gt:
-    //             return leftStr > rightStr;
-    //         case BinaryOperator::Ge:
-    //             return leftStr >= rightStr;
-    //         case BinaryOperator::Lt:
-    //             return leftStr < rightStr;
-    //         case BinaryOperator::Le:
-    //             return leftStr <= rightStr;
-    //         case BinaryOperator::Eq:
-    //             return leftStr == rightStr;
-    //         case BinaryOperator::Ne:
-    //             return leftStr != rightStr;
-    //         default:
-    //             throw std::runtime_error("Unsupported comparison operator");
-    //         }
-    //     }
-
-    //     throw std::runtime_error("Cannot compare values of different types");
-    // }
 
     Value fetchValueFromRow(std::uint32_t columnIndex, const Row &row)
     {
