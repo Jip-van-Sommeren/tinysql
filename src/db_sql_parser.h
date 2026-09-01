@@ -12,20 +12,33 @@
 
 enum class ExprKind : std::uint8_t
 {
-    Number,
-    String,
+    Literal,
     Column,
     Binary,
     Unary,
+    Function,
+    Cast,
     IsNull
 };
 
 
 struct Expr
 {
-    virtual ~Expr() = default;
-};
+    explicit Expr(ExprKind kind)
+        : kind_(kind)
+    {
+    }
 
+    virtual ~Expr() = default;
+
+    ExprKind kind() const noexcept
+    {
+        return kind_;
+    }
+
+private:
+    ExprKind kind_;
+};
 struct ColumnExpr : Expr
 {
     std::vector<std::string> parts;
