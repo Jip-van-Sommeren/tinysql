@@ -1033,6 +1033,27 @@ Value castValue(
     throw std::runtime_error(
         "Unsupported implicit cast");
 }
+
+template <typename T>
+constexpr DataType numericDataType()
+{
+    if constexpr (std::is_same_v<T, std::int32_t>)
+        return DataType::Int;
+
+    else if constexpr (std::is_same_v<T, std::int64_t>)
+        return DataType::BigInt;
+
+    else if constexpr (std::is_same_v<T, std::float32_t>)
+        return DataType::Float;
+
+    else if constexpr (std::is_same_v<T, std::float64_t>)
+        return DataType::Double;
+
+    else
+        static_assert(false, "Unsupported numeric type");
+}
+
+
 std::unique_ptr<BoundExpr> QueryValidator::bindExpr(
     const Expr &expr,
     const BindContext &context) const
@@ -1055,11 +1076,19 @@ std::unique_ptr<BoundExpr> QueryValidator::bindExpr(
             resolved.type);
     }
 
-    if (const auto *number = dynamic_cast<const NumberExpr *>(&expr))
+    if (const auto* number =
+            dynamic_cast<const NumberExpr*>(&expr))
     {
-        return std::make_unique<BoundLiteralExpr>(
-            Value{static_cast<std::int32_t>(number->value)},
-            DataType::Int);
+        return std::visit(
+            [](const auto& value) -> std::unique_ptr<BoundExpr>
+            {
+                using T = std::decay_t<decltype(value)>;
+
+                return std::make_unique<BoundLiteralExpr>(
+                    Value{value},
+                    numericDataType<T>());
+            },
+            number->value);
     }
 
     if (const auto *string = dynamic_cast<const StringExpr *>(&expr))
@@ -1085,8 +1114,7 @@ std::unique_ptr<BoundExpr> QueryValidator::bindExpr(
     }
 
 
-        if (const auto* binary =
-            dynamic_cast<const BinaryExpr*>(&expr))
+    if (const auto* binary = dynamic_cast<const BinaryExpr*>(&expr))
     {
         auto leftBound =
             bindExpr(*binary->left, context);

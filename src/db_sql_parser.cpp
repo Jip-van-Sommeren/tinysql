@@ -41,10 +41,12 @@ namespace
     }
 }
 
+
+
 ColumnExpr::ColumnExpr(std::vector<std::string> parts)
     : parts(std::move(parts)) {}
 
-NumberExpr::NumberExpr(double value)
+NumberExpr::NumberExpr(NumberValue value)
     : value(value) {}
 
 StringExpr::StringExpr(std::string value)

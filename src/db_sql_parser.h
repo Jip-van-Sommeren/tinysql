@@ -10,6 +10,17 @@
 #include <utility>
 #include <vector>
 
+enum class ExprKind : std::uint8_t
+{
+    Number,
+    String,
+    Column,
+    Binary,
+    Unary,
+    IsNull
+};
+
+
 struct Expr
 {
     virtual ~Expr() = default;
@@ -22,11 +33,13 @@ struct ColumnExpr : Expr
     explicit ColumnExpr(std::vector<std::string> parts);
 };
 
+using NumberValue = std::variant<std::int32_t, std::float32_t, std::float64_t, std::int64_t>;
+
 struct NumberExpr : Expr
 {
-    double value;
+    NumberValue value;
 
-    explicit NumberExpr(double value);
+    explicit NumberExpr(NumberValue value);
 };
 
 struct StringExpr : Expr
