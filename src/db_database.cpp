@@ -1,0 +1,132 @@
+#include "db_database.h"
+
+#include "db_sql_lexer.h"
+#include "db_sql_parser.h"
+
+#include <filesystem>
+#include <memory>
+#include <string>
+#include <type_traits>
+#include <utility>
+#include <variant>
+#include <vector>
+
+Database::Database(std::filesystem::path dbPath, std::string name)
+    : dbName(std::move(name)),
+      storageEngine(std::move(dbPath))
+{
+}
+
+void Database::createTable(
+    const std::string &tableName,
+    const std::vector<Column> &columns,
+    const std::vector<Constraint> &constraints)
+{
+    storageEngine.createTable(tableName, dbName, columns, constraints);
+}
+
+void Database::insertRows(
+    const std::string &tableName,
+    const std::vector<Row> &rows)
+{
+    Table table = storageEngine.openTable(tableName);
+
+    for (const Row &row : rows)
+    {
+        table.insertRows(BoundInsert{
+            .tableName = tableName,
+            .row = row});
+    }
+}
+
+std::vector<Row> Database::selectAllRows(const std::string &tableName)
+{
+    Table table = storageEngine.openTable(tableName);
+    return table.selectAllRows();
+}
+
+QueryResult Database::execute(const BoundQuery &query)
+{
+    return std::visit(
+        [this](const auto &boundQuery) -> QueryResult
+        {
+            using T = std::decay_t<decltype(boundQuery)>;
+
+            if constexpr (std::is_same_v<T, BoundInsert>)
+            {
+                return executeInsert(boundQuery);
+            }
+            else if constexpr (std::is_same_v<T, BoundSelect>)
+            {
+                return executeSelect(boundQuery);
+            }
+            else if constexpr (std::is_same_v<T, BoundDelete>)
+            {
+                return executeDelete(boundQuery);
+            }
+            else
+            {
+                return executeCreateTable(boundQuery);
+            }
+        },
+        query);
+}
+
+QueryResult Database::executeSql(const std::string &sql)
+{
+    Lexer lexer(sql);
+    Parser parser(lexer.tokenize());
+    std::unique_ptr<Statement> statement = parser.parseStatement();
+
+    FileCatalog catalog{storageEngine.getTablesPath()};
+    QueryValidator validator{catalog};
+    BoundQuery query = validator.validate(*statement);
+
+    return execute(query);
+}
+
+QueryResult Database::executeInsert(const BoundInsert &insert)
+{
+    Table table = storageEngine.openTable(insert.tableName);
+    table.insertRows(insert);
+
+    return QueryResult{
+        .rows = {},
+        .affectedRows = 1,
+        .returnsRows = false};
+}
+
+QueryResult Database::executeSelect(const BoundSelect &select)
+{
+    Table table = storageEngine.openTable(select.tableName);
+
+    return QueryResult{
+        .rows = table.selectRows(select),
+        .affectedRows = 0,
+        .returnsRows = true};
+}
+
+QueryResult Database::executeDelete(const BoundDelete &del)
+{
+    storageEngine.openTable(del.tableName);
+
+    return QueryResult{
+        .rows = {},
+        .affectedRows = 0,
+        .returnsRows = false};
+}
+
+QueryResult Database::executeCreateTable(
+    const BoundCreateTable &createTable)
+{
+    storageEngine.createTable(
+        createTable.tableName,
+        dbName,
+        createTable.columns,
+        createTable.constraints);
+
+    return QueryResult{
+        .rows = {},
+        .affectedRows = 0,
+        .returnsRows = false};
+}

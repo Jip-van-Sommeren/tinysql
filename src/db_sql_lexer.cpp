@@ -187,7 +187,8 @@ bool Lexer::isOperatorStart(char c) const
 
 bool Lexer::isKeyword(const std::string &word) const
 {
-    return word == "SELECT" ||
+    return isDataTypeKeyword(word) ||
+           word == "SELECT" ||
            word == "FROM" ||
            word == "WHERE" ||
            word == "INSERT" ||
@@ -198,6 +199,14 @@ bool Lexer::isKeyword(const std::string &word) const
            word == "DELETE" ||
            word == "CREATE" ||
            word == "TABLE" ||
+           word == "CONSTRAINT" ||
+           word == "PRIMARY" ||
+           word == "KEY" ||
+           word == "FOREIGN" ||
+           word == "REFERENCES" ||
+           word == "UNIQUE" ||
+           word == "DEFAULT" ||
+           word == "CHECK" ||
            word == "NULL" ||
            word == "AND" ||
            word == "IS" ||
@@ -220,5 +229,6 @@ bool Lexer::isDataTypeKeyword(const std::string &word) const
            word == "VARCHAR" ||
            word == "TEXT" ||
            word == "DATE" ||
+           word == "DOUBLE" ||
            word == "BOOLEAN";
 }

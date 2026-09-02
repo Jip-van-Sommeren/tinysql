@@ -83,6 +83,9 @@ private:
 
     Column decodeColumn();
     ColumnStorage decodeColumnStorage();
+    Constraint decodeConstraint();
+    std::unique_ptr<BoundExpr> decodeExpression();
+    std::vector<ColumnId> decodeColumnIds();
 };
 
 class ValueDeserializer

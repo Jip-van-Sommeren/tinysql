@@ -1,7 +1,7 @@
 #pragma once
 
 #include "db_sql_lexer.h"
-#include "db_storage.h"
+#include "db_types.h"
 
 #include <cstddef>
 #include <memory>
@@ -66,33 +66,6 @@ enum class ArithmeticOp
     Divide
 };
 
-enum class BinaryOperator : std::uint8_t
-{
-    Add,
-    Subtract,
-    Multiply,
-    Divide,
-    And,
-    Or,
-    Eq,
-    Ne,
-    Gt,
-    Ge,
-    Lt,
-    Le
-};
-
-enum class UnaryOperator
-{
-    Not,
-    Negate,
-    Positive
-};
-
-
-
-
-
 struct UnaryExpr : Expr
 {
     UnaryOperator op;
@@ -127,26 +100,14 @@ struct IsNullExpr : Expr
     }
 };
 
-enum class ConstraintType: std::uint8_t
-{
-    PrimaryKey,
-    ForeignKey,
-    Unique,
-    NotNull,
-    Null,
-    Default,
-    Check
-};
-
-
-
 struct ConstraintExpr
 {
     ConstraintType constraintType;
     std::optional<std::string> constraintName;
 
     explicit ConstraintExpr(ConstraintType type)
-        : constraintType(type)
+        : constraintType(type),
+          kind_(type)
     {
     }
 
@@ -213,6 +174,17 @@ struct NotNullConstraintExpr : ConstraintExpr
 
     explicit NotNullConstraintExpr(std::string columnName)
         : ConstraintExpr(ConstraintType::NotNull),
+          columnName(std::move(columnName))
+    {
+    }
+};
+
+struct NullConstraintExpr : ConstraintExpr
+{
+    std::string columnName;
+
+    explicit NullConstraintExpr(std::string columnName)
+        : ConstraintExpr(ConstraintType::Null),
           columnName(std::move(columnName))
     {
     }

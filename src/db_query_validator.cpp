@@ -20,7 +20,7 @@ namespace
 
     std::string resolveColumnName(
         const std::vector<std::string> &parts,
-        const std::string &tableName)
+        const std::string_view &tableName)
     {
         if (parts.size() == 1)
         {
@@ -39,15 +39,15 @@ namespace
     {
         switch (type)
         {
-            case DataType::Int:
-            case DataType::Double:
-            case DataType::Float:
-            case DataType::Decimal:
-            case DataType::BigInt:
-                return true;
+        case DataType::Int:
+        case DataType::Double:
+        case DataType::Float:
+        case DataType::Decimal:
+        case DataType::BigInt:
+            return true;
 
-            default:
-                return false;
+        default:
+            return false;
         }
     }
 
@@ -131,29 +131,28 @@ namespace
     {
         switch (op)
         {
-            case BinaryOperator::Eq:
-            case BinaryOperator::Ne:
-            case BinaryOperator::Lt:
-            case BinaryOperator::Le:
-            case BinaryOperator::Gt:
-            case BinaryOperator::Ge:
-            case BinaryOperator::And:
-            case BinaryOperator::Or:
-                return DataType::Boolean;
+        case BinaryOperator::Eq:
+        case BinaryOperator::Ne:
+        case BinaryOperator::Lt:
+        case BinaryOperator::Le:
+        case BinaryOperator::Gt:
+        case BinaryOperator::Ge:
+        case BinaryOperator::And:
+        case BinaryOperator::Or:
+            return DataType::Boolean;
 
-            case BinaryOperator::Add:
-            case BinaryOperator::Subtract:
-            case BinaryOperator::Multiply:
-            case BinaryOperator::Divide:
-                return resolveNumericResultType(op,
-                    leftType,
-                    rightType);
+        case BinaryOperator::Add:
+        case BinaryOperator::Subtract:
+        case BinaryOperator::Multiply:
+        case BinaryOperator::Divide:
+            return resolveNumericResultType(op,
+                                            leftType,
+                                            rightType);
         }
 
         throw std::runtime_error(
             "Unsupported binary operator");
     }
-
 
     DataType resolveUnaryResultType(
         UnaryOperator op,
@@ -161,63 +160,64 @@ namespace
     {
         switch (op)
         {
-            case UnaryOperator::Positive:
-            case UnaryOperator::Negate:
+        case UnaryOperator::Positive:
+        case UnaryOperator::Negate:
+        {
+            if (!isNumericType(operandType))
             {
-                if (!isNumericType(operandType))
-                {
-                    throw std::runtime_error(
-                        "Unary '+' and '-' require a numeric operand");
-                }
-
-                return operandType;
+                throw std::runtime_error(
+                    "Unary '+' and '-' require a numeric operand");
             }
 
-            case UnaryOperator::Not:
-            {
-                if (operandType != DataType::Boolean &&
-                    operandType != DataType::Null)
-                {
-                    throw std::runtime_error(
-                        "NOT requires a boolean operand");
-                }
+            return operandType;
+        }
 
-                return DataType::Boolean;
+        case UnaryOperator::Not:
+        {
+            if (operandType != DataType::Boolean &&
+                operandType != DataType::Null)
+            {
+                throw std::runtime_error(
+                    "NOT requires a boolean operand");
             }
+
+            return DataType::Boolean;
+        }
         }
 
         throw std::runtime_error("Unsupported unary operator");
     }
 
-
     std::string_view constraintTypeToString(ConstraintType type)
     {
         switch (type)
         {
-            case ConstraintType::NotNull:
-                return "NN";
+        case ConstraintType::NotNull:
+            return "NN";
 
-            case ConstraintType::Default:
-                return "DF";
+        case ConstraintType::Null:
+            return "NL";
 
-            case ConstraintType::PrimaryKey:
-                return "PK";
+        case ConstraintType::Default:
+            return "DF";
 
-            case ConstraintType::Unique:
-                return "UK";
+        case ConstraintType::PrimaryKey:
+            return "PK";
 
-            case ConstraintType::Check:
-                return "CK";
-            case ConstraintType::ForeignKey:
-                return "FK";
+        case ConstraintType::Unique:
+            return "UK";
+
+        case ConstraintType::Check:
+            return "CK";
+        case ConstraintType::ForeignKey:
+            return "FK";
         }
 
         return "UNKNOWN";
     }
 
-
     std::string join(
-        const std::vector<std::string>& values,
+        const std::vector<std::string> &values,
         std::string_view separator)
     {
         std::string result;
@@ -245,7 +245,7 @@ namespace
         if (const auto *binary = dynamic_cast<const BoundBinaryExpr *>(&expr))
         {
             return containsColumnReference(*binary->left) ||
-                containsColumnReference(*binary->right);
+                   containsColumnReference(*binary->right);
         }
 
         if (const auto *unary = dynamic_cast<const BoundUnaryExpr *>(&expr))
@@ -272,11 +272,15 @@ BoundQuery QueryValidator::validate(const Statement &statement)
         return validateSelect(*select);
     }
 
-        if (const auto *deleteStmt = dynamic_cast<const DeleteStatement *>(&statement))
+    if (const auto *deleteStmt = dynamic_cast<const DeleteStatement *>(&statement))
     {
         return validateDelete(*deleteStmt);
     }
 
+    if (const auto *createTable = dynamic_cast<const CreateTableStatement *>(&statement))
+    {
+        return bindCreateTable(*createTable);
+    }
 
     throw std::runtime_error("Unsupported statement type");
 }
@@ -389,7 +393,6 @@ BoundSelect QueryValidator::validateSelect(const SelectStatement &statement)
         .where = std::move(where)};
 }
 
-
 Column QueryValidator::bindColumnDefinition(
     const ColumnDefExpr &colDef,
     std::uint32_t columnIndex)
@@ -404,13 +407,13 @@ Column QueryValidator::bindColumnDefinition(
 }
 
 BoundCreateTable QueryValidator::bindCreateTable(
-    const CreateTableStatement& statement)
+    const CreateTableStatement &statement)
 {
     BoundCreateTable result;
     result.tableName = statement.tableName;
 
     // First pass: build all columns.
-    for (const auto& columnDef : statement.columns)
+    for (const auto &columnDef : statement.columns)
     {
         result.columns.push_back(
             bindColumnDefinition(
@@ -420,94 +423,107 @@ BoundCreateTable QueryValidator::bindCreateTable(
 
     BindContext context{
         .tableName = result.tableName,
-        .columns = result.columns
-    };
+        .columns = result.columns};
 
     // Second pass: bind constraints.
-    for (const auto& constraint : statement.constraints)
+    for (const auto &constraint : statement.constraints)
     {
-        
         result.constraints.push_back(
             bindConstraintExpr(*constraint, context));
-        
     }
+
+    result.columns = std::move(context.columns);
 
     return result;
 }
 
-
-
-
-
-std::unique_ptr<BoundConstraintExpr> QueryValidator::bindConstraintExpr(
-    const ConstraintExpr &expr, BindContext &context) 
+Constraint QueryValidator::bindConstraintExpr(
+    const ConstraintExpr &expr, BindContext &context)
 
 {
     std::string constraintName;
 
-
     switch (expr.constraintType)
     {
-        case ConstraintType::NotNull:
-        {
-            const auto& notNullExpr =
-                dynamic_cast<const NotNullConstraintExpr&>(expr);
-            Column& column = context.resolveColumn(notNullExpr.columnName);
-            column.nullable = false; 
-            constraintName = expr.constraintName.value_or(
+    case ConstraintType::NotNull:
+    {
+        const auto &notNullExpr =
+            dynamic_cast<const NotNullConstraintExpr &>(expr);
+        Column &column = context.resolveColumn(notNullExpr.columnName);
+        column.nullable = false;
+        constraintName = expr.constraintName.value_or(
             std::format("{}_{}", constraintTypeToString(notNullExpr.constraintType), notNullExpr.columnName)); // Use a format for the constraint name if not provided
 
-            return std::make_unique<BoundNotNullConstraintExpr>(std::move(constraintName), notNullExpr.columnName);
-        }
+        return BoundNotNullConstraintExpr{
+            std::move(constraintName),
+            column.columnIndex};
+    }
 
-        case ConstraintType::Default:
-        {
-            const auto& defaultExpr =
-                dynamic_cast<const DefaultConstraintExpr&>(expr);
-            
-            Column& column = context.resolveColumn(defaultExpr.columnName);
-            constraintName = expr.constraintName.value_or(
+    case ConstraintType::Null:
+    {
+        const auto &nullExpr =
+            dynamic_cast<const NullConstraintExpr &>(expr);
+        Column &column = context.resolveColumn(nullExpr.columnName);
+        column.nullable = true;
+        constraintName = expr.constraintName.value_or(
+            std::format(
+                "{}_{}",
+                constraintTypeToString(nullExpr.constraintType),
+                nullExpr.columnName));
+
+        return BoundNullConstraintExpr{
+            std::move(constraintName),
+            column.columnIndex};
+    }
+
+    case ConstraintType::Default:
+    {
+        const auto &defaultExpr =
+            dynamic_cast<const DefaultConstraintExpr &>(expr);
+
+        Column &column = context.resolveColumn(defaultExpr.columnName);
+        constraintName = expr.constraintName.value_or(
             std::format("{}_{}", constraintTypeToString(defaultExpr.constraintType), defaultExpr.columnName)); // Use a format for the constraint name if not provided
 
-            auto boundValue = bindExpr(*defaultExpr.value, context);
-            if (containsColumnReference(*boundValue))
-            {
-                throw std::runtime_error(
-                    "DEFAULT expressions cannot reference table columns");
-            }
-            if (!canAssign(boundValue->type(), column.type))
-            {
-                throw std::runtime_error(
-                    std::format(
-                        "Default value type is incompatible with column '{}'",
-                        column.name));
-            }
-
-            return std::make_unique<BoundDefaultConstraintExpr>(
-                std::move(constraintName), 
-                std::move(boundValue), 
-                column.columnIndex);
+        auto boundValue = bindExpr(*defaultExpr.value, context);
+        if (containsColumnReference(*boundValue))
+        {
+            throw std::runtime_error(
+                "DEFAULT expressions cannot reference table columns");
+        }
+        if (!canAssign(boundValue->type(), column.type))
+        {
+            throw std::runtime_error(
+                std::format(
+                    "Default value type is incompatible with column '{}'",
+                    column.name));
         }
 
-        case ConstraintType::PrimaryKey:
-        {
-            const auto& pkExpr =
-                dynamic_cast<const PrimaryKeyConstraintExpr&>(expr);
+        return BoundDefaultConstraintExpr{
+            std::move(constraintName),
+            std::move(boundValue),
+            column.columnIndex};
+    }
 
-            constraintName = expr.constraintName.value_or(
-                std::format(
-                    "{}_{}",
-                    constraintTypeToString(pkExpr.constraintType),
-                    join(pkExpr.columns, "_")));
+    case ConstraintType::PrimaryKey:
+    {
+        const auto &pkExpr =
+            dynamic_cast<const PrimaryKeyConstraintExpr &>(expr);
 
-            std::vector<ColumnId> columnIds;
-            columnIds.reserve(pkExpr.columns.size());
+        constraintName = expr.constraintName.value_or(
+            std::format(
+                "{}_{}",
+                constraintTypeToString(pkExpr.constraintType),
+                join(pkExpr.columns, "_")));
+
+        std::vector<ColumnId> columnIds;
+        columnIds.reserve(pkExpr.columns.size());
 
         std::unordered_set<ColumnId> seenColumns;
 
-        for (const std::string& columnName : pkExpr.columns)
+        for (const std::string &columnName : pkExpr.columns)
         {
-            Column& column = context.resolveColumn(columnName);
+            Column &column = context.resolveColumn(columnName);
 
             if (!seenColumns.insert(column.columnIndex).second)
             {
@@ -521,33 +537,33 @@ std::unique_ptr<BoundConstraintExpr> QueryValidator::bindConstraintExpr(
             columnIds.push_back(column.columnIndex);
         }
 
-            return std::make_unique<BoundPrimaryKeyConstraintExpr>(
-                std::move(constraintName),
-                std::move(columnIds));
-        }
+        return BoundPrimaryKeyConstraintExpr{
+            std::move(constraintName),
+            std::move(columnIds)};
+    }
 
-    case ConstraintType::ForeignKey:{
-        const auto& fkExpr = dynamic_cast<const ForeignKeyConstraintExpr&>(expr);
+    case ConstraintType::ForeignKey:
+    {
+        const auto &fkExpr = dynamic_cast<const ForeignKeyConstraintExpr &>(expr);
 
         std::vector<ColumnId> localColumnIds;
         localColumnIds.reserve(fkExpr.localColumns.size());
 
-        for (const std::string& name : fkExpr.localColumns)
+        for (const std::string &name : fkExpr.localColumns)
         {
-            const Column& column = context.resolveColumn(name);
+            const Column &column = context.resolveColumn(name);
             localColumnIds.push_back(column.columnIndex);
         }
-
 
         std::vector<ColumnId> referencedColumnIds;
         BindContext referencedTable = catalog.createBindContext(fkExpr.referencedTable);
         referencedColumnIds.reserve(
             fkExpr.referencedColumns.size());
 
-        for (const std::string& name :
-            fkExpr.referencedColumns)
+        for (const std::string &name :
+             fkExpr.referencedColumns)
         {
-            const Column& column =
+            const Column &column =
                 referencedTable.resolveColumn(name);
 
             referencedColumnIds.push_back(column.columnIndex);
@@ -559,10 +575,10 @@ std::unique_ptr<BoundConstraintExpr> QueryValidator::bindConstraintExpr(
         }
         for (std::size_t i = 0; i < localColumnIds.size(); ++i)
         {
-            const Column& local =
+            const Column &local =
                 context.resolveColumn(localColumnIds[i]);
 
-            const Column& referenced =
+            const Column &referenced =
                 referencedTable.resolveColumn(
                     referencedColumnIds[i]);
 
@@ -577,39 +593,55 @@ std::unique_ptr<BoundConstraintExpr> QueryValidator::bindConstraintExpr(
                 "{}_{}_{}",
                 constraintTypeToString(fkExpr.constraintType),
                 join(fkExpr.localColumns, "_"),
-                join(fkExpr.referencedColumns, "_")
-            )
-        );
-        return std::make_unique<BoundForeignKeyConstraintExpr>(
+                join(fkExpr.referencedColumns, "_")));
+        return BoundForeignKeyConstraintExpr{
             std::move(constraintName),
             std::move(localColumnIds),
-            referencedTable.tableName,
-            std::move(referencedColumnIds));}
+            std::string{referencedTable.tableName},
+            std::move(referencedColumnIds)};
+    }
 
     case ConstraintType::Unique:
+    {
+        const auto &uniqueExpr =
+            dynamic_cast<const UniqueConstraintExpr &>(expr);
+
+        constraintName = expr.constraintName.value_or(
+            std::format(
+                "{}_{}",
+                constraintTypeToString(uniqueExpr.constraintType),
+                join(uniqueExpr.columns, "_")));
+
+        std::vector<ColumnId> boundColumns;
+        boundColumns.reserve(uniqueExpr.columns.size());
+
+        for (const std::string &columnName : uniqueExpr.columns)
         {
-            const auto& uniqueExpr =
-                dynamic_cast<const UniqueConstraintExpr&>(expr);
-
-            constraintName = expr.constraintName.value_or(
-                std::format(
-                    "{}_{}",
-                    constraintTypeToString(uniqueExpr.constraintType),
-                    join(uniqueExpr.columns, "_")));
-
-            std::vector<ColumnId> boundColumns;
-            boundColumns.reserve(uniqueExpr.columns.size());
-
-            for (const std::string& columnName : uniqueExpr.columns)
-            {
-                const Column& column = context.resolveColumn(columnName);
-                boundColumns.push_back(column.columnIndex);
-            }
-
-            return std::make_unique<BoundUniqueConstraintExpr>(
-                std::move(constraintName),
-                std::move(boundColumns));
+            const Column &column = context.resolveColumn(columnName);
+            boundColumns.push_back(column.columnIndex);
         }
+
+        return BoundUniqueConstraintExpr{
+            std::move(constraintName),
+            std::move(boundColumns)};
+    }
+
+    case ConstraintType::Check:
+    {
+        const auto &checkExpr =
+            dynamic_cast<const CheckConstraintExpr &>(expr);
+        auto condition = bindExpr(*checkExpr.condition, context);
+
+        if (condition->type() != DataType::Boolean)
+        {
+            throw std::runtime_error("CHECK condition must be boolean");
+        }
+
+        constraintName = expr.constraintName.value_or("CK");
+        return BoundCheckConstraintExpr{
+            std::move(constraintName),
+            std::move(condition)};
+    }
 
     default:
         throw std::runtime_error("Unsupported constraint type");
@@ -677,7 +709,6 @@ BoundInsert QueryValidator::validateInsert(const InsertStatement &statement)
         .row = std::move(row)};
 }
 
-
 Value QueryValidator::bindLiteralValue(
     const Expr &expr,
     const Column &targetColumn) const
@@ -737,8 +768,8 @@ Value QueryValidator::bindLiteralValue(
 
 Value evaluateConstantBinary(
     BinaryOperator op,
-    const Value& left,
-    const Value& right,
+    const Value &left,
+    const Value &right,
     DataType resultType)
 {
     if (resultType != DataType::Int)
@@ -759,29 +790,29 @@ Value evaluateConstantBinary(
 
     switch (op)
     {
-        case BinaryOperator::Add:
-            return lhs + rhs;
+    case BinaryOperator::Add:
+        return lhs + rhs;
 
-        case BinaryOperator::Subtract:
-            return lhs - rhs;
+    case BinaryOperator::Subtract:
+        return lhs - rhs;
 
-        case BinaryOperator::Multiply:
-            return lhs * rhs;
+    case BinaryOperator::Multiply:
+        return lhs * rhs;
 
-        case BinaryOperator::Divide:
+    case BinaryOperator::Divide:
+    {
+        if (rhs == 0)
         {
-            if (rhs == 0)
-            {
-                throw std::runtime_error(
-                    "Division by zero in constant expression");
-            }
-
-            return lhs / rhs;
+            throw std::runtime_error(
+                "Division by zero in constant expression");
         }
 
-        default:
-            throw std::runtime_error(
-                "Operator is not a constant arithmetic operator");
+        return lhs / rhs;
+    }
+
+    default:
+        throw std::runtime_error(
+            "Operator is not a constant arithmetic operator");
     }
 }
 
@@ -789,17 +820,17 @@ std::unique_ptr<BoundExpr> QueryValidator::bindExpr(
     const Expr &expr,
     const BindContext &context) const
 {
-    if (const auto* column =
-            dynamic_cast<const ColumnExpr*>(&expr))
+    if (const auto *column =
+            dynamic_cast<const ColumnExpr *>(&expr))
     {
         std::string_view view = context.tableName;
 
         const std::string str{view};
         std::string columnName = resolveColumnName(
             column->parts,
-            view);
+            context.tableName);
 
-        const Column& resolved =
+        const Column &resolved =
             context.resolveColumn(columnName);
 
         return std::make_unique<BoundColumnExpr>(
@@ -835,7 +866,6 @@ std::unique_ptr<BoundExpr> QueryValidator::bindExpr(
             isNull->negated);
     }
 
-
     if (const auto *binary = dynamic_cast<const BinaryExpr *>(&expr))
     {
         auto leftBound = bindExpr(*binary->left, context);
@@ -848,22 +878,22 @@ std::unique_ptr<BoundExpr> QueryValidator::bindExpr(
         if (leftBound->kind() == BoundExprKind::Literal &&
             rightBound->kind() == BoundExprKind::Literal)
         {
-            const auto& leftLiteral =
-                static_cast<const BoundLiteralExpr&>(*leftBound);
+            const auto &leftLiteral =
+                static_cast<const BoundLiteralExpr &>(*leftBound);
 
-        const auto& rightLiteral =
-            static_cast<const BoundLiteralExpr&>(*rightBound);
+            const auto &rightLiteral =
+                static_cast<const BoundLiteralExpr &>(*rightBound);
 
-        Value result = evaluateConstantBinary(
-            binary->op,
-            leftLiteral.value,
-            rightLiteral.value,
-            resultType);
+            Value result = evaluateConstantBinary(
+                binary->op,
+                leftLiteral.value,
+                rightLiteral.value,
+                resultType);
 
-        return std::make_unique<BoundLiteralExpr>(
-            std::move(result),
-            resultType);
-    }
+            return std::make_unique<BoundLiteralExpr>(
+                std::move(result),
+                resultType);
+        }
 
         return std::make_unique<BoundBinaryExpr>(
             binary->op,
@@ -875,16 +905,16 @@ std::unique_ptr<BoundExpr> QueryValidator::bindExpr(
     if (const auto *unary = dynamic_cast<const UnaryExpr *>(&expr))
     {
         auto operand = bindExpr(
-        *unary->operand,
-        context);
+            *unary->operand,
+            context);
 
         DataType resultType = resolveUnaryResultType(
-        unary->op,
-        operand->type());
+            unary->op,
+            operand->type());
         if (operand->kind() == BoundExprKind::Literal)
         {
-            const auto& literal =
-                static_cast<const BoundLiteralExpr&>(*operand);
+            const auto &literal =
+                static_cast<const BoundLiteralExpr &>(*operand);
 
             if (unary->op == UnaryOperator::Positive)
             {
@@ -906,7 +936,6 @@ std::unique_ptr<BoundExpr> QueryValidator::bindExpr(
                 }
             }
         }
-
 
         return std::make_unique<BoundUnaryExpr>(
             unary->op,

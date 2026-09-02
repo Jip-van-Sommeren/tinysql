@@ -14,12 +14,12 @@ namespace
 
         if (keyword == "VARCHAR" || keyword == "TEXT")
         {
-            return DataType::Varchar;
+            return DataType::Text;
         }
 
         if (keyword == "DATE")
         {
-            return DataType::Date;
+            throw std::runtime_error("DATE data type is not supported");
         }
 
         if (keyword == "DOUBLE")
@@ -400,51 +400,35 @@ std::unique_ptr<ConstraintExpr> Parser::parseColumnConstraintBody(const std::str
 {
     if (matchKeyword("DEFAULT"))
     {
-        auto constraint = std::make_unique<DefaultConstraintExpr>(
-            parseExpression());
-
-        constraint->value = std::move(constraint->value);
-        return constraint;
+        return std::make_unique<DefaultConstraintExpr>(
+            parseExpression(),
+            columnName);
     }
 
     if (matchKeyword("PRIMARY"))
     {
         expectKeyword("KEY");
 
-        auto constraint = std::make_unique<PrimaryKeyConstraintExpr>(
-            ConstraintType::PrimaryKey);
-
-        constraint->columns.push_back(columnName);
-        return constraint;
+        return std::make_unique<PrimaryKeyConstraintExpr>(
+            std::vector<std::string>{columnName});
     }
 
     if (matchKeyword("NOT"))
     {
         expectKeyword("NULL");
 
-        auto constraint = std::make_unique<ConstraintExpr>(
-            ConstraintType::NotNull);
-
-        // constraint->name = columnName;
-        return constraint;
+        return std::make_unique<NotNullConstraintExpr>(columnName);
     }
 
     if (matchKeyword("UNIQUE"))
     {
-        auto constraint = std::make_unique<UniqueConstraintExpr>(
-            ConstraintType::Unique);
-
-        constraint->columns.push_back(columnName);
-        return constraint;
+        return std::make_unique<UniqueConstraintExpr>(
+            std::vector<std::string>{columnName});
     }
 
     if (matchKeyword("NULL"))
     {
-        auto constraint = std::make_unique<ConstraintExpr>(
-            ConstraintType::Null);
-
-        // constraint->columns.push_back(columnName);
-        return constraint;
+        return std::make_unique<NullConstraintExpr>(columnName);
     }
 
     if (matchKeyword("CHECK"))
@@ -466,7 +450,8 @@ std::unique_ptr<ConstraintExpr> Parser::parseColumnConstraintBody(const std::str
         auto reference = parseReferenceClause();
 
         return std::make_unique<ForeignKeyConstraintExpr>(
-            NamedTableRef(std::move(reference.tableName)),
+            std::vector<std::string>{columnName},
+            std::move(reference.tableName),
             std::move(reference.columns));
     }
 
@@ -523,22 +508,16 @@ std::unique_ptr<ConstraintExpr> Parser::parseTableConstraintBody()
 
         auto columns = parseParenthesizedIdentifierList();
 
-        auto constraint = std::make_unique<PrimaryKeyConstraintExpr>(
-            ConstraintType::PrimaryKey);
-
-        constraint->columns = std::move(columns);
-        return constraint;
+        return std::make_unique<PrimaryKeyConstraintExpr>(
+            std::move(columns));
     }
 
     if (matchKeyword("UNIQUE"))
     {
         auto columns = parseParenthesizedIdentifierList();
 
-        auto constraint = std::make_unique<UniqueConstraintExpr>(
-            ConstraintType::Unique);
-
-        constraint->columns = std::move(columns);
-        return constraint;
+        return std::make_unique<UniqueConstraintExpr>(
+            std::move(columns));
     }
 
     if (matchKeyword("CHECK"))
@@ -1275,18 +1254,33 @@ std::unique_ptr<Expr> Parser::parseComparison()
 {
     auto left = parseAdditive();
 
-
-    while (isComparisonOperator(peek()))
+    while (true)
     {
-        BinaryOperator op = parseBinaryOp();
-        auto right = parseAdditive();
+        if (isComparisonOperator(peek()))
+        {
+            BinaryOperator op = parseBinaryOp();
+            auto right = parseAdditive();
 
-        left = std::make_unique<BinaryExpr>(
-            op,
-            std::move(left),
-            std::move(right));
+            left = std::make_unique<BinaryExpr>(
+                op,
+                std::move(left),
+                std::move(right));
+            continue;
+        }
+
+        if (matchKeyword("IS"))
+        {
+            bool negated = matchKeyword("NOT");
+            expectKeyword("NULL");
+
+            left = std::make_unique<IsNullExpr>(
+                std::move(left),
+                negated);
+            continue;
+        }
+
+        break;
     }
-
 
     return left;
 }
@@ -1342,4 +1336,3 @@ std::unique_ptr<Expr> Parser::parseArithmeticUnary()
 
     return parsePrimary();
 }
-

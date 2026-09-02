@@ -137,6 +137,14 @@ Page HeaderPageDecoder::decode()
         headerPage.columns.push_back(decodeColumn());
     }
 
+    std::uint32_t constraintCount = decoder.decodeUnsigned<std::uint32_t>();
+    headerPage.constraints.reserve(constraintCount);
+
+    for (std::uint32_t i = 0; i < constraintCount; ++i)
+    {
+        headerPage.constraints.push_back(decodeConstraint());
+    }
+
     headerPage.totalRowCount = decoder.decodeUnsigned<std::uint64_t>();
     headerPage.firstDataPageId = decoder.decodeUnsigned<std::uint32_t>();
     headerPage.lastDataPageId = decoder.decodeUnsigned<std::uint32_t>();
@@ -178,6 +186,166 @@ ColumnStorage HeaderPageDecoder::decodeColumnStorage()
     }
 
     throw std::runtime_error("Unknown column storage type");
+}
+
+std::vector<ColumnId> HeaderPageDecoder::decodeColumnIds()
+{
+    std::uint32_t count = decoder.decodeUnsigned<std::uint32_t>();
+    std::vector<ColumnId> columnIds;
+    columnIds.reserve(count);
+
+    for (std::uint32_t i = 0; i < count; ++i)
+    {
+        columnIds.push_back(decoder.decodeUnsigned<std::uint32_t>());
+    }
+
+    return columnIds;
+}
+
+Constraint HeaderPageDecoder::decodeConstraint()
+{
+    ConstraintType type = static_cast<ConstraintType>(
+        decoder.decodeUnsigned<std::uint8_t>());
+    std::string name = decoder.decodeString();
+
+    switch (type)
+    {
+    case ConstraintType::PrimaryKey:
+        return BoundPrimaryKeyConstraintExpr{
+            std::move(name),
+            decodeColumnIds()};
+
+    case ConstraintType::ForeignKey:
+    {
+        std::vector<ColumnId> localColumnIds = decodeColumnIds();
+        std::string referencedTableName = decoder.decodeString();
+        std::vector<ColumnId> referencedColumnIds = decodeColumnIds();
+
+        return BoundForeignKeyConstraintExpr{
+            std::move(name),
+            std::move(localColumnIds),
+            std::move(referencedTableName),
+            std::move(referencedColumnIds)};
+    }
+
+    case ConstraintType::Unique:
+        return BoundUniqueConstraintExpr{
+            std::move(name),
+            decodeColumnIds()};
+
+    case ConstraintType::NotNull:
+        return BoundNotNullConstraintExpr{
+            std::move(name),
+            decoder.decodeUnsigned<std::uint32_t>()};
+
+    case ConstraintType::Null:
+        return BoundNullConstraintExpr{
+            std::move(name),
+            decoder.decodeUnsigned<std::uint32_t>()};
+
+    case ConstraintType::Default:
+    {
+        std::unique_ptr<BoundExpr> value = decodeExpression();
+        ColumnId columnId = decoder.decodeUnsigned<std::uint32_t>();
+
+        return BoundDefaultConstraintExpr{
+            std::move(name),
+            std::move(value),
+            columnId};
+    }
+
+    case ConstraintType::Check:
+        return BoundCheckConstraintExpr{
+            std::move(name),
+            decodeExpression()};
+
+    }
+
+    throw std::runtime_error("Unknown constraint type");
+}
+
+std::unique_ptr<BoundExpr> HeaderPageDecoder::decodeExpression()
+{
+    BoundExprKind kind = static_cast<BoundExprKind>(
+        decoder.decodeUnsigned<std::uint8_t>());
+
+    switch (kind)
+    {
+    case BoundExprKind::ColumnReference:
+    {
+        ColumnId columnId = decoder.decodeUnsigned<std::uint32_t>();
+        DataType type = static_cast<DataType>(
+            decoder.decodeUnsigned<std::uint8_t>());
+        return std::make_unique<BoundColumnExpr>(columnId, type);
+    }
+
+    case BoundExprKind::Literal:
+    {
+        DataType type = static_cast<DataType>(
+            decoder.decodeUnsigned<std::uint8_t>());
+
+        switch (type)
+        {
+        case DataType::Null:
+            return std::make_unique<BoundLiteralExpr>(
+                Value{std::monostate{}},
+                type);
+
+        case DataType::Int:
+            return std::make_unique<BoundLiteralExpr>(
+                Value{static_cast<int>(decoder.decodeUnsigned<std::uint32_t>())},
+                type);
+
+        case DataType::Text:
+            return std::make_unique<BoundLiteralExpr>(
+                Value{decoder.decodeString()},
+                type);
+
+        default:
+            throw std::runtime_error("Unsupported literal type in stored expression");
+        }
+    }
+
+    case BoundExprKind::Binary:
+    {
+        BinaryOperator op = static_cast<BinaryOperator>(
+            decoder.decodeUnsigned<std::uint8_t>());
+        DataType resultType = static_cast<DataType>(
+            decoder.decodeUnsigned<std::uint8_t>());
+        std::unique_ptr<BoundExpr> left = decodeExpression();
+        std::unique_ptr<BoundExpr> right = decodeExpression();
+
+        return std::make_unique<BoundBinaryExpr>(
+            op,
+            std::move(left),
+            std::move(right),
+            resultType);
+    }
+
+    case BoundExprKind::Unary:
+    {
+        UnaryOperator op = static_cast<UnaryOperator>(
+            decoder.decodeUnsigned<std::uint8_t>());
+        DataType resultType = static_cast<DataType>(
+            decoder.decodeUnsigned<std::uint8_t>());
+
+        return std::make_unique<BoundUnaryExpr>(
+            op,
+            decodeExpression(),
+            resultType);
+    }
+
+    case BoundExprKind::IsNull:
+    {
+        std::unique_ptr<BoundExpr> operand = decodeExpression();
+        bool negated = decoder.decodeUnsigned<std::uint8_t>() != 0;
+        return std::make_unique<BoundIsNullExpr>(
+            std::move(operand),
+            negated);
+    }
+    }
+
+    throw std::runtime_error("Unknown stored expression type");
 }
 
 Value ValueDeserializer::decodeFixed(

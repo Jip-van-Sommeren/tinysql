@@ -68,6 +68,7 @@ std::vector<std::byte> ValueSerializer::serializeValue(
     switch (type)
     {
     case DataType::Int:
+    {
         if (!std::holds_alternative<int>(value))
         {
             throw std::runtime_error("Expected int value");
@@ -76,7 +77,8 @@ std::vector<std::byte> ValueSerializer::serializeValue(
         const auto *data = reinterpret_cast<const std::byte *>(&intValue);
 
         return std::vector<std::byte>(data, data + sizeof(intValue));
-    
+    }
+
     case DataType::Text:
     {
         if (!std::holds_alternative<std::string>(value))
@@ -566,64 +568,60 @@ void DataPageWriter::write(const PageHeader &pageHeader, const std::vector<Row> 
 }
 
 void HeaderPageWriter::writeConstraint(
-    const Constraint& constraint)
+    const Constraint &constraint)
 {
-    writer.writeUnsigned<std::uint8_t>(static_cast<std::uint8_t>(constraint.expr.constraintType));
+    std::visit(
+        [this](const auto &boundConstraint)
+        {
+            using T = std::decay_t<decltype(boundConstraint)>;
 
-    writer.writeString(constraint.expr.constraintName);
+            writer.writeUnsigned<std::uint8_t>(
+                static_cast<std::uint8_t>(boundConstraint.constraintType));
+            writer.writeString(boundConstraint.constraintName);
 
-    switch(constraint.expr.constraintType)
-    {
-        case ConstraintType::Null:
-            break;
-        case ConstraintType::NotNull:
-            // No additional data needed for NotNull or Null constraints
-            writer.writeUnsigned<std::uint32_t>(static_cast<const BoundNotNullConstraintExpr&>(constraint.expr).columnId);
-            break;
-        
-        case ConstraintType::Default:
-            const auto& def =
-                static_cast<const BoundDefaultConstraintExpr&>(constraint.expr);
-            ExpressionSerializer::serialize(*def.value, writer);
-            writer.writeUnsigned<std::uint32_t>(def.columnId);
-            break;
-        case ConstraintType::PrimaryKey:
-            // Primary key constraints are represented by the unique constraint on the primary key columns.
-            const auto& pk = static_cast<const BoundUniqueConstraintExpr&>(constraint.expr);
-            for (ColumnId colId : pk.columnIds)
+            if constexpr (std::is_same_v<T, BoundNotNullConstraintExpr> ||
+                          std::is_same_v<T, BoundNullConstraintExpr>)
             {
-                writer.writeUnsigned<std::uint32_t>(colId);
+                writer.writeUnsigned<std::uint32_t>(boundConstraint.columnId);
             }
-            break;
-        case ConstraintType::Check:
-            const auto& ck =
-                static_cast<const BoundCheckConstraintExpr&>(constraint.expr);
-            ExpressionSerializer::serialize(*ck.condition, writer);
-            break;
-        case ConstraintType::Unique:
-            const auto& uq =
-                static_cast<const BoundUniqueConstraintExpr&>(constraint.expr);
-            for (ColumnId colId : uq.columnIds)
+            else if constexpr (std::is_same_v<T, BoundDefaultConstraintExpr>)
             {
-                writer.writeUnsigned<std::uint32_t>(colId);
+                ExpressionSerializer::serialize(*boundConstraint.value, writer);
+                writer.writeUnsigned<std::uint32_t>(boundConstraint.columnId);
             }
-            break;
-        case ConstraintType::ForeignKey:
-            const auto& fk =
-                static_cast<const BoundForeignKeyConstraintExpr&>(constraint.expr);
-            for (ColumnId colId : fk.localColumnIds)
+            else if constexpr (std::is_same_v<T, BoundPrimaryKeyConstraintExpr> ||
+                               std::is_same_v<T, BoundUniqueConstraintExpr>)
             {
-                writer.writeUnsigned<std::uint32_t>(colId);
+                writer.writeUnsigned<std::uint32_t>(
+                    static_cast<std::uint32_t>(boundConstraint.columnIds.size()));
+                for (ColumnId columnId : boundConstraint.columnIds)
+                {
+                    writer.writeUnsigned<std::uint32_t>(columnId);
+                }
             }
-            writer.writeString(fk.referencedTableName);
-            for (ColumnId colId : fk.referencedColumnIds)
+            else if constexpr (std::is_same_v<T, BoundCheckConstraintExpr>)
             {
-                writer.writeUnsigned<std::uint32_t>(colId);
+                ExpressionSerializer::serialize(*boundConstraint.condition, writer);
             }
-            break;
-        default:
-            throw std::runtime_error("Unsupported constraint type for serialization");
-    }
+            else if constexpr (std::is_same_v<T, BoundForeignKeyConstraintExpr>)
+            {
+                writer.writeUnsigned<std::uint32_t>(
+                    static_cast<std::uint32_t>(boundConstraint.localColumnIds.size()));
+                for (ColumnId columnId : boundConstraint.localColumnIds)
+                {
+                    writer.writeUnsigned<std::uint32_t>(columnId);
+                }
+
+                writer.writeString(boundConstraint.referencedTableName);
+                writer.writeUnsigned<std::uint32_t>(
+                    static_cast<std::uint32_t>(boundConstraint.referencedColumnIds.size()));
+                for (ColumnId columnId : boundConstraint.referencedColumnIds)
+                {
+                    writer.writeUnsigned<std::uint32_t>(columnId);
+                }
+            }
+        },
+        constraint);
 }
 
 void ExpressionSerializer::serialize(
@@ -641,6 +639,8 @@ void ExpressionSerializer::serialize(
                 static_cast<const BoundColumnExpr&>(expression);
 
             writer.writeUnsigned<std::uint32_t>(column.columnIndex);
+            writer.writeUnsigned<std::uint8_t>(
+                static_cast<std::uint8_t>(column.type()));
             break;
         }
 
@@ -651,7 +651,25 @@ void ExpressionSerializer::serialize(
 
             writer.writeUnsigned<std::uint8_t>(
                 static_cast<std::uint8_t>(literal.type()));
-            ValueSerializer::serializeValue(literal.type(), literal.value);
+
+            switch (literal.type())
+            {
+            case DataType::Null:
+                break;
+
+            case DataType::Int:
+                writer.writeUnsigned<std::uint32_t>(
+                    static_cast<std::uint32_t>(std::get<int>(literal.value)));
+                break;
+
+            case DataType::Text:
+                writer.writeString(std::get<std::string>(literal.value));
+                break;
+
+            default:
+                throw std::runtime_error(
+                    "Unsupported literal type in stored expression");
+            }
             break;
         }
 
@@ -662,6 +680,8 @@ void ExpressionSerializer::serialize(
 
             writer.writeUnsigned<std::uint8_t>(
                 static_cast<std::uint8_t>(binary.op));
+            writer.writeUnsigned<std::uint8_t>(
+                static_cast<std::uint8_t>(binary.type()));
 
             serialize(*binary.left, writer);
             serialize(*binary.right, writer);
@@ -675,8 +695,20 @@ void ExpressionSerializer::serialize(
 
             writer.writeUnsigned<std::uint8_t>(
                 static_cast<std::uint8_t>(unary.op));
+            writer.writeUnsigned<std::uint8_t>(
+                static_cast<std::uint8_t>(unary.type()));
 
             serialize(*unary.operand, writer);
+            break;
+        }
+
+        case BoundExprKind::IsNull:
+        {
+            const auto &isNull =
+                static_cast<const BoundIsNullExpr &>(expression);
+
+            serialize(*isNull.operand, writer);
+            writer.writeUnsigned<std::uint8_t>(isNull.negated ? 1 : 0);
             break;
         }
     }

@@ -157,7 +157,7 @@ private:
     PageWriter &writer;
 
     void writeColumn(const Column &column);
-    void writeConstraint(const Constraint& constraint);
+    void writeConstraint(const Constraint &constraint);
     void writeColumnStorage(const ColumnStorage &storage);
 };
 
@@ -181,9 +181,6 @@ class ExpressionSerializer
 public:
     static void serialize(
         const BoundExpr& expression,
-        PageWriter& writer);
-    static void serialize(
-        const BoundConstraintExpr& expression,
         PageWriter& writer);
 };
 
