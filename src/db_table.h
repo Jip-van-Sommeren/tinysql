@@ -9,6 +9,7 @@
 
 struct BoundInsert;
 struct BoundSelect;
+struct BoundDelete;
 
 class Table
 {
@@ -25,6 +26,7 @@ public:
     void insertRows(const BoundInsert &insert);
     std::vector<Row> selectAllRows();
     std::vector<Row> selectRows(const BoundSelect &select);
+    std::uint64_t deleteRows(const BoundDelete &del);
 
 private:
     explicit Table(std::filesystem::path tablePath);

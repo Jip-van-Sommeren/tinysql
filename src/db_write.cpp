@@ -745,6 +745,68 @@ RawPage encodeDataPage(
 }
 
 RawPage encodeDataPage(
+    const PageHeader &pageHeader,
+    const HeaderPage &tableHeader,
+    const DataPage &dataPage)
+{
+    RawPage rawPage{};
+    PageWriter writer(rawPage);
+
+    PageHeader storedHeader = pageHeader;
+    if (dataPage.slots.size() > std::numeric_limits<std::uint16_t>::max())
+    {
+        throw std::runtime_error("Too many slots in data page");
+    }
+    storedHeader.slotCount =
+        static_cast<std::uint16_t>(dataPage.slots.size());
+
+    PageHeaderWriter headerWriter(writer);
+    headerWriter.write(storedHeader);
+
+    SlotWriter slotWriter(writer);
+    for (std::size_t index = 0; index < dataPage.slots.size(); ++index)
+    {
+        slotWriter.writeSlot(
+            static_cast<std::uint16_t>(index),
+            dataPage.slots[index]);
+    }
+
+    std::vector<bool> occupiedSlots(dataPage.slots.size(), false);
+    for (const RowEntry &entry : dataPage.rows)
+    {
+        if (entry.slotIndex >= dataPage.slots.size())
+        {
+            throw std::runtime_error("Row entry references an invalid slot");
+        }
+        if (occupiedSlots[entry.slotIndex])
+        {
+            throw std::runtime_error("Multiple rows reference the same slot");
+        }
+
+        const Slot &slot = dataPage.slots[entry.slotIndex];
+        if (slot.has(SlotFlag::Deleted))
+        {
+            throw std::runtime_error("Active row references a deleted slot");
+        }
+
+        writer.seek(slot.offset);
+        RowWriter rowWriter(writer, tableHeader);
+        rowWriter.writeRow(entry.row.values);
+
+        const std::size_t writtenSize = writer.position() - slot.offset;
+        if (writtenSize != slot.size)
+        {
+            throw std::runtime_error(
+                "Encoded row size does not match its slot size");
+        }
+
+        occupiedSlots[entry.slotIndex] = true;
+    }
+
+    return rawPage;
+}
+
+RawPage encodeDataPage(
     std::uint32_t pageId,
     const HeaderPage &tableHeader,
     const std::vector<Row> &rows)

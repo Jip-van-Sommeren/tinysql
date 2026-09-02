@@ -190,6 +190,10 @@ RawPage encodeDataPage(
     const HeaderPage &tableHeader,
     const std::vector<Row> &rows);
 RawPage encodeDataPage(
+    const PageHeader &pageHeader,
+    const HeaderPage &tableHeader,
+    const DataPage &dataPage);
+RawPage encodeDataPage(
     std::uint32_t pageId,
     const HeaderPage &tableHeader,
     const std::vector<Row> &rows);

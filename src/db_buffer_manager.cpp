@@ -187,15 +187,7 @@ RawPage BufferManager::encodeCachedPage(const Page &page)
             std::get<HeaderPage>(header->second.page.data);
         const DataPage &dataPage = std::get<DataPage>(page.data);
 
-        std::vector<Row> rows;
-        rows.reserve(dataPage.rows.size());
-
-        for (const RowEntry &entry : dataPage.rows)
-        {
-            rows.push_back(entry.row);
-        }
-
-        return encodeDataPage(page.header, headerPage, rows);
+        return encodeDataPage(page.header, headerPage, dataPage);
     }
 
     throw std::runtime_error("Unsupported page type while encoding cached page");

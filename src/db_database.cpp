@@ -108,11 +108,12 @@ QueryResult Database::executeSelect(const BoundSelect &select)
 
 QueryResult Database::executeDelete(const BoundDelete &del)
 {
-    storageEngine.openTable(del.tableName);
+    Table table = storageEngine.openTable(del.tableName);
+    std::uint64_t deletedCount = table.deleteRows(del);
 
     return QueryResult{
         .rows = {},
-        .affectedRows = 0,
+        .affectedRows = deletedCount,
         .returnsRows = false};
 }
 

@@ -5,6 +5,7 @@
 #include "db_query_validator.h"
 #include "db_read.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <filesystem>
 #include <stdexcept>
@@ -67,6 +68,62 @@ std::vector<Row> Table::selectRows(const BoundSelect &select)
     }
 
     return result;
+}
+
+std::uint64_t Table::deleteRows(const BoundDelete &del)
+{
+    Page &headerPageContainer = bufferManager.getPage(0, decodeHeaderPage);
+    HeaderPage &headerPage =
+        std::get<HeaderPage>(headerPageContainer.data);
+    std::uint64_t deletedCount = 0;
+
+    std::uint32_t pageId = headerPage.firstDataPageId;
+    while (pageId != 0)
+    {
+        Page &dataPageContainer = bufferManager.getPage(
+            pageId,
+            [&headerPage](const RawPage &rawPage)
+            {
+                return decodeDataPage(rawPage, headerPage);
+            });
+        DataPage &dataPage = std::get<DataPage>(dataPageContainer.data);
+
+        const std::size_t previousRowCount = dataPage.rows.size();
+        std::erase_if(
+            dataPage.rows,
+            [&del, &dataPage, &deletedCount](const RowEntry &entry)
+            {
+                if (del.where && !evaluatePredicate(*del.where, entry.row))
+                {
+                    return false;
+                }
+
+                dataPage.slots.at(entry.slotIndex).set(SlotFlag::Deleted);
+                ++deletedCount;
+                return true;
+            });
+
+        if (dataPage.rows.size() != previousRowCount)
+        {
+            bufferManager.markDirty(pageId);
+        }
+
+        pageId = dataPageContainer.header.nextPageId;
+    }
+
+    if (deletedCount > headerPage.totalRowCount)
+    {
+        throw std::runtime_error("Deleted row count exceeds table row count");
+    }
+
+    if (deletedCount != 0)
+    {
+        headerPage.totalRowCount -= deletedCount;
+        bufferManager.markDirty(headerPageContainer.header.pageId);
+    }
+
+    bufferManager.flushAll();
+    return deletedCount;
 }
 
 Table::Table(std::filesystem::path tablePath)

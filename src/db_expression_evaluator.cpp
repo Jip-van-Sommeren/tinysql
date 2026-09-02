@@ -2,6 +2,7 @@
 
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <variant>
 
 namespace
@@ -23,57 +24,45 @@ namespace
 
     bool compareValues(BinaryOperator op, const Value &left, const Value &right)
     {
-        if (std::holds_alternative<int>(left) &&
-            std::holds_alternative<int>(right))
-        {
-            int leftInt = std::get<int>(left);
-            int rightInt = std::get<int>(right);
-
-            switch (op)
+        return std::visit(
+            [op](const auto &lhs, const auto &rhs) -> bool
             {
-            case BinaryOperator::Gt:
-                return leftInt > rightInt;
-            case BinaryOperator::Ge:
-                return leftInt >= rightInt;
-            case BinaryOperator::Lt:
-                return leftInt < rightInt;
-            case BinaryOperator::Le:
-                return leftInt <= rightInt;
-            case BinaryOperator::Eq:
-                return leftInt == rightInt;
-            case BinaryOperator::Ne:
-                return leftInt != rightInt;
-            default:
-                throw std::runtime_error("Unsupported comparison operator");
-            }
-        }
+                using L = std::decay_t<decltype(lhs)>;
+                using R = std::decay_t<decltype(rhs)>;
 
-        if (std::holds_alternative<std::string>(left) &&
-            std::holds_alternative<std::string>(right))
-        {
-            const std::string &leftString = std::get<std::string>(left);
-            const std::string &rightString = std::get<std::string>(right);
-
-            switch (op)
-            {
-            case BinaryOperator::Gt:
-                return leftString > rightString;
-            case BinaryOperator::Ge:
-                return leftString >= rightString;
-            case BinaryOperator::Lt:
-                return leftString < rightString;
-            case BinaryOperator::Le:
-                return leftString <= rightString;
-            case BinaryOperator::Eq:
-                return leftString == rightString;
-            case BinaryOperator::Ne:
-                return leftString != rightString;
-            default:
-                throw std::runtime_error("Unsupported comparison operator");
-            }
-        }
-
-        throw std::runtime_error("Cannot compare values of different types");
+                if constexpr (!std::is_same_v<L, R>)
+                {
+                    throw std::runtime_error(
+                        "Cannot compare values of different types");
+                }
+                else if constexpr (std::is_same_v<L, std::monostate>)
+                {
+                    throw std::runtime_error("Cannot directly compare NULL");
+                }
+                else
+                {
+                    switch (op)
+                    {
+                    case BinaryOperator::Gt:
+                        return lhs > rhs;
+                    case BinaryOperator::Ge:
+                        return lhs >= rhs;
+                    case BinaryOperator::Lt:
+                        return lhs < rhs;
+                    case BinaryOperator::Le:
+                        return lhs <= rhs;
+                    case BinaryOperator::Eq:
+                        return lhs == rhs;
+                    case BinaryOperator::Ne:
+                        return lhs != rhs;
+                    default:
+                        throw std::runtime_error(
+                            "Unsupported comparison operator");
+                    }
+                }
+            },
+            left,
+            right);
     }
 
     bool evaluateBinaryPredicate(const BoundBinaryExpr &expr, const Row &row)
