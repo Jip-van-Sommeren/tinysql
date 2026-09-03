@@ -1,7 +1,9 @@
 #include "db_write.h"
+#include "db_decimal.h"
 #include "db_query_validator.h"
 
 #include <algorithm>
+#include <bit>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -69,14 +71,65 @@ std::vector<std::byte> ValueSerializer::serializeValue(
     {
     case DataType::Int:
     {
-        if (!std::holds_alternative<int>(value))
+        if (!std::holds_alternative<std::int32_t>(value))
         {
             throw std::runtime_error("Expected int value");
         }
-        const int intValue = std::get<int>(value);
+        const std::int32_t intValue = std::get<std::int32_t>(value);
         const auto *data = reinterpret_cast<const std::byte *>(&intValue);
 
         return std::vector<std::byte>(data, data + sizeof(intValue));
+    }
+
+    case DataType::BigInt:
+    {
+        if (!std::holds_alternative<std::int64_t>(value))
+        {
+            throw std::runtime_error("Expected BIGINT value");
+        }
+        const std::int64_t integer = std::get<std::int64_t>(value);
+        const auto *data = reinterpret_cast<const std::byte *>(&integer);
+        return std::vector<std::byte>(data, data + sizeof(integer));
+    }
+
+    case DataType::Double:
+    {
+        if (!std::holds_alternative<std::float64_t>(value))
+        {
+            throw std::runtime_error("Expected DOUBLE value");
+        }
+        const std::float64_t floating = std::get<std::float64_t>(value);
+        const auto *data = reinterpret_cast<const std::byte *>(&floating);
+        return std::vector<std::byte>(data, data + sizeof(floating));
+    }
+
+    case DataType::Decimal:
+    {
+        if (!std::holds_alternative<DecimalValue>(value))
+        {
+            throw std::runtime_error("Expected DECIMAL value");
+        }
+        const DecimalValue decimal = std::get<DecimalValue>(value);
+        if (decimal.scale > MAX_DECIMAL_SCALE)
+        {
+            throw std::runtime_error("DECIMAL scale exceeds 18 digits");
+        }
+        std::vector<std::byte> bytes(sizeof(decimal.coefficient) + sizeof(decimal.scale));
+        std::memcpy(bytes.data(), &decimal.coefficient, sizeof(decimal.coefficient));
+        std::memcpy(
+            bytes.data() + sizeof(decimal.coefficient),
+            &decimal.scale,
+            sizeof(decimal.scale));
+        return bytes;
+    }
+
+    case DataType::Boolean:
+    {
+        if (!std::holds_alternative<bool>(value))
+        {
+            throw std::runtime_error("Expected BOOLEAN value");
+        }
+        return {static_cast<std::byte>(std::get<bool>(value) ? 1 : 0)};
     }
 
     case DataType::Text:
@@ -208,20 +261,78 @@ void RowWriter::writeFixedValues(const std::vector<Value> &values)
 void RowWriter::writeFixedValue(
     const Column &column,
     const FixedColumnStorage &fixed,
-    const Value &value){
+    const Value &value)
+{
     std::size_t absoluteOffset = rowStart + fixedAreaStartOffset + fixed.offset;
     
     switch (column.type)
     {
     case DataType::Int:
-        if (!std::holds_alternative<int>(value))
+        if (!std::holds_alternative<std::int32_t>(value))
         {
             throw std::runtime_error("Expected int value");
         }
 
         writer.writeUnsignedAt<std::uint32_t>(
             absoluteOffset,
-            static_cast<std::uint32_t>(std::get<int>(value)));
+            std::bit_cast<std::uint32_t>(
+                std::get<std::int32_t>(value)));
+        return;
+
+    case DataType::BigInt:
+        if (!std::holds_alternative<std::int64_t>(value))
+        {
+            throw std::runtime_error("Expected BIGINT value");
+        }
+
+        writer.writeUnsignedAt<std::uint64_t>(
+            absoluteOffset,
+            std::bit_cast<std::uint64_t>(
+                std::get<std::int64_t>(value)));
+        return;
+
+    case DataType::Double:
+        if (!std::holds_alternative<std::float64_t>(value))
+        {
+            throw std::runtime_error("Expected DOUBLE value");
+        }
+
+        writer.writeUnsignedAt<std::uint64_t>(
+            absoluteOffset,
+            std::bit_cast<std::uint64_t>(
+                std::get<std::float64_t>(value)));
+        return;
+
+    case DataType::Decimal:
+    {
+        if (!std::holds_alternative<DecimalValue>(value))
+        {
+            throw std::runtime_error("Expected DECIMAL value");
+        }
+
+        const DecimalValue decimal = std::get<DecimalValue>(value);
+        if (decimal.scale > MAX_DECIMAL_SCALE)
+        {
+            throw std::runtime_error("DECIMAL scale exceeds 18 digits");
+        }
+        writer.writeUnsignedAt<std::uint64_t>(
+            absoluteOffset,
+            std::bit_cast<std::uint64_t>(decimal.coefficient));
+        writer.writeUnsignedAt<std::uint32_t>(
+            absoluteOffset + sizeof(std::int64_t),
+            decimal.scale);
+        return;
+    }
+
+    case DataType::Boolean:
+        if (!std::holds_alternative<bool>(value))
+        {
+            throw std::runtime_error("Expected BOOLEAN value");
+        }
+
+        writer.writeUnsignedAt<std::uint8_t>(
+            absoluteOffset,
+            std::get<bool>(value) ? 1u : 0u);
         return;
 
     default:
@@ -659,7 +770,40 @@ void ExpressionSerializer::serialize(
 
             case DataType::Int:
                 writer.writeUnsigned<std::uint32_t>(
-                    static_cast<std::uint32_t>(std::get<int>(literal.value)));
+                    std::bit_cast<std::uint32_t>(
+                        std::get<std::int32_t>(literal.value)));
+                break;
+
+            case DataType::BigInt:
+                writer.writeUnsigned<std::uint64_t>(
+                    std::bit_cast<std::uint64_t>(
+                        std::get<std::int64_t>(literal.value)));
+                break;
+
+            case DataType::Double:
+                writer.writeUnsigned<std::uint64_t>(
+                    std::bit_cast<std::uint64_t>(
+                        std::get<std::float64_t>(literal.value)));
+                break;
+
+            case DataType::Decimal:
+            {
+                const DecimalValue decimal =
+                    std::get<DecimalValue>(literal.value);
+                if (decimal.scale > MAX_DECIMAL_SCALE)
+                {
+                    throw std::runtime_error(
+                        "DECIMAL literal scale exceeds 18 digits");
+                }
+                writer.writeUnsigned<std::uint64_t>(
+                    std::bit_cast<std::uint64_t>(decimal.coefficient));
+                writer.writeUnsigned<std::uint32_t>(decimal.scale);
+                break;
+            }
+
+            case DataType::Boolean:
+                writer.writeUnsigned<std::uint8_t>(
+                    std::get<bool>(literal.value) ? 1u : 0u);
                 break;
 
             case DataType::Text:

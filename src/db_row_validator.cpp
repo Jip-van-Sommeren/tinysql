@@ -16,7 +16,19 @@ namespace
         switch (column.type)
         {
         case DataType::Int:
-            return std::holds_alternative<int>(value);
+            return std::holds_alternative<std::int32_t>(value);
+
+        case DataType::BigInt:
+            return std::holds_alternative<std::int64_t>(value);
+
+        case DataType::Double:
+            return std::holds_alternative<std::float64_t>(value);
+
+        case DataType::Decimal:
+            return std::holds_alternative<DecimalValue>(value);
+
+        case DataType::Boolean:
+            return std::holds_alternative<bool>(value);
 
         case DataType::Text:
             return std::holds_alternative<std::string>(value);
@@ -37,6 +49,14 @@ namespace
             return "null";
         case DataType::Int:
             return "int";
+        case DataType::BigInt:
+            return "bigint";
+        case DataType::Double:
+            return "double";
+        case DataType::Decimal:
+            return "decimal";
+        case DataType::Boolean:
+            return "boolean";
         case DataType::Text:
             return "text";
         default:
@@ -51,9 +71,29 @@ namespace
             return "null";
         }
 
-        if (std::holds_alternative<int>(value))
+        if (std::holds_alternative<std::int32_t>(value))
         {
             return "int";
+        }
+
+        if (std::holds_alternative<std::int64_t>(value))
+        {
+            return "bigint";
+        }
+
+        if (std::holds_alternative<std::float64_t>(value))
+        {
+            return "double";
+        }
+
+        if (std::holds_alternative<DecimalValue>(value))
+        {
+            return "decimal";
+        }
+
+        if (std::holds_alternative<bool>(value))
+        {
+            return "boolean";
         }
 
         if (std::holds_alternative<std::string>(value))

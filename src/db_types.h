@@ -1,15 +1,45 @@
 #pragma once
 
+#include <compare>
 #include <cstdint>
+#include <iosfwd>
 #include <memory>
 #include <optional>
 #include <string>
 #include <utility>
 #include <variant>
 #include <vector>
+#include <stdfloat>
 
 using ColumnId = std::uint32_t;
-using Value = std::variant<std::monostate, int, std::string>;
+
+struct DecimalLiteral
+{
+    std::string text;
+};
+
+struct DecimalValue
+{
+    std::int64_t coefficient;
+    std::uint32_t scale;
+};
+
+bool operator==(const DecimalValue &left, const DecimalValue &right);
+std::strong_ordering operator<=>(
+    const DecimalValue &left,
+    const DecimalValue &right);
+std::ostream &operator<<(std::ostream &stream, const DecimalValue &value);
+
+using Value = std::variant<
+    std::monostate,
+    std::int32_t,
+    std::int64_t,
+    std::float64_t,
+    DecimalValue,
+    std::string,
+    bool>;
+using NumberValue =
+    std::variant<std::int32_t, std::int64_t, DecimalLiteral>;
 
 enum class DataType : std::uint8_t
 {

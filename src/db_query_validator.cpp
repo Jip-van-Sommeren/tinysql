@@ -1,10 +1,14 @@
 #include "db_query_validator.h"
+#include "db_decimal.h"
 
 #include <cmath>
-#include <unordered_set>
 #include <format>
+#include <limits>
 #include <map>
+#include <optional>
 #include <stdexcept>
+#include <type_traits>
+#include <unordered_set>
 
 namespace
 {
@@ -65,18 +69,24 @@ namespace
 
         if (op == BinaryOperator::Divide)
         {
-            if (leftType == DataType::Decimal ||
-                rightType == DataType::Decimal)
-            {
-                return DataType::Decimal;
-            }
-
             if (leftType == DataType::Double ||
                 rightType == DataType::Double ||
                 leftType == DataType::Float ||
                 rightType == DataType::Float)
             {
                 return DataType::Double;
+            }
+
+            if (leftType == DataType::Decimal ||
+                rightType == DataType::Decimal)
+            {
+                return DataType::Decimal;
+            }
+
+            if (leftType == DataType::BigInt ||
+                rightType == DataType::BigInt)
+            {
+                return DataType::BigInt;
             }
 
             return DataType::Int;
@@ -119,6 +129,25 @@ namespace
         if (source == DataType::Null)
         {
             return true; // NULL can be assigned to any type
+        }
+
+        if (source == DataType::Int &&
+            (target == DataType::BigInt ||
+             target == DataType::Decimal ||
+             target == DataType::Double))
+        {
+            return true;
+        }
+
+        if (source == DataType::BigInt &&
+            (target == DataType::Decimal || target == DataType::Double))
+        {
+            return true;
+        }
+
+        if (source == DataType::Decimal && target == DataType::Double)
+        {
+            return true;
         }
 
         return false;
@@ -254,6 +283,257 @@ namespace
         }
 
         return false;
+    }
+
+    bool isArithmeticOperator(BinaryOperator op)
+    {
+        return op == BinaryOperator::Add ||
+               op == BinaryOperator::Subtract ||
+               op == BinaryOperator::Multiply ||
+               op == BinaryOperator::Divide;
+    }
+
+    DecimalValue numberToDecimal(const NumberValue &number)
+    {
+        return std::visit(
+            [](const auto &value) -> DecimalValue
+            {
+                using T = std::decay_t<decltype(value)>;
+                if constexpr (std::is_same_v<T, DecimalLiteral>)
+                {
+                    return parseDecimalLiteral(value.text);
+                }
+                else
+                {
+                    return decimalFromInt64(
+                        static_cast<std::int64_t>(value));
+                }
+            },
+            number);
+    }
+
+    std::int64_t numberToInt64Exact(const NumberValue &number)
+    {
+        return std::visit(
+            [](const auto &value) -> std::int64_t
+            {
+                using T = std::decay_t<decltype(value)>;
+                if constexpr (std::is_same_v<T, DecimalLiteral>)
+                {
+                    const auto converted =
+                        decimalToInt64Exact(parseDecimalLiteral(value.text));
+                    if (!converted)
+                    {
+                        throw std::runtime_error(
+                            "Expected an integer numeric value");
+                    }
+                    return *converted;
+                }
+                else
+                {
+                    return static_cast<std::int64_t>(value);
+                }
+            },
+            number);
+    }
+
+    std::float64_t numberToFloat64(const NumberValue &number)
+    {
+        return std::visit(
+            [](const auto &value) -> std::float64_t
+            {
+                using T = std::decay_t<decltype(value)>;
+                if constexpr (std::is_same_v<T, DecimalLiteral>)
+                {
+                    return decimalToFloat64(
+                        parseDecimalLiteral(value.text));
+                }
+                else
+                {
+                    return static_cast<std::float64_t>(value);
+                }
+            },
+            number);
+    }
+
+    std::optional<NumberValue> numberFromExpr(const Expr &expr)
+    {
+        if (const auto *number = dynamic_cast<const NumberExpr *>(&expr))
+        {
+            return number->value;
+        }
+
+        const auto *unary = dynamic_cast<const UnaryExpr *>(&expr);
+        if (!unary || unary->op == UnaryOperator::Not)
+        {
+            return std::nullopt;
+        }
+
+        std::optional<NumberValue> operand = numberFromExpr(*unary->operand);
+        if (!operand || unary->op == UnaryOperator::Positive)
+        {
+            return operand;
+        }
+
+        return std::visit(
+            [](const auto &value) -> NumberValue
+            {
+                using T = std::decay_t<decltype(value)>;
+                if constexpr (std::is_same_v<T, DecimalLiteral>)
+                {
+                    return DecimalLiteral{
+                        .text = decimalToString(
+                            negateDecimal(parseDecimalLiteral(value.text)))};
+                }
+                else
+                {
+                    if (value == std::numeric_limits<T>::min())
+                    {
+                        throw std::overflow_error(
+                            "Numeric literal negation overflow");
+                    }
+                    return static_cast<T>(-value);
+                }
+            },
+            *operand);
+    }
+
+    DataType numberDataType(const NumberValue &number)
+    {
+        return std::visit(
+            [](const auto &value)
+            {
+                using T = std::decay_t<decltype(value)>;
+                if constexpr (std::is_same_v<T, std::int32_t>)
+                {
+                    return DataType::Int;
+                }
+                else if constexpr (std::is_same_v<T, std::int64_t>)
+                {
+                    return DataType::BigInt;
+                }
+                else
+                {
+                    return DataType::Decimal;
+                }
+            },
+            number);
+    }
+
+    Value numberToValue(const NumberValue &number)
+    {
+        return std::visit(
+            [](const auto &value) -> Value
+            {
+                using T = std::decay_t<decltype(value)>;
+                if constexpr (std::is_same_v<T, DecimalLiteral>)
+                {
+                    return Value{parseDecimalLiteral(value.text)};
+                }
+                else
+                {
+                    return Value{value};
+                }
+            },
+            number);
+    }
+
+    std::int64_t valueToInt64(const Value &value)
+    {
+        if (const auto *integer = std::get_if<std::int64_t>(&value))
+        {
+            return *integer;
+        }
+        if (const auto *integer = std::get_if<std::int32_t>(&value))
+        {
+            return *integer;
+        }
+        throw std::runtime_error("Expected an integer value");
+    }
+
+    DecimalValue valueToDecimal(const Value &value)
+    {
+        if (const auto *decimal = std::get_if<DecimalValue>(&value))
+        {
+            return *decimal;
+        }
+        return decimalFromInt64(valueToInt64(value));
+    }
+
+    std::float64_t valueToFloat64(const Value &value)
+    {
+        if (const auto *floating = std::get_if<std::float64_t>(&value))
+        {
+            return *floating;
+        }
+        if (const auto *decimal = std::get_if<DecimalValue>(&value))
+        {
+            return decimalToFloat64(*decimal);
+        }
+        return static_cast<std::float64_t>(valueToInt64(value));
+    }
+
+    std::int64_t checkedIntegerAdd(
+        std::int64_t left,
+        std::int64_t right)
+    {
+        if ((right > 0 &&
+             left > std::numeric_limits<std::int64_t>::max() - right) ||
+            (right < 0 &&
+             left < std::numeric_limits<std::int64_t>::min() - right))
+        {
+            throw std::overflow_error("Integer expression overflow");
+        }
+        return left + right;
+    }
+
+    std::int64_t checkedIntegerSubtract(
+        std::int64_t left,
+        std::int64_t right)
+    {
+        if ((right > 0 &&
+             left < std::numeric_limits<std::int64_t>::min() + right) ||
+            (right < 0 &&
+             left > std::numeric_limits<std::int64_t>::max() + right))
+        {
+            throw std::overflow_error("Integer expression overflow");
+        }
+        return left - right;
+    }
+
+    std::int64_t checkedIntegerMultiply(
+        std::int64_t left,
+        std::int64_t right)
+    {
+        if (left == 0 || right == 0)
+        {
+            return 0;
+        }
+        if ((left == -1 &&
+             right == std::numeric_limits<std::int64_t>::min()) ||
+            (right == -1 &&
+             left == std::numeric_limits<std::int64_t>::min()))
+        {
+            throw std::overflow_error("Integer expression overflow");
+        }
+        if (left > 0)
+        {
+            if ((right > 0 &&
+                 left > std::numeric_limits<std::int64_t>::max() / right) ||
+                (right < 0 &&
+                 right < std::numeric_limits<std::int64_t>::min() / left))
+            {
+                throw std::overflow_error("Integer expression overflow");
+            }
+        }
+        else if ((right > 0 &&
+                  left < std::numeric_limits<std::int64_t>::min() / right) ||
+                 (right < 0 &&
+                  left < std::numeric_limits<std::int64_t>::max() / right))
+        {
+            throw std::overflow_error("Integer expression overflow");
+        }
+        return left * right;
     }
 }
 
@@ -724,25 +1004,58 @@ Value QueryValidator::bindLiteralValue(
         return std::monostate{};
     }
 
+    const std::optional<NumberValue> number = numberFromExpr(expr);
+
     switch (targetColumn.type)
     {
     case DataType::Int:
     {
-        const auto *number = dynamic_cast<const NumberExpr *>(&expr);
-
         if (!number)
         {
             throw std::runtime_error(
                 "Expected numeric value for column: " + targetColumn.name);
         }
 
-        if (number->value != std::trunc(number->value))
+        const std::int64_t value = numberToInt64Exact(*number);
+        if (value < std::numeric_limits<std::int32_t>::min() ||
+            value > std::numeric_limits<std::int32_t>::max())
         {
             throw std::runtime_error(
-                "Expected integer value for column: " + targetColumn.name);
+                "Integer value is out of range for column: " +
+                targetColumn.name);
         }
 
-        return static_cast<int>(number->value);
+        return static_cast<std::int32_t>(value);
+    }
+
+    case DataType::BigInt:
+    {
+        if (!number)
+        {
+            throw std::runtime_error(
+                "Expected numeric value for column: " + targetColumn.name);
+        }
+        return numberToInt64Exact(*number);
+    }
+
+    case DataType::Decimal:
+    {
+        if (!number)
+        {
+            throw std::runtime_error(
+                "Expected numeric value for column: " + targetColumn.name);
+        }
+        return numberToDecimal(*number);
+    }
+
+    case DataType::Double:
+    {
+        if (!number)
+        {
+            throw std::runtime_error(
+                "Expected numeric value for column: " + targetColumn.name);
+        }
+        return numberToFloat64(*number);
     }
 
     case DataType::Text:
@@ -761,6 +1074,8 @@ Value QueryValidator::bindLiteralValue(
     case DataType::Null:
         throw std::runtime_error("Cannot bind non-null value to NULL column");
 
+    case DataType::Float:
+    case DataType::Boolean:
     default:
         throw std::runtime_error("Unsupported target column type");
     }
@@ -772,48 +1087,97 @@ Value evaluateConstantBinary(
     const Value &right,
     DataType resultType)
 {
-    if (resultType != DataType::Int)
+    if (resultType == DataType::Decimal)
     {
-        throw std::runtime_error(
-            "Constant evaluation currently supports only integers");
-    }
-
-    if (!std::holds_alternative<int>(left) ||
-        !std::holds_alternative<int>(right))
-    {
-        throw std::runtime_error(
-            "Expected integer operands");
-    }
-
-    const int lhs = std::get<int>(left);
-    const int rhs = std::get<int>(right);
-
-    switch (op)
-    {
-    case BinaryOperator::Add:
-        return lhs + rhs;
-
-    case BinaryOperator::Subtract:
-        return lhs - rhs;
-
-    case BinaryOperator::Multiply:
-        return lhs * rhs;
-
-    case BinaryOperator::Divide:
-    {
-        if (rhs == 0)
+        const DecimalValue lhs = valueToDecimal(left);
+        const DecimalValue rhs = valueToDecimal(right);
+        switch (op)
         {
+        case BinaryOperator::Add:
+            return addDecimals(lhs, rhs);
+        case BinaryOperator::Subtract:
+            return subtractDecimals(lhs, rhs);
+        case BinaryOperator::Multiply:
+            return multiplyDecimals(lhs, rhs);
+        case BinaryOperator::Divide:
+            return divideDecimals(lhs, rhs);
+        default:
+            break;
+        }
+    }
+
+    if (resultType == DataType::Double)
+    {
+        const std::float64_t lhs = valueToFloat64(left);
+        const std::float64_t rhs = valueToFloat64(right);
+        switch (op)
+        {
+        case BinaryOperator::Add:
+            return Value{lhs + rhs};
+        case BinaryOperator::Subtract:
+            return Value{lhs - rhs};
+        case BinaryOperator::Multiply:
+            return Value{lhs * rhs};
+        case BinaryOperator::Divide:
+            if (rhs == 0)
+            {
+                throw std::runtime_error(
+                    "Division by zero in constant expression");
+            }
+            return Value{lhs / rhs};
+        default:
+            break;
+        }
+    }
+
+    if (resultType == DataType::Int || resultType == DataType::BigInt)
+    {
+        const std::int64_t lhs = valueToInt64(left);
+        const std::int64_t rhs = valueToInt64(right);
+        std::int64_t result;
+
+        switch (op)
+        {
+        case BinaryOperator::Add:
+            result = checkedIntegerAdd(lhs, rhs);
+            break;
+        case BinaryOperator::Subtract:
+            result = checkedIntegerSubtract(lhs, rhs);
+            break;
+        case BinaryOperator::Multiply:
+            result = checkedIntegerMultiply(lhs, rhs);
+            break;
+        case BinaryOperator::Divide:
+            if (rhs == 0)
+            {
+                throw std::runtime_error(
+                    "Division by zero in constant expression");
+            }
+            if (lhs == std::numeric_limits<std::int64_t>::min() && rhs == -1)
+            {
+                throw std::overflow_error("Integer expression overflow");
+            }
+            result = lhs / rhs;
+            break;
+        default:
             throw std::runtime_error(
-                "Division by zero in constant expression");
+                "Operator is not a constant arithmetic operator");
         }
 
-        return lhs / rhs;
+        if (resultType == DataType::Int)
+        {
+            if (result < std::numeric_limits<std::int32_t>::min() ||
+                result > std::numeric_limits<std::int32_t>::max())
+            {
+                throw std::overflow_error("Integer expression overflow");
+            }
+            return Value{static_cast<std::int32_t>(result)};
+        }
+        return Value{result};
     }
 
-    default:
-        throw std::runtime_error(
-            "Operator is not a constant arithmetic operator");
-    }
+    throw std::runtime_error(
+        "Unsupported constant arithmetic result type");
 }
 
 std::unique_ptr<BoundExpr> QueryValidator::bindExpr(
@@ -841,8 +1205,8 @@ std::unique_ptr<BoundExpr> QueryValidator::bindExpr(
     if (const auto *number = dynamic_cast<const NumberExpr *>(&expr))
     {
         return std::make_unique<BoundLiteralExpr>(
-            Value{static_cast<int>(number->value)},
-            DataType::Int);
+            numberToValue(number->value),
+            numberDataType(number->value));
     }
 
     if (const auto *string = dynamic_cast<const StringExpr *>(&expr))
@@ -875,7 +1239,8 @@ std::unique_ptr<BoundExpr> QueryValidator::bindExpr(
             leftBound->type(),
             rightBound->type());
 
-        if (leftBound->kind() == BoundExprKind::Literal &&
+        if (isArithmeticOperator(binary->op) &&
+            leftBound->kind() == BoundExprKind::Literal &&
             rightBound->kind() == BoundExprKind::Literal)
         {
             const auto &leftLiteral =
@@ -927,12 +1292,49 @@ std::unique_ptr<BoundExpr> QueryValidator::bindExpr(
             {
                 if (resultType == DataType::Int)
                 {
-                    const int value =
-                        std::get<int>(literal.value);
+                    const std::int32_t value =
+                        std::get<std::int32_t>(literal.value);
+
+                    if (value == std::numeric_limits<std::int32_t>::min())
+                    {
+                        throw std::overflow_error(
+                            "Integer negation overflow");
+                    }
 
                     return std::make_unique<BoundLiteralExpr>(
                         Value{-value},
                         DataType::Int);
+                }
+
+                if (resultType == DataType::BigInt)
+                {
+                    const std::int64_t value =
+                        std::get<std::int64_t>(literal.value);
+
+                    if (value == std::numeric_limits<std::int64_t>::min())
+                    {
+                        throw std::overflow_error(
+                            "BIGINT negation overflow");
+                    }
+
+                    return std::make_unique<BoundLiteralExpr>(
+                        Value{-value},
+                        DataType::BigInt);
+                }
+
+                if (resultType == DataType::Decimal)
+                {
+                    return std::make_unique<BoundLiteralExpr>(
+                        Value{negateDecimal(
+                            std::get<DecimalValue>(literal.value))},
+                        DataType::Decimal);
+                }
+
+                if (resultType == DataType::Double)
+                {
+                    return std::make_unique<BoundLiteralExpr>(
+                        Value{-std::get<std::float64_t>(literal.value)},
+                        DataType::Double);
                 }
             }
         }

@@ -230,5 +230,8 @@ bool Lexer::isDataTypeKeyword(const std::string &word) const
            word == "TEXT" ||
            word == "DATE" ||
            word == "DOUBLE" ||
+           word == "DECIMAL" ||
+           word == "NUMERIC" ||
+           word == "BIGINT" ||
            word == "BOOLEAN";
 }

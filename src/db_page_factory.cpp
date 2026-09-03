@@ -33,6 +33,36 @@ namespace
                 fixedOffset += static_cast<std::uint32_t>(sizeof(std::int32_t));
                 break;
 
+            case DataType::BigInt:
+                column.storage = FixedColumnStorage{
+                    .offset = fixedOffset,
+                    .size = static_cast<std::uint32_t>(sizeof(std::int64_t))};
+                fixedOffset += static_cast<std::uint32_t>(sizeof(std::int64_t));
+                break;
+
+            case DataType::Double:
+                column.storage = FixedColumnStorage{
+                    .offset = fixedOffset,
+                    .size = static_cast<std::uint32_t>(sizeof(std::float64_t))};
+                fixedOffset += static_cast<std::uint32_t>(sizeof(std::float64_t));
+                break;
+
+            case DataType::Decimal:
+                column.storage = FixedColumnStorage{
+                    .offset = fixedOffset,
+                    .size = static_cast<std::uint32_t>(
+                        sizeof(std::int64_t) + sizeof(std::uint32_t))};
+                fixedOffset += static_cast<std::uint32_t>(
+                    sizeof(std::int64_t) + sizeof(std::uint32_t));
+                break;
+
+            case DataType::Boolean:
+                column.storage = FixedColumnStorage{
+                    .offset = fixedOffset,
+                    .size = static_cast<std::uint32_t>(sizeof(std::uint8_t))};
+                fixedOffset += static_cast<std::uint32_t>(sizeof(std::uint8_t));
+                break;
+
             case DataType::Text:
                 column.storage = VarColumnStorage{.varIndex = variableIndex};
                 ++variableIndex;

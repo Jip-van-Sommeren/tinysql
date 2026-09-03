@@ -4,15 +4,40 @@
 #include "db_types.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
+enum class ExprKind : std::uint8_t
+{
+    Literal,
+    ColumnReference,
+    Binary,
+    Unary,
+    IsNull,
+    DataType,
+    ColumnDefinition
+};
+
 struct Expr
 {
+    explicit Expr(ExprKind kind)
+        : kind_(kind)
+    {
+    }
+
     virtual ~Expr() = default;
+
+    ExprKind kind() const noexcept
+    {
+        return kind_;
+    }
+
+private:
+    ExprKind kind_;
 };
 
 struct ColumnExpr : Expr
@@ -24,9 +49,9 @@ struct ColumnExpr : Expr
 
 struct NumberExpr : Expr
 {
-    double value;
+    NumberValue value;
 
-    explicit NumberExpr(double value);
+    explicit NumberExpr(NumberValue value);
 };
 
 struct StringExpr : Expr
@@ -38,6 +63,10 @@ struct StringExpr : Expr
 
 struct NullExpr : Expr
 {
+    NullExpr()
+        : Expr(ExprKind::Literal)
+    {
+    }
 };
 
 enum class LogicalOp
@@ -55,8 +84,6 @@ enum class ComparisonOp
     Eq,
     Ne
 };
-
-
 
 enum class ArithmeticOp
 {
@@ -94,7 +121,8 @@ struct IsNullExpr : Expr
     bool negated; // false = IS NULL, true = IS NOT NULL
 
     IsNullExpr(std::unique_ptr<Expr> operand, bool negated)
-        : operand(std::move(operand)),
+        : Expr(ExprKind::IsNull),
+          operand(std::move(operand)),
           negated(negated)
     {
     }
@@ -121,7 +149,6 @@ struct ConstraintExpr
 private:
     ConstraintType kind_;
 };
-
 
 struct PrimaryKeyConstraintExpr : ConstraintExpr
 {
@@ -201,7 +228,7 @@ struct ForeignKeyConstraintExpr : ConstraintExpr
         std::string referencedTable,
         std::vector<std::string> referencedColumns)
         : ConstraintExpr(ConstraintType::ForeignKey),
-            localColumns(std::move(localColumns)),
+          localColumns(std::move(localColumns)),
           referencedTable(std::move(referencedTable)),
           referencedColumns(std::move(referencedColumns))
     {
@@ -382,7 +409,6 @@ struct ParsedColumnDefinition
     std::vector<std::unique_ptr<ConstraintExpr>> constraints;
 };
 
-
 class Parser
 {
 public:
@@ -431,14 +457,11 @@ private:
     bool isBinaryOperator(const Token &token);
     bool isUnaryOperator(const Token &token);
 
-
-
     BinaryOperator binaryOpFromToken(const Token &token);
     BinaryOperator parseBinaryOp();
 
     UnaryOperator unaryOpFromToken(const Token &token);
     UnaryOperator parseUnaryOp();
-
 
     std::unique_ptr<Expr> parseExpression();
     std::unique_ptr<Expr> parseOr();
@@ -453,19 +476,15 @@ private:
 
     std::unique_ptr<Expr> parsePrimary();
 
-
     bool isColumnConstraintStart() const;
 
     bool isTableConstraintStart() const;
 
-
     std::optional<std::string> parseOptionalConstraintName();
-    std::unique_ptr<ConstraintExpr> parseColumnConstraint(const std::string& columnName);
-    std::unique_ptr<ConstraintExpr> parseColumnConstraintBody(const std::string& columnName);
-
+    std::unique_ptr<ConstraintExpr> parseColumnConstraint(const std::string &columnName);
+    std::unique_ptr<ConstraintExpr> parseColumnConstraintBody(const std::string &columnName);
 
     std::vector<std::string> parseParenthesizedIdentifierList();
-
 
     std::unique_ptr<DataTypeExpr> parseDataType();
     ParsedColumnDefinition parseColumnDefinition();
@@ -478,5 +497,4 @@ private:
 
     std::unique_ptr<ConstraintExpr> parseTableConstraintBody();
     ForeignKeyTableRef parseReferenceClause();
-
 };

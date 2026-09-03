@@ -1,6 +1,8 @@
 #include "db_read.h"
+#include "db_decimal.h"
 
 #include <algorithm>
+#include <bit>
 #include <fstream>
 #include <stdexcept>
 #include <utility>
@@ -293,8 +295,49 @@ std::unique_ptr<BoundExpr> HeaderPageDecoder::decodeExpression()
 
         case DataType::Int:
             return std::make_unique<BoundLiteralExpr>(
-                Value{static_cast<int>(decoder.decodeUnsigned<std::uint32_t>())},
+                Value{std::bit_cast<std::int32_t>(
+                    decoder.decodeUnsigned<std::uint32_t>())},
                 type);
+
+        case DataType::BigInt:
+            return std::make_unique<BoundLiteralExpr>(
+                Value{std::bit_cast<std::int64_t>(
+                    decoder.decodeUnsigned<std::uint64_t>())},
+                type);
+
+        case DataType::Double:
+            return std::make_unique<BoundLiteralExpr>(
+                Value{std::bit_cast<std::float64_t>(
+                    decoder.decodeUnsigned<std::uint64_t>())},
+                type);
+
+        case DataType::Decimal:
+        {
+            const std::int64_t coefficient = std::bit_cast<std::int64_t>(
+                decoder.decodeUnsigned<std::uint64_t>());
+            const std::uint32_t scale = decoder.decodeUnsigned<std::uint32_t>();
+            if (scale > MAX_DECIMAL_SCALE)
+            {
+                throw std::runtime_error(
+                    "Stored DECIMAL literal scale exceeds 18 digits");
+            }
+            return std::make_unique<BoundLiteralExpr>(
+                Value{DecimalValue{
+                    .coefficient = coefficient,
+                    .scale = scale}},
+                type);
+        }
+
+        case DataType::Boolean:
+        {
+            const std::uint8_t raw = decoder.decodeUnsigned<std::uint8_t>();
+            if (raw > 1)
+            {
+                throw std::runtime_error(
+                    "Invalid BOOLEAN literal in stored expression");
+            }
+            return std::make_unique<BoundLiteralExpr>(Value{raw != 0}, type);
+        }
 
         case DataType::Text:
             return std::make_unique<BoundLiteralExpr>(
@@ -360,7 +403,48 @@ Value ValueDeserializer::decodeFixed(
         std::uint32_t raw =
             decoder.decodeUnsignedAt<std::uint32_t>(absoluteOffset);
 
-        return static_cast<int>(raw);
+        return std::bit_cast<std::int32_t>(raw);
+    }
+
+    case DataType::BigInt:
+    {
+        const std::uint64_t raw =
+            decoder.decodeUnsignedAt<std::uint64_t>(absoluteOffset);
+        return std::bit_cast<std::int64_t>(raw);
+    }
+
+    case DataType::Double:
+    {
+        const std::uint64_t raw =
+            decoder.decodeUnsignedAt<std::uint64_t>(absoluteOffset);
+        return std::bit_cast<std::float64_t>(raw);
+    }
+
+    case DataType::Decimal:
+    {
+        const std::uint64_t rawCoefficient =
+            decoder.decodeUnsignedAt<std::uint64_t>(absoluteOffset);
+        const std::uint32_t scale =
+            decoder.decodeUnsignedAt<std::uint32_t>(
+                absoluteOffset + sizeof(std::int64_t));
+        if (scale > MAX_DECIMAL_SCALE)
+        {
+            throw std::runtime_error("Stored DECIMAL scale exceeds 18 digits");
+        }
+        return DecimalValue{
+            .coefficient = std::bit_cast<std::int64_t>(rawCoefficient),
+            .scale = scale};
+    }
+
+    case DataType::Boolean:
+    {
+        const std::uint8_t raw =
+            decoder.decodeUnsignedAt<std::uint8_t>(absoluteOffset);
+        if (raw > 1)
+        {
+            throw std::runtime_error("Invalid stored BOOLEAN value");
+        }
+        return raw != 0;
     }
 
     default:

@@ -30,6 +30,7 @@ db_configure_target(db_sql PUBLIC)
 add_library(db_core
     src/db_buffer_manager.cpp
     src/db_database.cpp
+    src/db_decimal.cpp
     src/db_expression_evaluator.cpp
     src/db_page_factory.cpp
     src/db_query_validator.cpp
@@ -55,4 +56,9 @@ target_link_libraries(db_sql_parser_demo PRIVATE db_sql)
 include(CTest)
 if(BUILD_TESTING)
     add_test(NAME db_sql_parser_demo COMMAND db_sql_parser_demo)
+
+    add_executable(db_decimal_test tests/db_decimal_test.cpp)
+    db_configure_target(db_decimal_test PRIVATE)
+    target_link_libraries(db_decimal_test PRIVATE db_core)
+    add_test(NAME db_decimal_test COMMAND db_decimal_test)
 endif()

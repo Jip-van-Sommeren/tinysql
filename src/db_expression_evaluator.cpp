@@ -1,4 +1,5 @@
 #include "db_expression_evaluator.h"
+#include "db_decimal.h"
 
 #include <stdexcept>
 #include <string>
@@ -7,6 +8,53 @@
 
 namespace
 {
+    template <typename T>
+    constexpr bool isExactNumericValue =
+        std::is_same_v<T, std::int32_t> ||
+        std::is_same_v<T, std::int64_t> ||
+        std::is_same_v<T, DecimalValue>;
+
+    template <typename T>
+    constexpr bool isNumericValue =
+        isExactNumericValue<T> || std::is_same_v<T, std::float64_t>;
+
+    template <typename T>
+    DecimalValue asDecimal(const T &value)
+    {
+        if constexpr (std::is_same_v<T, DecimalValue>)
+        {
+            return value;
+        }
+        else
+        {
+            return decimalFromInt64(static_cast<std::int64_t>(value));
+        }
+    }
+
+    bool applyComparison(
+        BinaryOperator op,
+        const auto &left,
+        const auto &right)
+    {
+        switch (op)
+        {
+        case BinaryOperator::Gt:
+            return left > right;
+        case BinaryOperator::Ge:
+            return left >= right;
+        case BinaryOperator::Lt:
+            return left < right;
+        case BinaryOperator::Le:
+            return left <= right;
+        case BinaryOperator::Eq:
+            return left == right;
+        case BinaryOperator::Ne:
+            return left != right;
+        default:
+            throw std::runtime_error("Unsupported comparison operator");
+        }
+    }
+
     Value evaluateValue(const BoundExpr &expr, const Row &row)
     {
         if (const auto *column = dynamic_cast<const BoundColumnExpr *>(&expr))
@@ -32,8 +80,38 @@ namespace
 
                 if constexpr (!std::is_same_v<L, R>)
                 {
-                    throw std::runtime_error(
-                        "Cannot compare values of different types");
+                    if constexpr (isExactNumericValue<L> &&
+                                  isExactNumericValue<R>)
+                    {
+                        return applyComparison(
+                            op,
+                            asDecimal(lhs),
+                            asDecimal(rhs));
+                    }
+                    else if constexpr (isNumericValue<L> && isNumericValue<R>)
+                    {
+                        const auto asFloat = [](const auto &value)
+                        {
+                            using T = std::decay_t<decltype(value)>;
+                            if constexpr (std::is_same_v<T, DecimalValue>)
+                            {
+                                return decimalToFloat64(value);
+                            }
+                            else
+                            {
+                                return static_cast<std::float64_t>(value);
+                            }
+                        };
+                        return applyComparison(
+                            op,
+                            asFloat(lhs),
+                            asFloat(rhs));
+                    }
+                    else
+                    {
+                        throw std::runtime_error(
+                            "Cannot compare values of different types");
+                    }
                 }
                 else if constexpr (std::is_same_v<L, std::monostate>)
                 {
@@ -41,24 +119,7 @@ namespace
                 }
                 else
                 {
-                    switch (op)
-                    {
-                    case BinaryOperator::Gt:
-                        return lhs > rhs;
-                    case BinaryOperator::Ge:
-                        return lhs >= rhs;
-                    case BinaryOperator::Lt:
-                        return lhs < rhs;
-                    case BinaryOperator::Le:
-                        return lhs <= rhs;
-                    case BinaryOperator::Eq:
-                        return lhs == rhs;
-                    case BinaryOperator::Ne:
-                        return lhs != rhs;
-                    default:
-                        throw std::runtime_error(
-                            "Unsupported comparison operator");
-                    }
+                    return applyComparison(op, lhs, rhs);
                 }
             },
             left,

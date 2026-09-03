@@ -1,5 +1,6 @@
 #include "db_sql_parser.h"
 
+#include <limits>
 #include <stdexcept>
 #include <utility>
 
@@ -27,6 +28,16 @@ namespace
             return DataType::Double;
         }
 
+        if (keyword == "DECIMAL" || keyword == "NUMERIC")
+        {
+            return DataType::Decimal;
+        }
+
+        if (keyword == "BIGINT")
+        {
+            return DataType::BigInt;
+        }
+
         if (keyword == "BOOLEAN")
         {
             return DataType::Boolean;
@@ -42,42 +53,45 @@ namespace
 }
 
 ColumnExpr::ColumnExpr(std::vector<std::string> parts)
-    : parts(std::move(parts)) {}
+    : Expr(ExprKind::ColumnReference),
+      parts(std::move(parts)) {}
 
-NumberExpr::NumberExpr(double value)
-    : value(value) {}
+NumberExpr::NumberExpr(NumberValue value)
+    : Expr(ExprKind::Literal),
+      value(value) {}
 
 StringExpr::StringExpr(std::string value)
-    : value(std::move(value)) {}
-
+    : Expr(ExprKind::Literal),
+      value(std::move(value)) {}
 
 BinaryExpr::BinaryExpr(
     BinaryOperator op,
     std::unique_ptr<Expr> left,
     std::unique_ptr<Expr> right)
-    : op(op),
+    : Expr(ExprKind::Binary),
+      op(op),
       left(std::move(left)),
       right(std::move(right)) {}
-
 
 UnaryExpr::UnaryExpr(
     UnaryOperator op,
     std::unique_ptr<Expr> operand)
-    : op(op),
+    : Expr(ExprKind::Unary),
+      op(op),
       operand(std::move(operand)) {}
-
-
 
 DataTypeExpr::DataTypeExpr(
     DataType type,
     std::vector<std::unique_ptr<Expr>> typeArguments)
-    : type(type),
+    : Expr(ExprKind::DataType),
+      type(type),
       typeArguments(std::move(typeArguments)) {}
 
 ColumnDefExpr::ColumnDefExpr(
     std::string columnName,
     std::unique_ptr<DataTypeExpr> dataType)
-    : columnName(std::move(columnName)),
+    : Expr(ExprKind::ColumnDefinition),
+      columnName(std::move(columnName)),
       dataType(std::move(dataType)) {}
 
 QualifiedWildcardSelectItem::QualifiedWildcardSelectItem(std::vector<std::string> qualifierParts)
@@ -129,7 +143,8 @@ CreateTableStatement::CreateTableStatement(
     : tableName(std::move(tableName)),
       columns(std::move(columns)),
       constraints(std::move(constraints))
-    {}
+{
+}
 
 InsertStatement::InsertStatement(
     std::string tableName,
@@ -182,7 +197,6 @@ std::unique_ptr<Statement> Parser::parseStatement()
     throw std::runtime_error("Expected SQL statement, got: " + peek().text);
 }
 
-
 std::unique_ptr<CreateTableStatement> Parser::parseCreateTableStatement()
 {
     expectKeyword("CREATE");
@@ -231,7 +245,7 @@ ParsedCreateTableElements Parser::parseCreateTableElements()
 
             result.columns.push_back(std::move(parsedColumn.column));
 
-            for (auto& constraint : parsedColumn.constraints)
+            for (auto &constraint : parsedColumn.constraints)
             {
 
                 result.constraints.push_back(std::move(constraint));
@@ -302,8 +316,7 @@ ParsedColumnDefinition Parser::parseColumnDefinition()
 
     return {
         std::move(column),
-        std::move(constraints)
-    };
+        std::move(constraints)};
 }
 
 std::unique_ptr<DataTypeExpr> Parser::parseDataType()
@@ -372,7 +385,7 @@ std::optional<std::string> Parser::parseOptionalConstraintName()
     return std::nullopt;
 }
 
-std::unique_ptr<ConstraintExpr> Parser::parseColumnConstraint(const std::string& columnName)
+std::unique_ptr<ConstraintExpr> Parser::parseColumnConstraint(const std::string &columnName)
 {
     auto name = parseOptionalConstraintName();
     auto constraint = parseColumnConstraintBody(columnName);
@@ -396,7 +409,7 @@ std::vector<std::string> Parser::parseParenthesizedIdentifierList()
     return identifiers;
 }
 
-std::unique_ptr<ConstraintExpr> Parser::parseColumnConstraintBody(const std::string& columnName)
+std::unique_ptr<ConstraintExpr> Parser::parseColumnConstraintBody(const std::string &columnName)
 {
     if (matchKeyword("DEFAULT"))
     {
@@ -461,7 +474,6 @@ std::unique_ptr<ConstraintExpr> Parser::parseColumnConstraintBody(const std::str
 
 ForeignKeyTableRef Parser::parseReferenceClause()
 {
-
 
     Token tableToken = expect(TokenType::Identifier);
     std::string tableName = std::move(tableToken.text);
@@ -1067,18 +1079,14 @@ bool Parser::isUnaryOperator(const Token &token)
            token.text == "+";
 }
 
-
-
-
 // parseExpression()
-    // -> parseLogicalOr()
-    // -> parseLogicalAnd()
-    // -> parseComparison()
-    // -> parseAdditive()
-    // -> parseMultiplicative()
-    // -> parseUnary()
-    // -> parsePrimary()
-
+// -> parseLogicalOr()
+// -> parseLogicalAnd()
+// -> parseComparison()
+// -> parseAdditive()
+// -> parseMultiplicative()
+// -> parseUnary()
+// -> parsePrimary()
 
 BinaryOperator Parser::binaryOpFromToken(const Token &token)
 {
@@ -1094,7 +1102,7 @@ BinaryOperator Parser::binaryOpFromToken(const Token &token)
     {
         return BinaryOperator::Or;
     }
-        if (token.text == "+")
+    if (token.text == "+")
     {
         return BinaryOperator::Add;
     }
@@ -1154,7 +1162,7 @@ UnaryOperator Parser::unaryOpFromToken(const Token &token)
     {
         return UnaryOperator::Negate;
     }
-        if (token.text == "+")
+    if (token.text == "+")
     {
         return UnaryOperator::Positive;
     }
@@ -1180,8 +1188,23 @@ std::unique_ptr<Expr> Parser::parsePrimary()
 
     if (check(TokenType::Number))
     {
-        double value = std::stod(advance().text);
-        return std::make_unique<NumberExpr>(value);
+        const std::string text = advance().text;
+
+        if (text.find('.') != std::string::npos)
+        {
+            return std::make_unique<NumberExpr>(
+                NumberValue{DecimalLiteral{.text = text}});
+        }
+
+        const std::int64_t value = std::stoll(text);
+        if (value >= std::numeric_limits<std::int32_t>::min() &&
+            value <= std::numeric_limits<std::int32_t>::max())
+        {
+            return std::make_unique<NumberExpr>(
+                NumberValue{static_cast<std::int32_t>(value)});
+        }
+
+        return std::make_unique<NumberExpr>(NumberValue{value});
     }
 
     if (check(TokenType::String))
@@ -1235,10 +1258,8 @@ std::unique_ptr<Expr> Parser::parseAnd()
     return left;
 }
 
-
-
-
-std::unique_ptr<Expr> Parser::parseNot(){
+std::unique_ptr<Expr> Parser::parseNot()
+{
     if (matchKeyword("NOT"))
     {
         auto operand = parseNot();
@@ -1285,7 +1306,6 @@ std::unique_ptr<Expr> Parser::parseComparison()
     return left;
 }
 
-
 std::unique_ptr<Expr> Parser::parseAdditive()
 {
     auto left = parseMultiplicative();
@@ -1306,12 +1326,12 @@ std::unique_ptr<Expr> Parser::parseAdditive()
 
 std::unique_ptr<Expr> Parser::parseMultiplicative()
 {
-    auto left = parsePrimary();
+    auto left = parseArithmeticUnary();
 
     while (isArithmeticOperator(peek()) && (peek().text == "*" || peek().text == "/"))
     {
         BinaryOperator op = parseBinaryOp();
-        auto right = parsePrimary();
+        auto right = parseArithmeticUnary();
 
         left = std::make_unique<BinaryExpr>(
             op,
@@ -1327,7 +1347,7 @@ std::unique_ptr<Expr> Parser::parseArithmeticUnary()
     if (isUnaryOperator(peek()))
     {
         UnaryOperator op = parseUnaryOp();
-        auto operand = parsePrimary();
+        auto operand = parseArithmeticUnary();
 
         return std::make_unique<UnaryExpr>(
             op,
