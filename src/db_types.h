@@ -11,6 +11,12 @@
 #include <vector>
 #include <stdfloat>
 
+#ifdef __STDCPP_FLOAT32_T__
+
+static_assert(sizeof(std::float32_t) == 4);
+
+#endif
+
 using ColumnId = std::uint32_t;
 
 struct DecimalLiteral
@@ -34,12 +40,13 @@ using Value = std::variant<
     std::monostate,
     std::int32_t,
     std::int64_t,
+    std::float32_t,
     std::float64_t,
     DecimalValue,
     std::string,
     bool>;
 using NumberValue =
-    std::variant<std::int32_t, std::int64_t, DecimalLiteral>;
+    std::variant<std::int32_t, std::int64_t, std::float32_t, std::float64_t, DecimalValue>;
 
 enum class DataType : std::uint8_t
 {

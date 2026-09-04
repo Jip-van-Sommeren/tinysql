@@ -1,4 +1,5 @@
 #include "db_expression_evaluator.h"
+
 #include "db_decimal.h"
 
 #include <stdexcept>
@@ -30,6 +31,135 @@ namespace
             return decimalFromInt64(static_cast<std::int64_t>(value));
         }
     }
+    template <typename T>
+    NumberValue applyArithmeticTyped(
+        BinaryOperator op,
+        const NumberValue& left,
+        const NumberValue& right)
+    {
+        if (!std::holds_alternative<T>(left) ||
+            !std::holds_alternative<T>(right))
+        {
+            throw std::runtime_error(
+                "Bound arithmetic operands do not match resolved type");
+        }
+
+        const T lhs = std::get<T>(left);
+        const T rhs = std::get<T>(right);
+
+        switch (op)
+        {
+            case BinaryOperator::Add:
+                return NumberValue{lhs + rhs};
+
+            case BinaryOperator::Subtract:
+                return NumberValue{lhs - rhs};
+
+            case BinaryOperator::Multiply:
+                return NumberValue{lhs * rhs};
+
+            case BinaryOperator::Divide:
+            {
+                if (rhs == T{0})
+                {
+                    throw std::runtime_error(
+                        "Division by zero");
+                }
+
+                return NumberValue{lhs / rhs};
+            }
+
+            default:
+                throw std::runtime_error(
+                    "Unsupported arithmetic operator");
+        }
+    }
+
+        
+    NumberValue applyArithmeticOp(
+        BinaryOperator op,
+        const NumberValue& left,
+        const NumberValue& right,
+        DataType type)
+    {
+        switch (type)
+        {
+            case DataType::Int:
+                return applyArithmeticTyped<std::int32_t>(
+                    op, left, right);
+
+            case DataType::BigInt:
+                return applyArithmeticTyped<std::int64_t>(
+                    op, left, right);
+
+            case DataType::Float:
+                return applyArithmeticTyped<std::float32_t>(
+                    op, left, right);
+
+            case DataType::Double:
+                return applyArithmeticTyped<std::float64_t>(
+                    op, left, right);
+
+            case DataType::Decimal:
+            {
+                const auto& lhs =
+                    std::get<DecimalValue>(left);
+
+                const auto& rhs =
+                    std::get<DecimalValue>(right);
+
+                switch (op)
+                {
+                    case BinaryOperator::Add:
+                        return addDecimals(lhs, rhs);
+
+                    case BinaryOperator::Subtract:
+                        return subtractDecimals(lhs, rhs);
+
+                    case BinaryOperator::Multiply:
+                        return multiplyDecimals(lhs, rhs);
+
+                    case BinaryOperator::Divide:
+                    {
+                        if (rhs.coefficient == 0)
+                        {
+                            throw std::runtime_error(
+                                "Division by zero");
+                        }
+
+                        return divideDecimals(lhs, rhs);
+                    }
+
+                    default:
+                        throw std::runtime_error(
+                            "Unsupported arithmetic operator");
+                }
+            }
+
+            default:
+                throw std::runtime_error(
+                    "Arithmetic requires numeric operands");
+        }
+    }
+
+    bool isArithmeticOperator(BinaryOperator op)
+    {
+        return op == BinaryOperator::Add ||
+               op == BinaryOperator::Subtract ||
+               op == BinaryOperator::Multiply ||
+               op == BinaryOperator::Divide;
+    }
+
+    bool isComparisonOperator(BinaryOperator op)
+    {
+        return op == BinaryOperator::Eq ||
+               op == BinaryOperator::Ne ||
+               op == BinaryOperator::Gt ||
+               op == BinaryOperator::Ge ||
+               op == BinaryOperator::Lt ||
+               op == BinaryOperator::Le;
+    }
+
 
     bool applyComparison(
         BinaryOperator op,
@@ -55,20 +185,109 @@ namespace
         }
     }
 
-    Value evaluateValue(const BoundExpr &expr, const Row &row)
+ Value evaluateValue(
+    const BoundExpr& expr,
+    const Row& row)
+{
+    switch (expr.kind())
     {
-        if (const auto *column = dynamic_cast<const BoundColumnExpr *>(&expr))
+        case BoundExprKind::Literal:
         {
-            return row.values[column->columnIndex];
+            const auto& literal =
+                static_cast<const BoundLiteralExpr&>(expr);
+
+            return literal.value;
         }
 
-        if (const auto *literal = dynamic_cast<const BoundLiteralExpr *>(&expr))
+        case BoundExprKind::ColumnReference:
         {
-            return literal->value;
+            const auto& column =
+                static_cast<const BoundColumnExpr&>(expr);
+
+            return row.values[column.columnIndex];
         }
 
-        throw std::runtime_error("Expression does not evaluate to a value");
+        case BoundExprKind::Binary:
+        {
+            const auto& binary =
+                static_cast<const BoundBinaryExpr&>(expr);
+
+            // Short-circuit AND
+            if (binary.op == BinaryOperator::And)
+            {
+                Value left =
+                    evaluateValue(*binary.left, row);
+
+                bool lhs = std::get<bool>(left);
+
+                if (!lhs)
+                {
+                    return Value{false};
+                }
+
+                Value right =
+                    evaluateValue(*binary.right, row);
+
+                return Value{
+                    lhs && std::get<bool>(right)
+                };
+            }
+
+            // Short-circuit OR
+            if (binary.op == BinaryOperator::Or)
+            {
+                Value left =
+                    evaluateValue(*binary.left, row);
+
+                bool lhs = std::get<bool>(left);
+
+                if (lhs)
+                {
+                    return Value{true};
+                }
+
+                Value right =
+                    evaluateValue(*binary.right, row);
+
+                return Value{
+                    lhs || std::get<bool>(right)
+                };
+            }
+
+            Value left =
+                evaluateValue(*binary.left, row);
+
+            Value right =
+                evaluateValue(*binary.right, row);
+
+            if (isArithmeticOperator(binary.op))
+            {
+                return applyArithmeticOp(
+                    binary.op,
+                    left,
+                    right,
+                    binary.type());
+            }
+
+            if (isComparisonOperator(binary.op))
+            {
+                return Value{
+                    compareValues(
+                        binary.op,
+                        left,
+                        right)
+                };
+            }
+
+            throw std::runtime_error(
+                "Unsupported binary operator");
+        }
+
+        default:
+            throw std::runtime_error(
+                "Unsupported expression");
     }
+}
 
     bool compareValues(BinaryOperator op, const Value &left, const Value &right)
     {
@@ -153,8 +372,11 @@ namespace
         case BinaryOperator::Subtract:
         case BinaryOperator::Multiply:
         case BinaryOperator::Divide:
-            throw std::runtime_error(
-                "Arithmetic operations should be folded during binding");
+            {
+            Value leftValue = evaluateValue(*expr.left, row);
+            Value rightValue = evaluateValue(*expr.right, row);
+            return compareValues(expr.op, leftValue, rightValue);
+            }
         }
 
         throw std::runtime_error("Unsupported binary predicate operator");
@@ -163,25 +385,80 @@ namespace
 
 bool evaluatePredicate(const BoundExpr &expr, const Row &row)
 {
-    if (const auto *binary = dynamic_cast<const BoundBinaryExpr *>(&expr))
+    switch (expr.kind())
     {
-        return evaluateBinaryPredicate(*binary, row);
-    }
-
-    if (const auto *unary = dynamic_cast<const BoundUnaryExpr *>(&expr))
-    {
-        if (unary->op == UnaryOperator::Not)
+        case BoundExprKind::Literal:
         {
-            return !evaluatePredicate(*unary->operand, row);
+            const auto *literal = dynamic_cast<const BoundLiteralExpr *>(&expr);
+  
+            if (literal->value.index() != 6) // index of bool in Value variant
+            {
+                throw std::runtime_error(
+                    "Literal expression does not evaluate to a boolean");
+            }
+            return std::get<bool>(literal->value);
         }
-    }
+        // case BoundExprKind::ColumnReference:
+        // {
+        //     const auto *column = dynamic_cast<const BoundColumnExpr *>(&expr);
+        //     Value value = row.values[column->columnIndex];
+        //     if (value.index() != 6) // index of bool in Value variant
+        //     {
+        //         throw std::runtime_error(
+        //             "Column reference does not evaluate to a boolean");
+        //     }
+        //     return std::get<bool>(value);
+        // }
+        case BoundExprKind::Binary:
+        {
+            const auto *binary =
+                dynamic_cast<const BoundBinaryExpr *>(&expr);
+            if (binary->op == BinaryOperator::And)
+            {
+                return evaluatePredicate(*binary->left, row) &&
+                       evaluatePredicate(*binary->right, row);
+            }
+            if (binary->op == BinaryOperator::Or)
+            {
+                return evaluatePredicate(*binary->left, row) ||
+                       evaluatePredicate(*binary->right, row);
+            }
+            return evaluatePredicate(*binary, row);
+        }
+    
 
-    if (const auto *isNull = dynamic_cast<const BoundIsNullExpr *>(&expr))
+        case BoundExprKind::Unary:
+        {
+            const auto *unary = dynamic_cast<const BoundUnaryExpr *>(&expr);
+        
+            if (unary->op == UnaryOperator::Not)
+            {
+                return !evaluatePredicate(*unary->operand, row);
+            }
+        }
+
+        case BoundExprKind::IsNull:
+        {
+            const auto *isNull = dynamic_cast<const BoundIsNullExpr *>(&expr);
+            Value value = evaluateValue(*isNull->operand, row);
+            bool result = std::holds_alternative<std::monostate>(value);
+            return isNull->negated ? !result : result;
+        }
+        default:{
+            throw std::runtime_error("Expression does not evaluate to a predicate");}
+}
+}
+
+
+bool evaluatePredicate(const BoundExpr &expr, const Row &row)
+{
+    Value result = evaluateValue(expr, row);
+
+    if (!std::holds_alternative<bool>(result))
     {
-        Value value = evaluateValue(*isNull->operand, row);
-        bool result = std::holds_alternative<std::monostate>(value);
-        return isNull->negated ? !result : result;
+        throw std::runtime_error(
+            "WHERE expression did not produce a boolean");
     }
 
-    throw std::runtime_error("Expression does not evaluate to a predicate");
+    return std::get<bool>(result);
 }
