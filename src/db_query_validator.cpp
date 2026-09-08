@@ -9,6 +9,9 @@
 #include <stdexcept>
 #include <type_traits>
 #include <unordered_set>
+#include <algorithm>
+#include <cctype>
+#include <string>
 
 namespace
 {
@@ -20,6 +23,59 @@ namespace
         }
 
         throw std::runtime_error("Only single-table queries are supported");
+    }
+
+
+
+    bool iequals(const std::string& a, const std::string& b) {
+        if (a.size() != b.size()) return false;
+        return std::equal(a.begin(), a.end(), b.begin(), [](char c1, char c2) {
+            return std::tolower(static_cast<unsigned char>(c1)) == 
+                std::tolower(static_cast<unsigned char>(c2));
+        });
+    }
+
+    std::optional<FunctionId> resolveFunctionName(
+    std::string_view name)
+    {
+        if (iequals(name, "COUNT"))
+            return FunctionId::Count;
+
+        if (iequals(name, "SUM"))
+            return FunctionId::Sum;
+
+        if (iequals(name, "AVG"))
+            return FunctionId::Avg;
+
+        if (iequals(name, "MIN"))
+            return FunctionId::Min;
+
+        if (iequals(name, "MAX"))
+            return FunctionId::Max;
+
+        if (iequals(name, "ABS"))
+            return FunctionId::Abs;
+
+        return std::nullopt;
+    }
+
+    FunctionCategory resolveFunctionCategory(FunctionId id)
+    {
+        switch (id)
+        {
+        case FunctionId::Count:
+        case FunctionId::Sum:
+        case FunctionId::Avg:
+        case FunctionId::Min:
+        case FunctionId::Max:
+            return FunctionCategory::Aggregate;
+
+        case FunctionId::Abs:
+        case FunctionId::Round:
+            return FunctionCategory::Scalar;
+        }
+
+        throw std::runtime_error("Unknown function ID");
     }
 
     std::string resolveColumnName(
@@ -648,6 +704,19 @@ BoundSelect QueryValidator::validateSelect(const SelectStatement &statement)
 
         if (const auto *exprItem = dynamic_cast<const ExprSelectItem *>(item.get()))
         {
+            // using T = std::decay_t<decltype(exprItem->expr)>;
+            // if constexpr (std::is_same_v<T, ColumnExpr>)
+            // {
+               
+            // }
+            // else if constexpr (std::is_same_v<T, FunctionCallExpr>)
+            // {
+            //     throw std::runtime_error("Function calls are not supported in SELECT");
+            // }
+            // else
+            // {
+            //     throw std::runtime_error("Unsupported expression in SELECT");
+            // }
             const auto *columnExpr =
                 dynamic_cast<const ColumnExpr *>(exprItem->expr.get());
 
@@ -958,35 +1027,41 @@ BoundInsert QueryValidator::validateInsert(const InsertStatement &statement)
             targetColumns.push_back(&context.resolveColumn(columnName));
         }
     }
-
-    if (targetColumns.size() != statement.values.size())
+    std::vector<Row> rows;
+    rows.reserve(statement.valuesList.size());
+    for (const std::vector<std::unique_ptr<Expr>> &rowValues : statement.valuesList)
     {
-        throw std::runtime_error("INSERT column count does not match value count");
-    }
 
-    Row row{
-        .values = std::vector<Value>(context.columns.size(), std::monostate{})};
-
-    for (std::size_t i = 0; i < targetColumns.size(); ++i)
-    {
-        const Column &column = *targetColumns[i];
-        const Expr &expr = *statement.values[i];
-        row.values[column.columnIndex] = bindLiteralValue(expr, column);
-    }
-
-    for (const Column &column : context.columns)
-    {
-        if (!column.nullable &&
-            std::holds_alternative<std::monostate>(row.values[column.columnIndex]))
+        if (targetColumns.size() != rowValues.size())
         {
-            throw std::runtime_error(
-                "Missing value for NOT NULL column: " + column.name);
+            throw std::runtime_error("INSERT column count does not match value count");
         }
+
+        Row row{
+            .values = std::vector<Value>(context.columns.size(), std::monostate{})};
+
+        for (std::size_t i = 0; i < targetColumns.size(); ++i)
+        {
+            const Column &column = *targetColumns[i];
+            const Expr &expr = *rowValues[i];
+            row.values[column.columnIndex] = bindLiteralValue(expr, column);
+        }
+
+        for (const Column &column : context.columns)
+        {
+            if (!column.nullable &&
+                std::holds_alternative<std::monostate>(row.values[column.columnIndex]))
+            {
+                throw std::runtime_error(
+                    "Missing value for NOT NULL column: " + column.name);
+            }
+        }
+        rows.push_back(std::move(row));
     }
 
     return BoundInsert{
         .tableName = statement.tableName,
-        .row = std::move(row)};
+        .rows = std::move(rows)};
 }
 
 Value QueryValidator::bindLiteralValue(
@@ -1049,6 +1124,7 @@ Value QueryValidator::bindLiteralValue(
     }
 
     case DataType::Double:
+    case DataType::Float:
     {
         if (!number)
         {
@@ -1074,8 +1150,15 @@ Value QueryValidator::bindLiteralValue(
     case DataType::Null:
         throw std::runtime_error("Cannot bind non-null value to NULL column");
 
-    case DataType::Float:
     case DataType::Boolean:
+        const auto *boolExpr = dynamic_cast<const BooleanExpr *>(&expr);
+        if (!boolExpr)
+        {
+            throw std::runtime_error(
+                "Expected boolean value for column: " + targetColumn.name);
+        }
+        return boolExpr->value;
+
     default:
         throw std::runtime_error("Unsupported target column type");
     }
@@ -1216,11 +1299,47 @@ std::unique_ptr<BoundExpr> QueryValidator::bindExpr(
             DataType::Text);
     }
 
+    if (const auto *boolean = dynamic_cast<const BooleanExpr *>(&expr))
+    {
+        return std::make_unique<BoundLiteralExpr>(
+            Value{boolean->value},
+            DataType::Boolean);
+    }
+
+
+
     if (dynamic_cast<const NullExpr *>(&expr))
     {
         return std::make_unique<BoundLiteralExpr>(
             Value{std::monostate{}},
             DataType::Null);
+    }
+
+
+
+
+
+    if (const auto *functionCall = dynamic_cast<const FunctionCallExpr *>(&expr))
+    {
+        auto id = resolveFunctionName(functionCall->name);
+        if (!id)
+        {
+            throw std::runtime_error("Unknown function: " + functionCall->name);
+        }
+        auto category = resolveFunctionCategory(*id);
+        std::vector<std::unique_ptr<BoundExpr>> boundList;
+        boundList.reserve(functionCall->arguments.size());
+
+        for (const auto &item : functionCall->arguments)
+        {
+            boundList.push_back(bindExpr(*item, context));
+        }
+
+        return std::make_unique<BoundFunctionCall>(
+            *id,
+            category,
+            std::move(boundList),
+            DataType::Null);  // Replace with actual return type later
     }
 
     if (const auto *isNull = dynamic_cast<const IsNullExpr *>(&expr))

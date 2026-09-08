@@ -35,7 +35,7 @@ Table Table::open(std::filesystem::path tablePath)
 void Table::insertRows(const BoundInsert &insert)
 {
     Page &headerPage = bufferManager.getPage(0, decodeHeaderPage);
-    bufferManager.insertAllRows({insert.row}, headerPage);
+    bufferManager.insertAllRows(insert.rows, headerPage);
     bufferManager.flushAll();
 }
 
@@ -67,12 +67,18 @@ std::vector<Row> Table::selectRows(const BoundSelect &select)
         result.push_back(std::move(projected));
     }
 
+    if (aggregation)
+    {
+        // Handle aggregation logic
+    }
+
     return result;
 }
 
 std::uint64_t Table::deleteRows(const BoundDelete &del)
 {
-    Page &headerPageContainer = bufferManager.getPage(0, decodeHeaderPage);
+    std::uint32_t headerPageId{0};
+    Page &headerPageContainer = bufferManager.getPage(headerPageId, decodeHeaderPage);
     HeaderPage &headerPage =
         std::get<HeaderPage>(headerPageContainer.data);
     std::uint64_t deletedCount = 0;
@@ -147,14 +153,16 @@ void Table::initializeNewTable(
     header.totalRowCount = 0;
 
     std::uint32_t firstDataPageId = header.firstDataPageId;
-    bufferManager.setPage(headerPage, 0);
+    std::uint32_t headerPageId{0};
+    bufferManager.setPage(headerPage, headerPageId);
     bufferManager.setPage(firstDataPage, firstDataPageId);
     bufferManager.flushAll();
 }
 
 void Table::validateHeaderPage()
 {
-    Page &headerPage = bufferManager.getPage(0, decodeHeaderPage);
+    std::uint32_t headerPageId{0};
+    Page &headerPage = bufferManager.getPage(headerPageId, decodeHeaderPage);
 
     if (headerPage.header.pageType != PageType::HeaderPage)
     {

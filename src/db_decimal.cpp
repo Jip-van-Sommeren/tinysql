@@ -242,6 +242,39 @@ DecimalValue decimalFromInt64(std::int64_t value)
     return DecimalValue{.coefficient = value, .scale = 0};
 }
 
+DecimalValue decimalAbs(const DecimalValue &value)
+{
+    if (value.coefficient == std::numeric_limits<std::int64_t>::min())
+    {
+        throw std::overflow_error("Decimal coefficient overflow");
+    }
+
+    return DecimalValue{
+        .coefficient = std::abs(value.coefficient),
+        .scale = value.scale};
+}
+
+DecimalValue decimalRound(const DecimalValue &value, std::uint32_t scale)
+{
+    if (scale >= value.scale)
+    {
+        return value;
+    }
+
+    const std::int64_t factor = checkedScale(1, value.scale - scale);
+    const std::int64_t remainder = value.coefficient % factor;
+    std::int64_t roundedCoefficient = value.coefficient - remainder;
+
+    if (std::abs(remainder) * 2 >= factor)
+    {
+        roundedCoefficient += (value.coefficient > 0) ? factor : -factor;
+    }
+
+    return normalizeDecimal(DecimalValue{
+        .coefficient = roundedCoefficient,
+        .scale = scale});
+}
+
 std::optional<std::int64_t> decimalToInt64Exact(
     const DecimalValue &value)
 {

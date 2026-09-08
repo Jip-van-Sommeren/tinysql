@@ -10,6 +10,7 @@ enum class TokenType
     Identifier,
     Number,
     String,
+    // Function,
 
     Comma,
     Semicolon,

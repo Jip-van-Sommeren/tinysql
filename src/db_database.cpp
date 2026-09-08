@@ -30,13 +30,10 @@ void Database::insertRows(
     const std::vector<Row> &rows)
 {
     Table table = storageEngine.openTable(tableName);
+    table.insertRows(BoundInsert{
+        .tableName = tableName,
+        .rows = rows});
 
-    for (const Row &row : rows)
-    {
-        table.insertRows(BoundInsert{
-            .tableName = tableName,
-            .row = row});
-    }
 }
 
 std::vector<Row> Database::selectAllRows(const std::string &tableName)
@@ -92,7 +89,7 @@ QueryResult Database::executeInsert(const BoundInsert &insert)
 
     return QueryResult{
         .rows = {},
-        .affectedRows = 1,
+        .affectedRows = insert.rows.size(),
         .returnsRows = false};
 }
 

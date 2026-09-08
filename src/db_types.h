@@ -10,6 +10,7 @@
 #include <variant>
 #include <vector>
 #include <stdfloat>
+#include "msvc_stdfloat.hpp"
 
 #ifdef __STDCPP_FLOAT32_T__
 
@@ -18,6 +19,25 @@ static_assert(sizeof(std::float32_t) == 4);
 #endif
 
 using ColumnId = std::uint32_t;
+
+enum class FunctionId : std::uint8_t
+{
+    Count,
+    Sum,
+    Avg,
+    Min,
+    Max,
+    Abs,
+    Round,
+    Lower,
+    Upper
+};
+
+enum class FunctionCategory : std::uint8_t
+{
+    Aggregate,
+    Scalar
+};
 
 struct DecimalLiteral
 {
@@ -46,7 +66,7 @@ using Value = std::variant<
     std::string,
     bool>;
 using NumberValue =
-    std::variant<std::int32_t, std::int64_t, std::float32_t, std::float64_t, DecimalValue>;
+    std::variant<std::int32_t, std::int64_t, std::float32_t, std::float64_t, DecimalLiteral>;
 
 enum class DataType : std::uint8_t
 {
@@ -98,10 +118,13 @@ enum class BoundExprKind : std::uint8_t
 {
     Literal,
     ColumnReference,
+    FunctionCall,
     Binary,
     Unary,
     IsNull
 };
+
+
 
 struct BoundExpr
 {
@@ -127,6 +150,43 @@ private:
     BoundExprKind kind_;
     DataType type_;
 };
+
+
+
+
+struct BoundFunctionCall final : BoundExpr
+{
+    BoundFunctionCall(
+        FunctionId id,
+        FunctionCategory category,
+        std::vector<std::unique_ptr<BoundExpr>> arguments,
+        DataType type)
+        : BoundExpr(BoundExprKind::FunctionCall, type),
+          id(id),
+          category(category),
+          arguments(std::move(arguments))
+    {
+    }
+
+    std::unique_ptr<BoundExpr> clone() const override
+    {
+        std::vector<std::unique_ptr<BoundExpr>> clonedArguments;
+        for (const auto &arg : arguments)
+        {
+            clonedArguments.push_back(arg->clone());
+        }
+        return std::make_unique<BoundFunctionCall>(
+            id,
+            category,
+            std::move(clonedArguments),
+            type());
+    }
+
+    FunctionId id;
+    FunctionCategory category;
+    std::vector<std::unique_ptr<BoundExpr>> arguments;
+    bool starArgument = false; // Indicates if the function call has a star argument (e.g., COUNT(*))
+};  
 
 struct BoundBinaryExpr final : BoundExpr
 {

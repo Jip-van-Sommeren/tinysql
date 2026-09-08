@@ -64,6 +64,15 @@ StringExpr::StringExpr(std::string value)
     : Expr(ExprKind::Literal),
       value(std::move(value)) {}
 
+BooleanExpr::BooleanExpr(bool value)
+    : Expr(ExprKind::Literal),
+      value(value) {}
+
+FunctionCallExpr::FunctionCallExpr(std::string name, std::vector<std::unique_ptr<Expr>> arguments)
+    : Expr(ExprKind::FunctionCall),
+      name(std::move(name)),
+      arguments(std::move(arguments)) {}      
+
 BinaryExpr::BinaryExpr(
     BinaryOperator op,
     std::unique_ptr<Expr> left,
@@ -149,13 +158,13 @@ CreateTableStatement::CreateTableStatement(
 InsertStatement::InsertStatement(
     std::string tableName,
     std::vector<std::string> columns,
-    std::vector<std::unique_ptr<Expr>> values)
+    std::vector<std::vector<std::unique_ptr<Expr>>> valuesList)
     : tableName(std::move(tableName)),
       columns(std::move(columns)),
-      values(std::move(values)) {}
+      valuesList(std::move(valuesList)) {}
 
 Assignment::Assignment(
-    std::vector<std::string> target,
+    std::unique_ptr<ColumnExpr> target,
     std::unique_ptr<Expr> value)
     : target(std::move(target)),
       value(std::move(value)) {}
@@ -656,17 +665,29 @@ std::unique_ptr<InsertStatement> Parser::parseInsertStatement()
         columns = parseIdentifierList();
         expect(TokenType::RightParen);
     }
-
+    std::vector<std::vector<std::unique_ptr<Expr>>> valuesList;
     expectKeyword("VALUES");
-    expect(TokenType::LeftParen);
-    auto values = parseExpressionList();
-    expect(TokenType::RightParen);
+
+    while (match(TokenType::LeftParen))
+    {
+        // expect(TokenType::LeftParen);
+        // std::vector<std::unique_ptr<Expr>> values;
+        
+        auto values = parseExpressionList(columns.size());
+        valuesList.push_back(std::move(values));
+        expect(TokenType::RightParen);
+        if (!match(TokenType::Comma))
+        {
+            break;
+        }
+    }
+
     finishStatement();
 
     return std::make_unique<InsertStatement>(
         std::move(tableName),
         std::move(columns),
-        std::move(values));
+        std::move(valuesList));
 }
 
 std::unique_ptr<UpdateStatement> Parser::parseUpdateStatement()
@@ -825,11 +846,35 @@ std::string Parser::parseIdentifier()
     return std::string{std::move(name.text)};
 }
 
-std::vector<std::string> Parser::parseIdentifierParts()
+std::unique_ptr<Expr> Parser::parseIdentifierExpr()
 {
-    std::vector<std::string> parts;
 
     Token name = expect(TokenType::Identifier);
+    if (match(TokenType::LeftParen))
+    {
+        if (matchStar())
+        {
+            expect(TokenType::RightParen);
+            return std::make_unique<FunctionCallExpr>(std::move(name.text), std::vector<std::unique_ptr<Expr>>{}, true);
+        }
+        std::vector<std::unique_ptr<Expr>> args;
+        while (!match(TokenType::RightParen))
+        {
+            args.push_back(parseExpression());
+            match(TokenType::Comma);
+        }
+
+        return std::make_unique<FunctionCallExpr>(std::move(name.text), std::move(args));
+    }
+    return parseIdentifierColumnExpr();
+
+}
+
+std::unique_ptr<ColumnExpr> Parser::parseIdentifierColumnExpr()
+{
+    Token name = expect(TokenType::Identifier);
+
+    std::vector<std::string> parts;
     parts.push_back(std::move(name.text));
 
     while (match(TokenType::Dot))
@@ -838,7 +883,7 @@ std::vector<std::string> Parser::parseIdentifierParts()
         parts.push_back(std::move(name.text));
     }
 
-    return parts;
+    return std::make_unique<ColumnExpr>(std::move(parts));
 }
 
 std::vector<std::string> Parser::parseIdentifierList()
@@ -857,9 +902,10 @@ std::vector<std::string> Parser::parseIdentifierList()
     return identifiers;
 }
 
-std::vector<std::unique_ptr<Expr>> Parser::parseExpressionList()
+std::vector<std::unique_ptr<Expr>> Parser::parseExpressionList(std::uint32_t maxCount)
 {
     std::vector<std::unique_ptr<Expr>> expressions;
+    expressions.reserve(maxCount);
 
     expressions.push_back(parseExpression());
 
@@ -873,7 +919,7 @@ std::vector<std::unique_ptr<Expr>> Parser::parseExpressionList()
 
 Assignment Parser::parseAssignment()
 {
-    auto target = parseIdentifierParts();
+    auto target = parseIdentifierColumnExpr();
     expectOperator("=");
     auto value = parseExpression();
 
@@ -1183,7 +1229,7 @@ std::unique_ptr<Expr> Parser::parsePrimary()
 {
     if (check(TokenType::Identifier))
     {
-        return std::make_unique<ColumnExpr>(parseIdentifierParts());
+        return parseIdentifierExpr();
     }
 
     if (check(TokenType::Number))
@@ -1211,6 +1257,15 @@ std::unique_ptr<Expr> Parser::parsePrimary()
     {
         std::string value = advance().text;
         return std::make_unique<StringExpr>(std::move(value));
+    }
+    if (matchKeyword("TRUE"))
+    {
+        return std::make_unique<BooleanExpr>(true);
+    }
+
+    if (matchKeyword("FALSE"))
+    {
+        return std::make_unique<BooleanExpr>(false);
     }
 
     if (matchKeyword("NULL"))

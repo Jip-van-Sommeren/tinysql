@@ -4,3 +4,4 @@ mydb/
 /tmp
 /build/
 /cmake-build-*/
+src/msvc_stdfloat.hpp

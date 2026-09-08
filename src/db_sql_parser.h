@@ -14,6 +14,7 @@
 enum class ExprKind : std::uint8_t
 {
     Literal,
+    FunctionCall,
     ColumnReference,
     Binary,
     Unary,
@@ -61,6 +62,26 @@ struct StringExpr : Expr
     explicit StringExpr(std::string value);
 };
 
+struct FunctionCallExpr : Expr
+{
+    std::string name;
+    std::vector<std::unique_ptr<Expr>> arguments;
+    bool starArgument = false; // Indicates if the function call has a star argument (e.g., COUNT(*))
+
+    explicit FunctionCallExpr(std::string name, std::vector<std::unique_ptr<Expr>> arguments);
+};
+
+struct BooleanExpr : Expr
+{
+    bool value;
+
+    explicit BooleanExpr(bool value)
+        : Expr(ExprKind::Literal),
+          value(value)
+    {
+    }
+};
+
 struct NullExpr : Expr
 {
     NullExpr()
@@ -102,6 +123,8 @@ struct UnaryExpr : Expr
         UnaryOperator op,
         std::unique_ptr<Expr> operand);
 };
+
+
 
 struct BinaryExpr : Expr
 {
@@ -367,21 +390,21 @@ struct InsertStatement : Statement
 {
     std::string tableName;
     std::vector<std::string> columns;
-    std::vector<std::unique_ptr<Expr>> values;
+    std::vector<std::vector<std::unique_ptr<Expr>>> valuesList;
 
     InsertStatement(
         std::string tableName,
         std::vector<std::string> columns,
-        std::vector<std::unique_ptr<Expr>> values);
+        std::vector<std::vector<std::unique_ptr<Expr>>> valuesList);
 };
 
 struct Assignment
 {
-    std::vector<std::string> target;
+    std::unique_ptr<ColumnExpr> target;
     std::unique_ptr<Expr> value;
 
     Assignment(
-        std::vector<std::string> target,
+        std::unique_ptr<ColumnExpr> target,
         std::unique_ptr<Expr> value);
 };
 
@@ -441,9 +464,12 @@ private:
     void expectOperator(const std::string &op);
     void finishStatement();
     std::unique_ptr<Expr> parseOptionalWhere();
-    std::vector<std::string> parseIdentifierParts();
+    std::unique_ptr<Expr> parseIdentifierParts();
+
+    std::unique_ptr<Expr> parseIdentifierExpr();
+    std::unique_ptr<ColumnExpr> parseIdentifierColumnExpr();
     std::vector<std::string> parseIdentifierList();
-    std::vector<std::unique_ptr<Expr>> parseExpressionList();
+    std::vector<std::unique_ptr<Expr>> parseExpressionList(std::uint32_t maxCount = std::numeric_limits<std::uint32_t>::max());
     Assignment parseAssignment();
     std::unique_ptr<SelectItem> parseSelectItem();
     std::vector<std::unique_ptr<SelectItem>> parseSelectList();

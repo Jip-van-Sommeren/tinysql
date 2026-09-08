@@ -110,6 +110,7 @@ Token Lexer::readWord()
         return {TokenType::Keyword, text};
     }
 
+
     return {TokenType::Identifier, text};
 }
 
@@ -219,6 +220,8 @@ bool Lexer::isKeyword(const std::string &word) const
            word == "RIGHT" ||
            word == "FULL" ||
            word == "JOIN" ||
+           word == "TRUE" ||
+           word == "FALSE" ||
            word == "OR";
 }
 

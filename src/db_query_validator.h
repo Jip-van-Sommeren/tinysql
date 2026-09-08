@@ -17,6 +17,8 @@
 
 using TableId = std::uint32_t;
 
+
+
 struct BoundNamedTableRef
 {
     std::string tableName;
@@ -30,7 +32,7 @@ struct BoundNamedTableRef
 struct BoundInsert
 {
     std::string tableName;
-    Row row; // values ordered by HeaderPage.columns[columnIndex]
+    std::vector<Row> rows; // values ordered by HeaderPage.columns[columnIndex]
 };
 
 struct BoundSelect
@@ -39,6 +41,17 @@ struct BoundSelect
     std::vector<std::uint32_t> projectedColumnIndexes;
     std::unique_ptr<BoundExpr> where;
 };
+
+// struct BoundSelect
+// {
+//     std::string tableName;
+
+//     std::vector<std::unique_ptr<BoundExpr>> projections;
+
+//     std::unique_ptr<BoundExpr> where;
+
+//     std::vector<std::unique_ptr<BoundExpr>> groupBy;
+// };
 
 struct BoundDelete
 {
