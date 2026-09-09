@@ -59,6 +59,30 @@ std::vector<Row> Table::selectRows(const BoundSelect &select)
         }
 
         Row projected;
+        for (auto &projection : select.projections)
+        {
+            if (projection->expr->kind() == BoundExprKind::ColumnReference)
+            {
+                const auto &columnRef = static_cast<const BoundColumnExpr &>(*projection->expr);
+                projected.values.push_back(row.values[columnRef.columnIndex]);
+                continue;
+            }
+            if (projection->expr->kind() == BoundExprKind::FunctionCall)
+            {
+                const auto &functionCall = static_cast<const BoundFunctionCall &>(*projection->expr);
+                Value value = evaluateExpression(functionCall, row);
+                projected.values.push_back(std::move(value));
+                continue;
+            }
+            if (projection->expr->kind() == BoundExprKind::Literal)
+            {
+                const auto &literal = static_cast<const BoundLiteralExpr &>(*projection->expr);
+                projected.values.push_back(literal.value);
+                continue;
+            }
+
+
+        }
         for (std::uint32_t index : select.projectedColumnIndexes)
         {
             projected.values.push_back(row.values[index]);
@@ -67,8 +91,12 @@ std::vector<Row> Table::selectRows(const BoundSelect &select)
         result.push_back(std::move(projected));
     }
 
-    if (aggregation)
+    if (!select.groupBy.empty())
     {
+        return result;
+    }
+    {
+
         // Handle aggregation logic
     }
 

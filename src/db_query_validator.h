@@ -35,23 +35,32 @@ struct BoundInsert
     std::vector<Row> rows; // values ordered by HeaderPage.columns[columnIndex]
 };
 
-struct BoundSelect
-{
-    std::string tableName;
-    std::vector<std::uint32_t> projectedColumnIndexes;
-    std::unique_ptr<BoundExpr> where;
-};
-
 // struct BoundSelect
 // {
 //     std::string tableName;
-
-//     std::vector<std::unique_ptr<BoundExpr>> projections;
-
+//     std::vector<std::uint32_t> projectedColumnIndexes;
 //     std::unique_ptr<BoundExpr> where;
-
-//     std::vector<std::unique_ptr<BoundExpr>> groupBy;
 // };
+
+struct BoundSelectItem
+{
+    std::unique_ptr<BoundExpr> expr;
+    std::string alias;
+};
+
+struct BoundSelect
+{
+    std::string tableName;
+
+    std::vector<std::unique_ptr<BoundSelectItem>> projections;
+
+    std::unique_ptr<BoundExpr> where;
+
+    std::vector<std::unique_ptr<BoundExpr>> groupBy;
+
+    std::unique_ptr<BoundExpr> having;
+
+};
 
 struct BoundDelete
 {

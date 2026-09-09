@@ -11,6 +11,15 @@ struct BoundInsert;
 struct BoundSelect;
 struct BoundDelete;
 
+
+// class Table
+// {
+// public:
+//     std::vector<Row> scan() const;
+
+//     const TableHeader& header() const;
+// };
+
 class Table
 {
 public:
