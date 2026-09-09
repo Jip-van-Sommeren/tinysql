@@ -9,8 +9,12 @@
 #include <utility>
 #include <variant>
 #include <vector>
-#include <stdfloat>
+
+#ifdef _MSC_VER
 #include "msvc_stdfloat.hpp"
+#else
+#include <stdfloat>
+#endif
 
 #ifdef __STDCPP_FLOAT32_T__
 
@@ -175,11 +179,13 @@ struct BoundFunctionCall final : BoundExpr
         {
             clonedArguments.push_back(arg->clone());
         }
-        return std::make_unique<BoundFunctionCall>(
+        auto result = std::make_unique<BoundFunctionCall>(
             id,
             category,
             std::move(clonedArguments),
             type());
+        result->starArgument = starArgument;
+        return result;
     }
 
     FunctionId id;

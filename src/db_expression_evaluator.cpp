@@ -2,10 +2,14 @@
 
 #include "db_decimal.h"
 
+#include <cmath>
+#include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <variant>
+#include <vector>
 
 namespace
 {
@@ -17,10 +21,252 @@ namespace
 
     template <typename T>
     constexpr bool isNumericValue =
-        isExactNumericValue<T> || std::is_same_v<T, std::float64_t>;
+        isExactNumericValue<T> ||
+        std::is_same_v<T, std::float32_t> ||
+        std::is_same_v<T, std::float64_t>;
+
+    DecimalValue asDecimal(const Value &value)
+    {
+        if (const auto *decimal = std::get_if<DecimalValue>(&value))
+        {
+            return *decimal;
+        }
+        if (const auto *integer = std::get_if<std::int32_t>(&value))
+        {
+            return decimalFromInt64(*integer);
+        }
+        if (const auto *integer = std::get_if<std::int64_t>(&value))
+        {
+            return decimalFromInt64(*integer);
+        }
+        throw std::runtime_error("Expected an exact numeric value");
+    }
+
+    std::int64_t asInt64(const Value &value)
+    {
+        if (const auto *integer = std::get_if<std::int32_t>(&value))
+        {
+            return *integer;
+        }
+        if (const auto *integer = std::get_if<std::int64_t>(&value))
+        {
+            return *integer;
+        }
+        throw std::runtime_error("Expected an integer value");
+    }
+
+    std::float64_t asFloat64(const Value &value)
+    {
+        return std::visit(
+            [](const auto &inner) -> std::float64_t
+            {
+                using T = std::decay_t<decltype(inner)>;
+                if constexpr (std::is_same_v<T, DecimalValue>)
+                {
+                    return decimalToFloat64(inner);
+                }
+                else if constexpr (
+                    std::is_same_v<T, std::int32_t> ||
+                    std::is_same_v<T, std::int64_t> ||
+                    std::is_same_v<T, std::float32_t> ||
+                    std::is_same_v<T, std::float64_t>)
+                {
+                    return static_cast<std::float64_t>(inner);
+                }
+                else
+                {
+                    throw std::runtime_error("Expected a numeric value");
+                }
+            },
+            value);
+    }
+
+    std::int64_t checkedAdd(std::int64_t left, std::int64_t right)
+    {
+        if ((right > 0 &&
+             left > std::numeric_limits<std::int64_t>::max() - right) ||
+            (right < 0 &&
+             left < std::numeric_limits<std::int64_t>::min() - right))
+        {
+            throw std::overflow_error("Integer expression overflow");
+        }
+        return left + right;
+    }
+
+    std::int64_t checkedSubtract(std::int64_t left, std::int64_t right)
+    {
+        if ((right > 0 &&
+             left < std::numeric_limits<std::int64_t>::min() + right) ||
+            (right < 0 &&
+             left > std::numeric_limits<std::int64_t>::max() + right))
+        {
+            throw std::overflow_error("Integer expression overflow");
+        }
+        return left - right;
+    }
+
+    std::int64_t checkedMultiply(std::int64_t left, std::int64_t right)
+    {
+        if (left == 0 || right == 0)
+        {
+            return 0;
+        }
+        if ((left == -1 &&
+             right == std::numeric_limits<std::int64_t>::min()) ||
+            (right == -1 &&
+             left == std::numeric_limits<std::int64_t>::min()))
+        {
+            throw std::overflow_error("Integer expression overflow");
+        }
+        if (left > 0)
+        {
+            if ((right > 0 &&
+                 left > std::numeric_limits<std::int64_t>::max() / right) ||
+                (right < 0 &&
+                 right < std::numeric_limits<std::int64_t>::min() / left))
+            {
+                throw std::overflow_error("Integer expression overflow");
+            }
+        }
+        else if ((right > 0 &&
+                  left < std::numeric_limits<std::int64_t>::min() / right) ||
+                 (right < 0 &&
+                  left < std::numeric_limits<std::int64_t>::max() / right))
+        {
+            throw std::overflow_error("Integer expression overflow");
+        }
+        return left * right;
+    }
+
+    std::int64_t evaluateIntegerArithmetic(
+        BinaryOperator op,
+        std::int64_t left,
+        std::int64_t right)
+    {
+        switch (op)
+        {
+        case BinaryOperator::Add:
+            return checkedAdd(left, right);
+        case BinaryOperator::Subtract:
+            return checkedSubtract(left, right);
+        case BinaryOperator::Multiply:
+            return checkedMultiply(left, right);
+        case BinaryOperator::Divide:
+            if (right == 0)
+            {
+                throw std::runtime_error("Division by zero");
+            }
+            if (left == std::numeric_limits<std::int64_t>::min() &&
+                right == -1)
+            {
+                throw std::overflow_error("Integer expression overflow");
+            }
+            return left / right;
+
+        default:
+            throw std::runtime_error("Unsupported arithmetic operator");
+        }
+    }
+
+    Value evaluateArithmetic(
+        BinaryOperator op,
+        const Value &left,
+        const Value &right,
+        DataType resultType)
+    {
+        if (std::holds_alternative<std::monostate>(left) ||
+            std::holds_alternative<std::monostate>(right))
+        {
+            return std::monostate{};
+        }
+
+        switch (resultType)
+        {
+        case DataType::Int:
+        {
+            const std::int64_t result = evaluateIntegerArithmetic(
+                op,
+                asInt64(left),
+                asInt64(right));
+            if (result < std::numeric_limits<std::int32_t>::min() ||
+                result > std::numeric_limits<std::int32_t>::max())
+            {
+                throw std::overflow_error("Integer expression overflow");
+            }
+            return static_cast<std::int32_t>(result);
+        }
+
+        case DataType::BigInt:
+            return evaluateIntegerArithmetic(
+                op,
+                asInt64(left),
+                asInt64(right));
+
+        case DataType::Float:
+        case DataType::Double:
+        {
+            const std::float64_t lhs = asFloat64(left);
+            const std::float64_t rhs = asFloat64(right);
+            std::float64_t result;
+            switch (op)
+            {
+            case BinaryOperator::Add:
+                result = lhs + rhs;
+                break;
+            case BinaryOperator::Subtract:
+                result = lhs - rhs;
+                break;
+            case BinaryOperator::Multiply:
+                result = lhs * rhs;
+                break;
+            case BinaryOperator::Divide:
+                if (rhs == 0)
+                {
+                    throw std::runtime_error("Division by zero");
+                }
+                result = lhs / rhs;
+                break;
+            default:
+                throw std::runtime_error("Unsupported arithmetic operator");
+            }
+
+            if (resultType == DataType::Float)
+            {
+                return static_cast<std::float32_t>(result);
+            }
+            return result;
+        }
+
+        case DataType::Decimal:
+        {
+            const DecimalValue lhs = asDecimal(left);
+            const DecimalValue rhs = asDecimal(right);
+            switch (op)
+            {
+            case BinaryOperator::Add:
+                return addDecimals(lhs, rhs);
+            case BinaryOperator::Subtract:
+                return subtractDecimals(lhs, rhs);
+            case BinaryOperator::Multiply:
+                return multiplyDecimals(lhs, rhs);
+            case BinaryOperator::Divide:
+                if (rhs.coefficient == 0)
+                {
+                    throw std::runtime_error("Division by zero");
+                }
+                return divideDecimals(lhs, rhs);
+            default:
+                throw std::runtime_error("Unsupported arithmetic operator");
+            }
+        }
+
+        default:
+            throw std::runtime_error("Arithmetic requires numeric operands");
+        }
+    }
 
     template <typename T>
-    DecimalValue asDecimal(const T &value)
+    DecimalValue exactAsDecimal(const T &value)
     {
         if constexpr (std::is_same_v<T, DecimalValue>)
         {
@@ -31,135 +277,6 @@ namespace
             return decimalFromInt64(static_cast<std::int64_t>(value));
         }
     }
-    template <typename T>
-    NumberValue applyArithmeticTyped(
-        BinaryOperator op,
-        const NumberValue& left,
-        const NumberValue& right)
-    {
-        if (!std::holds_alternative<T>(left) ||
-            !std::holds_alternative<T>(right))
-        {
-            throw std::runtime_error(
-                "Bound arithmetic operands do not match resolved type");
-        }
-
-        const T lhs = std::get<T>(left);
-        const T rhs = std::get<T>(right);
-
-        switch (op)
-        {
-            case BinaryOperator::Add:
-                return NumberValue{lhs + rhs};
-
-            case BinaryOperator::Subtract:
-                return NumberValue{lhs - rhs};
-
-            case BinaryOperator::Multiply:
-                return NumberValue{lhs * rhs};
-
-            case BinaryOperator::Divide:
-            {
-                if (rhs == T{0})
-                {
-                    throw std::runtime_error(
-                        "Division by zero");
-                }
-
-                return NumberValue{lhs / rhs};
-            }
-
-            default:
-                throw std::runtime_error(
-                    "Unsupported arithmetic operator");
-        }
-    }
-
-        
-    NumberValue applyArithmeticOp(
-        BinaryOperator op,
-        const NumberValue& left,
-        const NumberValue& right,
-        DataType type)
-    {
-        switch (type)
-        {
-            case DataType::Int:
-                return applyArithmeticTyped<std::int32_t>(
-                    op, left, right);
-
-            case DataType::BigInt:
-                return applyArithmeticTyped<std::int64_t>(
-                    op, left, right);
-
-            case DataType::Float:
-                return applyArithmeticTyped<std::float32_t>(
-                    op, left, right);
-
-            case DataType::Double:
-                return applyArithmeticTyped<std::float64_t>(
-                    op, left, right);
-
-            case DataType::Decimal:
-            {
-                const auto& lhs =
-                    std::get<DecimalValue>(left);
-
-                const auto& rhs =
-                    std::get<DecimalValue>(right);
-
-                switch (op)
-                {
-                    case BinaryOperator::Add:
-                        return addDecimals(lhs, rhs);
-
-                    case BinaryOperator::Subtract:
-                        return subtractDecimals(lhs, rhs);
-
-                    case BinaryOperator::Multiply:
-                        return multiplyDecimals(lhs, rhs);
-
-                    case BinaryOperator::Divide:
-                    {
-                        if (rhs.coefficient == 0)
-                        {
-                            throw std::runtime_error(
-                                "Division by zero");
-                        }
-
-                        return divideDecimals(lhs, rhs);
-                    }
-
-                    default:
-                        throw std::runtime_error(
-                            "Unsupported arithmetic operator");
-                }
-            }
-
-            default:
-                throw std::runtime_error(
-                    "Arithmetic requires numeric operands");
-        }
-    }
-
-    bool isArithmeticOperator(BinaryOperator op)
-    {
-        return op == BinaryOperator::Add ||
-               op == BinaryOperator::Subtract ||
-               op == BinaryOperator::Multiply ||
-               op == BinaryOperator::Divide;
-    }
-
-    bool isComparisonOperator(BinaryOperator op)
-    {
-        return op == BinaryOperator::Eq ||
-               op == BinaryOperator::Ne ||
-               op == BinaryOperator::Gt ||
-               op == BinaryOperator::Ge ||
-               op == BinaryOperator::Lt ||
-               op == BinaryOperator::Le;
-    }
-
 
     bool applyComparison(
         BinaryOperator op,
@@ -184,258 +301,11 @@ namespace
             throw std::runtime_error("Unsupported comparison operator");
         }
     }
-    Value evaluateAbs(const Value &value)
-    {
-        return std::visit(
-            [](const auto &v) -> Value
-            {
-                using T = std::decay_t<decltype(v)>;
-                if constexpr (std::is_same_v<T, DecimalValue>)
-                {
-                    return Value{decimalAbs(v)};
-                }
-                else if constexpr (std::is_arithmetic_v<T>)
-                {
-                    return Value{std::abs(v)};
-                }
-                else
-                {
-                    throw std::runtime_error("ABS function requires a numeric argument");
-                }
-            },
-            value);
-    }
 
-    Value evaluateLower(const Value &value)
-    {
-        if (const auto *str = std::get_if<std::string>(&value))
-        {
-            std::string lowerStr = *str;
-            for (char &c : lowerStr)
-            {
-                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-            }
-            return Value{lowerStr};
-        }
-        else
-        {
-            throw std::runtime_error("LOWER function requires a string argument");
-        }
-    }
-
-    Value evaluateUpper(const Value &value)
-    {
-        if (const auto *str = std::get_if<std::string>(&value))
-        {
-            std::string upperStr = *str;
-            for (char &c : upperStr)
-            {
-                c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-            }
-            return Value{upperStr};
-        }
-        else
-        {
-            throw std::runtime_error("UPPER function requires a string argument");
-        }
-    }
-
-    Value evaluateRound(const std::vector<Value> &args)
-    {
-        if (args.empty())
-        {
-            throw std::runtime_error("ROUND function requires at least one argument");
-        }
-
-        const Value &value = args[0];
-        int scale = 0;
-
-        if (args.size() > 1)
-        {
-            if (const auto *scaleValue = std::get_if<std::int32_t>(&args[1]))
-            {
-                scale = *scaleValue;
-            }
-            else
-            {
-                throw std::runtime_error("ROUND function's second argument must be an integer");
-            }
-        }
-
-        return std::visit(
-            [scale](const auto &v) -> Value
-            {
-                using T = std::decay_t<decltype(v)>;
-                if constexpr (std::is_same_v<T, DecimalValue>)
-                {
-                    return Value{decimalRound(v, scale)};
-                }
-                else if constexpr (std::is_floating_point_v<T>)
-                {
-                    double factor = std::pow(10.0, scale);
-                    return Value{static_cast<T>(std::round(v * factor) / factor)};
-                }
-                else
-                {
-                    throw std::runtime_error("ROUND function requires a numeric argument");
-                }
-            },
-            value);
-    }
-
-    Value evaluateScalarFunction(
-        FunctionId id,
-        const std::vector<Value>& args)
-    {
-        switch (id)
-        {
-            case FunctionId::Abs:
-                return evaluateAbs(args[0]);
-
-            case FunctionId::Lower:
-                return evaluateLower(args[0]);
-
-            case FunctionId::Upper:
-                return evaluateUpper(args[0]);
-
-            case FunctionId::Round:
-                return evaluateRound(args);
-
-            default:
-                throw std::runtime_error(
-                    "Not a scalar function");
-        }
-    }
-
-    Value evaluateValue(
-        const BoundExpr& expr,
-        const Row& row)
-        {
-        switch (expr.kind())
-        {
-            case BoundExprKind::Literal:
-            {
-                const auto& literal =
-                    static_cast<const BoundLiteralExpr&>(expr);
-
-                return literal.value;
-            }
-
-            case BoundExprKind::ColumnReference:
-            {
-                const auto& column =
-                    static_cast<const BoundColumnExpr&>(expr);
-
-                return row.values[column.columnIndex];
-            }
-            case BoundExprKind::FunctionCall:
-            {
-                const auto& function =
-                    static_cast<const BoundFunctionCall&>(expr);
-
-                if (function.category == FunctionCategory::Aggregate)
-                {
-                    throw std::runtime_error(
-                        "Aggregate function cannot be evaluated per row");
-                }
-
-                std::vector<Value> args;
-                args.reserve(function.arguments.size());
-
-                for (const auto& arg : function.arguments)
-                {
-                    args.push_back(
-                        evaluateValue(*arg, row));
-                }
-
-                return evaluateScalarFunction(
-                    function.id,
-                    args);
-            }
-
-            case BoundExprKind::Binary:
-            {
-                const auto& binary =
-                    static_cast<const BoundBinaryExpr&>(expr);
-
-                // Short-circuit AND
-                if (binary.op == BinaryOperator::And)
-                {
-                    Value left =
-                        evaluateValue(*binary.left, row);
-
-                    bool lhs = std::get<bool>(left);
-
-                    if (!lhs)
-                    {
-                        return Value{false};
-                    }
-
-                    Value right =
-                        evaluateValue(*binary.right, row);
-
-                    return Value{
-                        lhs && std::get<bool>(right)
-                    };
-                }
-
-                // Short-circuit OR
-                if (binary.op == BinaryOperator::Or)
-                {
-                    Value left =
-                        evaluateValue(*binary.left, row);
-
-                    bool lhs = std::get<bool>(left);
-
-                    if (lhs)
-                    {
-                        return Value{true};
-                    }
-
-                    Value right =
-                        evaluateValue(*binary.right, row);
-
-                    return Value{
-                        lhs || std::get<bool>(right)
-                    };
-                }
-
-                Value left =
-                    evaluateValue(*binary.left, row);
-
-                Value right =
-                    evaluateValue(*binary.right, row);
-
-                if (isArithmeticOperator(binary.op))
-                {
-                    return applyArithmeticOp(
-                        binary.op,
-                        left,
-                        right,
-                        binary.type());
-                }
-
-                if (isComparisonOperator(binary.op))
-                {
-                    return Value{
-                        compareValues(
-                            binary.op,
-                            left,
-                            right)
-                    };
-                }
-
-                throw std::runtime_error(
-                    "Unsupported binary operator");
-            }
-
-            default:
-                throw std::runtime_error(
-                    "Unsupported expression");
-        }
-    }
-
-    bool compareValues(BinaryOperator op, const Value &left, const Value &right)
+    bool compareValues(
+        BinaryOperator op,
+        const Value &left,
+        const Value &right)
     {
         return std::visit(
             [op](const auto &lhs, const auto &rhs) -> bool
@@ -443,19 +313,24 @@ namespace
                 using L = std::decay_t<decltype(lhs)>;
                 using R = std::decay_t<decltype(rhs)>;
 
-                if constexpr (!std::is_same_v<L, R>)
+                if constexpr (std::is_same_v<L, std::monostate> ||
+                              std::is_same_v<R, std::monostate>)
+                {
+                    throw std::runtime_error("Cannot directly compare NULL");
+                }
+                else if constexpr (!std::is_same_v<L, R>)
                 {
                     if constexpr (isExactNumericValue<L> &&
                                   isExactNumericValue<R>)
                     {
                         return applyComparison(
                             op,
-                            asDecimal(lhs),
-                            asDecimal(rhs));
+                            exactAsDecimal(lhs),
+                            exactAsDecimal(rhs));
                     }
                     else if constexpr (isNumericValue<L> && isNumericValue<R>)
                     {
-                        const auto asFloat = [](const auto &value)
+                        const auto toFloat = [](const auto &value)
                         {
                             using T = std::decay_t<decltype(value)>;
                             if constexpr (std::is_same_v<T, DecimalValue>)
@@ -467,20 +342,13 @@ namespace
                                 return static_cast<std::float64_t>(value);
                             }
                         };
-                        return applyComparison(
-                            op,
-                            asFloat(lhs),
-                            asFloat(rhs));
+                        return applyComparison(op, toFloat(lhs), toFloat(rhs));
                     }
                     else
                     {
                         throw std::runtime_error(
                             "Cannot compare values of different types");
                     }
-                }
-                else if constexpr (std::is_same_v<L, std::monostate>)
-                {
-                    throw std::runtime_error("Cannot directly compare NULL");
                 }
                 else
                 {
@@ -491,16 +359,197 @@ namespace
             right);
     }
 
-    bool evaluateBinaryPredicate(const BoundBinaryExpr &expr, const Row &row)
+    bool asBoolean(const Value &value, const char *context)
     {
-        switch (expr.op)
+        if (const auto *boolean = std::get_if<bool>(&value))
         {
-        case BinaryOperator::And:
-            return evaluatePredicate(*expr.left, row) &&
-                   evaluatePredicate(*expr.right, row);
-        case BinaryOperator::Or:
-            return evaluatePredicate(*expr.left, row) ||
-                   evaluatePredicate(*expr.right, row);
+            return *boolean;
+        }
+        throw std::runtime_error(
+            std::string{context} + " expression did not produce a boolean");
+    }
+
+    Value evaluateAbs(const Value &value)
+    {
+        if (std::holds_alternative<std::monostate>(value))
+        {
+            return std::monostate{};
+        }
+        if (const auto *integer = std::get_if<std::int32_t>(&value))
+        {
+            if (*integer == std::numeric_limits<std::int32_t>::min())
+            {
+                throw std::overflow_error("ABS result is out of range");
+            }
+            return static_cast<std::int32_t>(std::abs(*integer));
+        }
+        if (const auto *integer = std::get_if<std::int64_t>(&value))
+        {
+            if (*integer == std::numeric_limits<std::int64_t>::min())
+            {
+                throw std::overflow_error("ABS result is out of range");
+            }
+            return static_cast<std::int64_t>(std::abs(*integer));
+        }
+        if (const auto *floating = std::get_if<std::float32_t>(&value))
+        {
+            return static_cast<std::float32_t>(std::fabs(*floating));
+        }
+        if (const auto *floating = std::get_if<std::float64_t>(&value))
+        {
+            return static_cast<std::float64_t>(std::fabs(*floating));
+        }
+        if (const auto *decimal = std::get_if<DecimalValue>(&value))
+        {
+            return decimalAbs(*decimal);
+        }
+        throw std::runtime_error("ABS requires a numeric argument");
+    }
+
+    Value evaluateScalarFunction(
+        const BoundFunctionCall &function,
+        const std::vector<Value> &arguments)
+    {
+        switch (function.id)
+        {
+        case FunctionId::Abs:
+            if (arguments.size() != 1)
+            {
+                throw std::runtime_error(
+                    "ABS requires exactly one argument");
+            }
+            return evaluateAbs(arguments[0]);
+
+        default:
+            throw std::runtime_error("Scalar function is not supported yet");
+        }
+    }
+
+    Value evaluateUnary(const BoundUnaryExpr &unary, const Row &row)
+    {
+        Value operand = evaluateValue(*unary.operand, row);
+        if (std::holds_alternative<std::monostate>(operand))
+        {
+            return std::monostate{};
+        }
+
+        if (unary.op == UnaryOperator::Not)
+        {
+            return !asBoolean(operand, "NOT");
+        }
+        if (unary.op == UnaryOperator::Positive)
+        {
+            return operand;
+        }
+
+        switch (unary.type())
+        {
+        case DataType::Int:
+        {
+            const std::int32_t value = std::get<std::int32_t>(operand);
+            if (value == std::numeric_limits<std::int32_t>::min())
+            {
+                throw std::overflow_error("Integer negation overflow");
+            }
+            return static_cast<std::int32_t>(-value);
+        }
+        case DataType::BigInt:
+        {
+            const std::int64_t value = std::get<std::int64_t>(operand);
+            if (value == std::numeric_limits<std::int64_t>::min())
+            {
+                throw std::overflow_error("BIGINT negation overflow");
+            }
+            return -value;
+        }
+        case DataType::Float:
+            return static_cast<std::float32_t>(
+                -std::get<std::float32_t>(operand));
+        case DataType::Double:
+            return static_cast<std::float64_t>(
+                -std::get<std::float64_t>(operand));
+        case DataType::Decimal:
+            return negateDecimal(std::get<DecimalValue>(operand));
+        default:
+            throw std::runtime_error("Unary '-' requires a numeric operand");
+        }
+    }
+}
+
+Value evaluateValue(const BoundExpr &expr, const Row &row)
+{
+    switch (expr.kind())
+    {
+    case BoundExprKind::Literal:
+        return static_cast<const BoundLiteralExpr &>(expr).value;
+
+    case BoundExprKind::ColumnReference:
+    {
+        const auto &column = static_cast<const BoundColumnExpr &>(expr);
+        if (column.columnIndex >= row.values.size())
+        {
+            throw std::runtime_error(
+                "Column reference is outside the physical row");
+        }
+        return row.values[column.columnIndex];
+    }
+
+    case BoundExprKind::FunctionCall:
+    {
+        const auto &function = static_cast<const BoundFunctionCall &>(expr);
+        if (function.category == FunctionCategory::Aggregate)
+        {
+            throw std::runtime_error(
+                "Aggregate function cannot be evaluated per row");
+        }
+
+        std::vector<Value> arguments;
+        arguments.reserve(function.arguments.size());
+        for (const auto &argument : function.arguments)
+        {
+            arguments.push_back(evaluateValue(*argument, row));
+        }
+        return evaluateScalarFunction(function, arguments);
+    }
+
+    case BoundExprKind::Binary:
+    {
+        const auto &binary = static_cast<const BoundBinaryExpr &>(expr);
+        Value left = evaluateValue(*binary.left, row);
+
+        if (binary.op == BinaryOperator::And)
+        {
+            if (!asBoolean(left, "AND"))
+            {
+                return false;
+            }
+            return asBoolean(
+                evaluateValue(*binary.right, row),
+                "AND");
+        }
+        if (binary.op == BinaryOperator::Or)
+        {
+            if (asBoolean(left, "OR"))
+            {
+                return true;
+            }
+            return asBoolean(
+                evaluateValue(*binary.right, row),
+                "OR");
+        }
+
+        Value right = evaluateValue(*binary.right, row);
+        switch (binary.op)
+        {
+        case BinaryOperator::Add:
+        case BinaryOperator::Subtract:
+        case BinaryOperator::Multiply:
+        case BinaryOperator::Divide:
+            return evaluateArithmetic(
+                binary.op,
+                left,
+                right,
+                binary.type());
 
         case BinaryOperator::Eq:
         case BinaryOperator::Ne:
@@ -508,103 +557,31 @@ namespace
         case BinaryOperator::Ge:
         case BinaryOperator::Lt:
         case BinaryOperator::Le:
-        {
-            Value leftValue = evaluateValue(*expr.left, row);
-            Value rightValue = evaluateValue(*expr.right, row);
-            return compareValues(expr.op, leftValue, rightValue);
-        }
+            return compareValues(binary.op, left, right);
 
-        case BinaryOperator::Add:
-        case BinaryOperator::Subtract:
-        case BinaryOperator::Multiply:
-        case BinaryOperator::Divide:
-            {
-            Value leftValue = evaluateValue(*expr.left, row);
-            Value rightValue = evaluateValue(*expr.right, row);
-            return compareValues(expr.op, leftValue, rightValue);
-            }
+        case BinaryOperator::And:
+        case BinaryOperator::Or:
+            break;
         }
-
-        throw std::runtime_error("Unsupported binary predicate operator");
+        throw std::runtime_error("Unsupported binary operator");
     }
+
+    case BoundExprKind::Unary:
+        return evaluateUnary(static_cast<const BoundUnaryExpr &>(expr), row);
+
+    case BoundExprKind::IsNull:
+    {
+        const auto &isNull = static_cast<const BoundIsNullExpr &>(expr);
+        const bool result = std::holds_alternative<std::monostate>(
+            evaluateValue(*isNull.operand, row));
+        return isNull.negated ? !result : result;
+    }
+    }
+
+    throw std::runtime_error("Unknown bound expression kind");
 }
 
 bool evaluatePredicate(const BoundExpr &expr, const Row &row)
 {
-    switch (expr.kind())
-    {
-        case BoundExprKind::Literal:
-        {
-            const auto *literal = dynamic_cast<const BoundLiteralExpr *>(&expr);
-  
-            if (literal->value.index() != 6) // index of bool in Value variant
-            {
-                throw std::runtime_error(
-                    "Literal expression does not evaluate to a boolean");
-            }
-            return std::get<bool>(literal->value);
-        }
-        // case BoundExprKind::ColumnReference:
-        // {
-        //     const auto *column = dynamic_cast<const BoundColumnExpr *>(&expr);
-        //     Value value = row.values[column->columnIndex];
-        //     if (value.index() != 6) // index of bool in Value variant
-        //     {
-        //         throw std::runtime_error(
-        //             "Column reference does not evaluate to a boolean");
-        //     }
-        //     return std::get<bool>(value);
-        // }
-        case BoundExprKind::Binary:
-        {
-            const auto *binary =
-                dynamic_cast<const BoundBinaryExpr *>(&expr);
-            if (binary->op == BinaryOperator::And)
-            {
-                return evaluatePredicate(*binary->left, row) &&
-                       evaluatePredicate(*binary->right, row);
-            }
-            if (binary->op == BinaryOperator::Or)
-            {
-                return evaluatePredicate(*binary->left, row) ||
-                       evaluatePredicate(*binary->right, row);
-            }
-            return evaluatePredicate(*binary, row);
-        }
-    
-
-        case BoundExprKind::Unary:
-        {
-            const auto *unary = dynamic_cast<const BoundUnaryExpr *>(&expr);
-        
-            if (unary->op == UnaryOperator::Not)
-            {
-                return !evaluatePredicate(*unary->operand, row);
-            }
-        }
-
-        case BoundExprKind::IsNull:
-        {
-            const auto *isNull = dynamic_cast<const BoundIsNullExpr *>(&expr);
-            Value value = evaluateValue(*isNull->operand, row);
-            bool result = std::holds_alternative<std::monostate>(value);
-            return isNull->negated ? !result : result;
-        }
-        default:{
-            throw std::runtime_error("Expression does not evaluate to a predicate");}
-}
-}
-
-
-bool evaluatePredicate(const BoundExpr &expr, const Row &row)
-{
-    Value result = evaluateValue(expr, row);
-
-    if (!std::holds_alternative<bool>(result))
-    {
-        throw std::runtime_error(
-            "WHERE expression did not produce a boolean");
-    }
-
-    return std::get<bool>(result);
+    return asBoolean(evaluateValue(expr, row), "WHERE");
 }

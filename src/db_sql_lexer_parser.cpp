@@ -9,6 +9,7 @@ int main()
 {
     std::vector<std::string> sqlStatements = {
         "SELECT users.* FROM users WHERE age >= 18;",
+        "SELECT 1 AS test, price * quantity AS total FROM products;",
         "SELECT * FROM users JOIN orders ON users.id = orders.user_id;",
         "DELETE FROM users WHERE age < 18;",
         "INSERT INTO users (name, age) VALUES ('Ada', NULL);",

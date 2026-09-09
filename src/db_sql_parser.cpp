@@ -64,14 +64,14 @@ StringExpr::StringExpr(std::string value)
     : Expr(ExprKind::Literal),
       value(std::move(value)) {}
 
-BooleanExpr::BooleanExpr(bool value)
-    : Expr(ExprKind::Literal),
-      value(value) {}
-
-FunctionCallExpr::FunctionCallExpr(std::string name, std::vector<std::unique_ptr<Expr>> arguments)
+FunctionCallExpr::FunctionCallExpr(
+    std::string name,
+    std::vector<std::unique_ptr<Expr>> arguments,
+    bool starArgument)
     : Expr(ExprKind::FunctionCall),
       name(std::move(name)),
-      arguments(std::move(arguments)) {}      
+      arguments(std::move(arguments)),
+      starArgument(starArgument) {}
 
 BinaryExpr::BinaryExpr(
     BinaryOperator op,
@@ -106,8 +106,11 @@ ColumnDefExpr::ColumnDefExpr(
 QualifiedWildcardSelectItem::QualifiedWildcardSelectItem(std::vector<std::string> qualifierParts)
     : qualifierParts(std::move(qualifierParts)) {}
 
-ExprSelectItem::ExprSelectItem(std::unique_ptr<Expr> expr)
-    : expr(std::move(expr)) {}
+ExprSelectItem::ExprSelectItem(
+    std::unique_ptr<Expr> expr,
+    std::string alias)
+    : expr(std::move(expr)),
+      alias(std::move(alias)) {}
 
 NamedTableRef::NamedTableRef(std::string name)
     : name(std::move(name)) {}
@@ -848,14 +851,16 @@ std::string Parser::parseIdentifier()
 
 std::unique_ptr<Expr> Parser::parseIdentifierExpr()
 {
-
     Token name = expect(TokenType::Identifier);
     if (match(TokenType::LeftParen))
     {
         if (matchStar())
         {
             expect(TokenType::RightParen);
-            return std::make_unique<FunctionCallExpr>(std::move(name.text), std::vector<std::unique_ptr<Expr>>{}, true);
+            return std::make_unique<FunctionCallExpr>(
+                std::move(name.text),
+                std::vector<std::unique_ptr<Expr>>{},
+                true);
         }
         std::vector<std::unique_ptr<Expr>> args;
         while (!match(TokenType::RightParen))
@@ -866,8 +871,13 @@ std::unique_ptr<Expr> Parser::parseIdentifierExpr()
 
         return std::make_unique<FunctionCallExpr>(std::move(name.text), std::move(args));
     }
-    return parseIdentifierColumnExpr();
-
+    std::vector<std::string> parts;
+    parts.push_back(std::move(name.text));
+    while (match(TokenType::Dot))
+    {
+        parts.push_back(expect(TokenType::Identifier).text);
+    }
+    return std::make_unique<ColumnExpr>(std::move(parts));
 }
 
 std::unique_ptr<ColumnExpr> Parser::parseIdentifierColumnExpr()
@@ -957,9 +967,15 @@ std::unique_ptr<SelectItem> Parser::parseSelectItem()
     }
 
     auto expr = parseExpression();
+    std::string alias;
+    if (matchKeyword("AS"))
+    {
+        alias = expect(TokenType::Identifier).text;
+    }
 
     return std::make_unique<ExprSelectItem>(
-        std::move(expr));
+        std::move(expr),
+        std::move(alias));
 }
 
 std::vector<std::unique_ptr<SelectItem>> Parser::parseSelectList()

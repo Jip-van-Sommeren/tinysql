@@ -744,6 +744,10 @@ void ExpressionSerializer::serialize(
 
     switch (expression.kind())
     {
+        case BoundExprKind::FunctionCall:
+            throw std::runtime_error(
+                "Stored function expressions are not supported");
+
         case BoundExprKind::ColumnReference:
         {
             const auto& column =

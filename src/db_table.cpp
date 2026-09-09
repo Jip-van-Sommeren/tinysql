@@ -39,65 +39,29 @@ void Table::insertRows(const BoundInsert &insert)
     bufferManager.flushAll();
 }
 
-std::vector<Row> Table::selectAllRows()
+std::vector<Row> Table::scan()
 {
-    Page &headerPage = bufferManager.getPage(0, decodeHeaderPage);
-    return selectAllRowsFromPages(headerPage);
-}
-
-std::vector<Row> Table::selectRows(const BoundSelect &select)
-{
-    Page &headerPage = bufferManager.getPage(0, decodeHeaderPage);
-    std::vector<Row> rows = selectAllRowsFromPages(headerPage);
+    Page &headerPageContainer = bufferManager.getPage(0, decodeHeaderPage);
     std::vector<Row> result;
+    HeaderPage &headerPage = std::get<HeaderPage>(headerPageContainer.data);
 
-    for (const Row &row : rows)
+    std::uint32_t pageId = headerPage.firstDataPageId;
+    while (pageId != 0)
     {
-        if (select.where && !evaluatePredicate(*select.where, row))
+        Page &dataPageContainer = bufferManager.getPage(
+            pageId,
+            [&headerPage](const RawPage &rawPage)
+            {
+                return decodeDataPage(rawPage, headerPage);
+            });
+        DataPage &dataPage = std::get<DataPage>(dataPageContainer.data);
+
+        for (const RowEntry &entry : dataPage.rows)
         {
-            continue;
+            result.push_back(entry.row);
         }
 
-        Row projected;
-        for (auto &projection : select.projections)
-        {
-            if (projection->expr->kind() == BoundExprKind::ColumnReference)
-            {
-                const auto &columnRef = static_cast<const BoundColumnExpr &>(*projection->expr);
-                projected.values.push_back(row.values[columnRef.columnIndex]);
-                continue;
-            }
-            if (projection->expr->kind() == BoundExprKind::FunctionCall)
-            {
-                const auto &functionCall = static_cast<const BoundFunctionCall &>(*projection->expr);
-                Value value = evaluateExpression(functionCall, row);
-                projected.values.push_back(std::move(value));
-                continue;
-            }
-            if (projection->expr->kind() == BoundExprKind::Literal)
-            {
-                const auto &literal = static_cast<const BoundLiteralExpr &>(*projection->expr);
-                projected.values.push_back(literal.value);
-                continue;
-            }
-
-
-        }
-        for (std::uint32_t index : select.projectedColumnIndexes)
-        {
-            projected.values.push_back(row.values[index]);
-        }
-
-        result.push_back(std::move(projected));
-    }
-
-    if (!select.groupBy.empty())
-    {
-        return result;
-    }
-    {
-
-        // Handle aggregation logic
+        pageId = dataPageContainer.header.nextPageId;
     }
 
     return result;
@@ -196,32 +160,4 @@ void Table::validateHeaderPage()
     {
         throw std::runtime_error("Page 0 is not a table header page");
     }
-}
-
-std::vector<Row> Table::selectAllRowsFromPages(Page &headerPageContainer)
-{
-    std::vector<Row> result;
-    HeaderPage &headerPage =
-        std::get<HeaderPage>(headerPageContainer.data);
-
-    std::uint32_t pageId = headerPage.firstDataPageId;
-    while (pageId != 0)
-    {
-        Page &dataPageContainer = bufferManager.getPage(
-            pageId,
-            [&headerPage](const RawPage &rawPage)
-            {
-                return decodeDataPage(rawPage, headerPage);
-            });
-        DataPage &dataPage = std::get<DataPage>(dataPageContainer.data);
-
-        for (const RowEntry &entry : dataPage.rows)
-        {
-            result.push_back(entry.row);
-        }
-
-        pageId = dataPageContainer.header.nextPageId;
-    }
-
-    return result;
 }

@@ -68,7 +68,10 @@ struct FunctionCallExpr : Expr
     std::vector<std::unique_ptr<Expr>> arguments;
     bool starArgument = false; // Indicates if the function call has a star argument (e.g., COUNT(*))
 
-    explicit FunctionCallExpr(std::string name, std::vector<std::unique_ptr<Expr>> arguments);
+    explicit FunctionCallExpr(
+        std::string name,
+        std::vector<std::unique_ptr<Expr>> arguments,
+        bool starArgument = false);
 };
 
 struct BooleanExpr : Expr
@@ -297,8 +300,11 @@ struct QualifiedWildcardSelectItem : SelectItem
 struct ExprSelectItem : SelectItem
 {
     std::unique_ptr<Expr> expr;
+    std::string alias;
 
-    explicit ExprSelectItem(std::unique_ptr<Expr> expr);
+    explicit ExprSelectItem(
+        std::unique_ptr<Expr> expr,
+        std::string alias = {});
 };
 
 struct TableRef

@@ -6,6 +6,7 @@
 #include <limits>
 #include <map>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <type_traits>
 #include <unordered_set>
@@ -27,7 +28,7 @@ namespace
 
 
 
-    bool iequals(const std::string& a, const std::string& b) {
+    bool iequals(std::string_view a, std::string_view b) {
         if (a.size() != b.size()) return false;
         return std::equal(a.begin(), a.end(), b.begin(), [](char c1, char c2) {
             return std::tolower(static_cast<unsigned char>(c1)) == 
@@ -72,6 +73,8 @@ namespace
 
         case FunctionId::Abs:
         case FunctionId::Round:
+        case FunctionId::Lower:
+        case FunctionId::Upper:
             return FunctionCategory::Scalar;
         }
 
@@ -320,6 +323,208 @@ namespace
         return result;
     }
 
+    std::string binaryOperatorText(BinaryOperator op)
+    {
+        switch (op)
+        {
+        case BinaryOperator::Add:
+            return "+";
+        case BinaryOperator::Subtract:
+            return "-";
+        case BinaryOperator::Multiply:
+            return "*";
+        case BinaryOperator::Divide:
+            return "/";
+        case BinaryOperator::And:
+            return "AND";
+        case BinaryOperator::Or:
+            return "OR";
+        case BinaryOperator::Eq:
+            return "=";
+        case BinaryOperator::Ne:
+            return "<>";
+        case BinaryOperator::Gt:
+            return ">";
+        case BinaryOperator::Ge:
+            return ">=";
+        case BinaryOperator::Lt:
+            return "<";
+        case BinaryOperator::Le:
+            return "<=";
+        }
+
+        throw std::runtime_error("Unknown binary operator");
+    }
+
+    int expressionPrecedence(const Expr &expr)
+    {
+        const auto *binary = dynamic_cast<const BinaryExpr *>(&expr);
+        if (!binary)
+        {
+            return dynamic_cast<const UnaryExpr *>(&expr) ? 80 : 100;
+        }
+
+        switch (binary->op)
+        {
+        case BinaryOperator::Or:
+            return 30;
+        case BinaryOperator::And:
+            return 40;
+        case BinaryOperator::Eq:
+        case BinaryOperator::Ne:
+        case BinaryOperator::Gt:
+        case BinaryOperator::Ge:
+        case BinaryOperator::Lt:
+        case BinaryOperator::Le:
+            return 50;
+        case BinaryOperator::Add:
+        case BinaryOperator::Subtract:
+            return 60;
+        case BinaryOperator::Multiply:
+        case BinaryOperator::Divide:
+            return 70;
+        }
+
+        throw std::runtime_error("Unknown binary operator");
+    }
+
+    std::string formatNumber(const NumberValue &number)
+    {
+        return std::visit(
+            [](const auto &value) -> std::string
+            {
+                using T = std::decay_t<decltype(value)>;
+                if constexpr (std::is_same_v<T, DecimalLiteral>)
+                {
+                    return value.text;
+                }
+                else if constexpr (std::is_integral_v<T>)
+                {
+                    return std::to_string(value);
+                }
+                else
+                {
+                    std::ostringstream stream;
+                    stream << value;
+                    return stream.str();
+                }
+            },
+            number);
+    }
+
+    std::string quoteString(std::string_view value)
+    {
+        std::string result{"'"};
+        for (char character : value)
+        {
+            result += character;
+            if (character == '\'')
+            {
+                result += '\'';
+            }
+        }
+        result += '\'';
+        return result;
+    }
+
+    std::string upper(std::string value)
+    {
+        std::transform(
+            value.begin(),
+            value.end(),
+            value.begin(),
+            [](unsigned char character)
+            {
+                return static_cast<char>(std::toupper(character));
+            });
+        return value;
+    }
+
+    std::string formatExpression(
+        const Expr &expr,
+        int parentPrecedence = 0,
+        bool rightOperand = false)
+    {
+        if (const auto *column = dynamic_cast<const ColumnExpr *>(&expr))
+        {
+            return join(column->parts, ".");
+        }
+
+        if (const auto *number = dynamic_cast<const NumberExpr *>(&expr))
+        {
+            return formatNumber(number->value);
+        }
+
+        if (const auto *string = dynamic_cast<const StringExpr *>(&expr))
+        {
+            return quoteString(string->value);
+        }
+
+        if (const auto *boolean = dynamic_cast<const BooleanExpr *>(&expr))
+        {
+            return boolean->value ? "TRUE" : "FALSE";
+        }
+
+        if (dynamic_cast<const NullExpr *>(&expr))
+        {
+            return "NULL";
+        }
+
+        if (const auto *function = dynamic_cast<const FunctionCallExpr *>(&expr))
+        {
+            std::string result = upper(function->name) + "(";
+            if (function->starArgument)
+            {
+                result += "*";
+            }
+            else
+            {
+                for (std::size_t i = 0; i < function->arguments.size(); ++i)
+                {
+                    if (i != 0)
+                    {
+                        result += ", ";
+                    }
+                    result += formatExpression(*function->arguments[i]);
+                }
+            }
+            return result + ")";
+        }
+
+        if (const auto *unary = dynamic_cast<const UnaryExpr *>(&expr))
+        {
+            const std::string operatorText =
+                unary->op == UnaryOperator::Not
+                    ? "NOT "
+                    : unary->op == UnaryOperator::Negate ? "-" : "+";
+            return operatorText + formatExpression(*unary->operand, 80);
+        }
+
+        if (const auto *isNull = dynamic_cast<const IsNullExpr *>(&expr))
+        {
+            return formatExpression(*isNull->operand, 50) +
+                   (isNull->negated ? " IS NOT NULL" : " IS NULL");
+        }
+
+        if (const auto *binary = dynamic_cast<const BinaryExpr *>(&expr))
+        {
+            const int precedence = expressionPrecedence(expr);
+            std::string result =
+                formatExpression(*binary->left, precedence) + " " +
+                binaryOperatorText(binary->op) + " " +
+                formatExpression(*binary->right, precedence, true);
+
+            if (precedence < parentPrecedence ||
+                (rightOperand && precedence == parentPrecedence))
+            {
+                return "(" + result + ")";
+            }
+            return result;
+        }
+
+        throw std::runtime_error("Cannot format unsupported expression");
+    }
+
     bool containsColumnReference(const BoundExpr &expr)
     {
         if (dynamic_cast<const BoundColumnExpr *>(&expr))
@@ -467,6 +672,14 @@ namespace
                 else if constexpr (std::is_same_v<T, std::int64_t>)
                 {
                     return DataType::BigInt;
+                }
+                else if constexpr (std::is_same_v<T, std::float32_t>)
+                {
+                    return DataType::Float;
+                }
+                else if constexpr (std::is_same_v<T, std::float64_t>)
+                {
+                    return DataType::Double;
                 }
                 else
                 {
@@ -673,7 +886,16 @@ BoundSelect QueryValidator::validateSelect(const SelectStatement &statement)
         where = bindExpr(*statement.where, context);
     }
 
-    std::vector<std::uint32_t> projectedColumnIndexes;
+    std::vector<BoundSelectItem> projections;
+
+    const auto addColumnProjection = [&projections](const Column &column)
+    {
+        projections.push_back(BoundSelectItem{
+            .expr = std::make_unique<BoundColumnExpr>(
+                column.columnIndex,
+                column.type),
+            .outputName = column.name});
+    };
 
     for (const std::unique_ptr<SelectItem> &item : statement.selectList)
     {
@@ -681,7 +903,7 @@ BoundSelect QueryValidator::validateSelect(const SelectStatement &statement)
         {
             for (const Column &column : context.columns)
             {
-                projectedColumnIndexes.push_back(column.columnIndex);
+                addColumnProjection(column);
             }
             continue;
         }
@@ -697,39 +919,31 @@ BoundSelect QueryValidator::validateSelect(const SelectStatement &statement)
 
             for (const Column &column : context.columns)
             {
-                projectedColumnIndexes.push_back(column.columnIndex);
+                addColumnProjection(column);
             }
             continue;
         }
 
         if (const auto *exprItem = dynamic_cast<const ExprSelectItem *>(item.get()))
         {
-            // using T = std::decay_t<decltype(exprItem->expr)>;
-            // if constexpr (std::is_same_v<T, ColumnExpr>)
-            // {
-               
-            // }
-            // else if constexpr (std::is_same_v<T, FunctionCallExpr>)
-            // {
-            //     throw std::runtime_error("Function calls are not supported in SELECT");
-            // }
-            // else
-            // {
-            //     throw std::runtime_error("Unsupported expression in SELECT");
-            // }
             const auto *columnExpr =
                 dynamic_cast<const ColumnExpr *>(exprItem->expr.get());
 
-            if (!columnExpr)
+            std::string outputName = exprItem->alias;
+            if (outputName.empty() && columnExpr)
             {
-                throw std::runtime_error("Only column expressions are supported in SELECT");
+                outputName = resolveColumnName(
+                    columnExpr->parts,
+                    tableRef.name);
+            }
+            else if (outputName.empty())
+            {
+                outputName = formatExpression(*exprItem->expr);
             }
 
-            std::string columnName =
-                resolveColumnName(columnExpr->parts, tableRef.name);
-
-            const Column &column = context.resolveColumn(columnName);
-            projectedColumnIndexes.push_back(column.columnIndex);
+            projections.push_back(BoundSelectItem{
+                .expr = bindExpr(*exprItem->expr, context),
+                .outputName = std::move(outputName)});
             continue;
         }
 
@@ -738,8 +952,10 @@ BoundSelect QueryValidator::validateSelect(const SelectStatement &statement)
 
     return BoundSelect{
         .tableName = tableRef.name,
-        .projectedColumnIndexes = std::move(projectedColumnIndexes),
-        .where = std::move(where)};
+        .projections = std::move(projections),
+        .where = std::move(where),
+        .groupBy = {},
+        .having = nullptr};
 }
 
 Column QueryValidator::bindColumnDefinition(
@@ -1151,6 +1367,7 @@ Value QueryValidator::bindLiteralValue(
         throw std::runtime_error("Cannot bind non-null value to NULL column");
 
     case DataType::Boolean:
+    {
         const auto *boolExpr = dynamic_cast<const BooleanExpr *>(&expr);
         if (!boolExpr)
         {
@@ -1158,6 +1375,7 @@ Value QueryValidator::bindLiteralValue(
                 "Expected boolean value for column: " + targetColumn.name);
         }
         return boolExpr->value;
+    }
 
     default:
         throw std::runtime_error("Unsupported target column type");
@@ -1327,6 +1545,19 @@ std::unique_ptr<BoundExpr> QueryValidator::bindExpr(
             throw std::runtime_error("Unknown function: " + functionCall->name);
         }
         auto category = resolveFunctionCategory(*id);
+
+        if (category == FunctionCategory::Aggregate)
+        {
+            throw std::runtime_error(
+                "Aggregate functions are not supported yet");
+        }
+
+        if (functionCall->starArgument)
+        {
+            throw std::runtime_error(
+                "A scalar function cannot use '*' as an argument");
+        }
+
         std::vector<std::unique_ptr<BoundExpr>> boundList;
         boundList.reserve(functionCall->arguments.size());
 
@@ -1335,11 +1566,29 @@ std::unique_ptr<BoundExpr> QueryValidator::bindExpr(
             boundList.push_back(bindExpr(*item, context));
         }
 
+        DataType resultType;
+        switch (*id)
+        {
+        case FunctionId::Abs:
+            if (boundList.size() != 1 ||
+                !isNumericType(boundList[0]->type()))
+            {
+                throw std::runtime_error(
+                    "ABS requires exactly one numeric argument");
+            }
+            resultType = boundList[0]->type();
+            break;
+
+        default:
+            throw std::runtime_error(
+                "Scalar function is not supported yet");
+        }
+
         return std::make_unique<BoundFunctionCall>(
             *id,
             category,
             std::move(boundList),
-            DataType::Null);  // Replace with actual return type later
+            resultType);
     }
 
     if (const auto *isNull = dynamic_cast<const IsNullExpr *>(&expr))

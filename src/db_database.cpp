@@ -1,5 +1,6 @@
 #include "db_database.h"
 
+#include "db_query_executor.h"
 #include "db_sql_lexer.h"
 #include "db_sql_parser.h"
 
@@ -39,7 +40,7 @@ void Database::insertRows(
 std::vector<Row> Database::selectAllRows(const std::string &tableName)
 {
     Table table = storageEngine.openTable(tableName);
-    return table.selectAllRows();
+    return table.scan();
 }
 
 QueryResult Database::execute(const BoundQuery &query)
@@ -88,6 +89,7 @@ QueryResult Database::executeInsert(const BoundInsert &insert)
     table.insertRows(insert);
 
     return QueryResult{
+        .columns = {},
         .rows = {},
         .affectedRows = insert.rows.size(),
         .returnsRows = false};
@@ -96,11 +98,8 @@ QueryResult Database::executeInsert(const BoundInsert &insert)
 QueryResult Database::executeSelect(const BoundSelect &select)
 {
     Table table = storageEngine.openTable(select.tableName);
-
-    return QueryResult{
-        .rows = table.selectRows(select),
-        .affectedRows = 0,
-        .returnsRows = true};
+    SelectExecutor executor;
+    return executor.execute(select, table);
 }
 
 QueryResult Database::executeDelete(const BoundDelete &del)
@@ -109,6 +108,7 @@ QueryResult Database::executeDelete(const BoundDelete &del)
     std::uint64_t deletedCount = table.deleteRows(del);
 
     return QueryResult{
+        .columns = {},
         .rows = {},
         .affectedRows = deletedCount,
         .returnsRows = false};
@@ -124,6 +124,7 @@ QueryResult Database::executeCreateTable(
         createTable.constraints);
 
     return QueryResult{
+        .columns = {},
         .rows = {},
         .affectedRows = 0,
         .returnsRows = false};

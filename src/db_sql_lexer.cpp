@@ -190,6 +190,7 @@ bool Lexer::isKeyword(const std::string &word) const
 {
     return isDataTypeKeyword(word) ||
            word == "SELECT" ||
+           word == "AS" ||
            word == "FROM" ||
            word == "WHERE" ||
            word == "INSERT" ||

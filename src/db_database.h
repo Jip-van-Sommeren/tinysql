@@ -1,5 +1,6 @@
 #pragma once
 
+#include "db_query_result.h"
 #include "db_query_validator.h"
 #include "db_storage_engine.h"
 

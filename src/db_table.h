@@ -8,17 +8,7 @@
 #include <vector>
 
 struct BoundInsert;
-struct BoundSelect;
 struct BoundDelete;
-
-
-// class Table
-// {
-// public:
-//     std::vector<Row> scan() const;
-
-//     const TableHeader& header() const;
-// };
 
 class Table
 {
@@ -33,8 +23,7 @@ public:
     static Table open(std::filesystem::path tablePath);
 
     void insertRows(const BoundInsert &insert);
-    std::vector<Row> selectAllRows();
-    std::vector<Row> selectRows(const BoundSelect &select);
+    std::vector<Row> scan();
     std::uint64_t deleteRows(const BoundDelete &del);
 
 private:
@@ -48,5 +37,4 @@ private:
         const std::vector<Column> &columns,
         const std::vector<Constraint> &constraints);
     void validateHeaderPage();
-    std::vector<Row> selectAllRowsFromPages(Page &headerPage);
 };

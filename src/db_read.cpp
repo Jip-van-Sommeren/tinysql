@@ -273,6 +273,10 @@ std::unique_ptr<BoundExpr> HeaderPageDecoder::decodeExpression()
 
     switch (kind)
     {
+    case BoundExprKind::FunctionCall:
+        throw std::runtime_error(
+            "Stored function expressions are not supported");
+
     case BoundExprKind::ColumnReference:
     {
         ColumnId columnId = decoder.decodeUnsigned<std::uint32_t>();

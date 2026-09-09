@@ -33,6 +33,7 @@ add_library(db_core
     src/db_decimal.cpp
     src/db_expression_evaluator.cpp
     src/db_page_factory.cpp
+    src/db_query_executor.cpp
     src/db_query_validator.cpp
     src/db_read.cpp
     src/db_row_validator.cpp
@@ -61,4 +62,9 @@ if(BUILD_TESTING)
     db_configure_target(db_decimal_test PRIVATE)
     target_link_libraries(db_decimal_test PRIVATE db_core)
     add_test(NAME db_decimal_test COMMAND db_decimal_test)
+
+    add_executable(db_select_executor_test tests/db_select_executor_test.cpp)
+    db_configure_target(db_select_executor_test PRIVATE)
+    target_link_libraries(db_select_executor_test PRIVATE db_core)
+    add_test(NAME db_select_executor_test COMMAND db_select_executor_test)
 endif()

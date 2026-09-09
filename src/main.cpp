@@ -28,9 +28,9 @@ namespace
             value);
     }
 
-    void printRows(const std::vector<Row> &rows)
+    void printRows(const std::vector<ResultRow> &rows)
     {
-        for (const Row &row : rows)
+        for (const ResultRow &row : rows)
         {
             for (std::size_t i = 0; i < row.values.size(); ++i)
             {
@@ -50,6 +50,15 @@ namespace
     {
         if (result.returnsRows)
         {
+            for (std::size_t i = 0; i < result.columns.size(); ++i)
+            {
+                if (i != 0)
+                {
+                    std::cout << '\t';
+                }
+                std::cout << result.columns[i].name;
+            }
+            std::cout << '\n';
             printRows(result.rows);
             std::cout << result.rows.size() << " row(s) selected\n";
             return;
