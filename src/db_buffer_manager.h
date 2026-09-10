@@ -9,6 +9,55 @@
 #include <unordered_map>
 #include <vector>
 
+using PageId = std::uint32_t;
+class PageGuard
+{
+PageGuard(const PageGuard&) = delete;
+PageGuard& operator=(const PageGuard&) = delete;
+PageGuard(PageGuard&& other) noexcept
+    : bufferManager_(other.bufferManager_),
+      pageId_(other.pageId_),
+      page_(other.page_)
+{
+    other.bufferManager_ = nullptr;
+    other.page_ = nullptr;
+}
+public:
+    PageGuard(
+        BufferManager& bufferManager,
+        PageId pageId,
+        Page* page)
+        : bufferManager_(&bufferManager),
+          pageId_(pageId),
+          page_(page)
+    {
+    }
+
+    ~PageGuard()
+    {
+        if (bufferManager_)
+        {
+            bufferManager_->unpinPage(pageId_);
+        }
+    }
+
+    Page& page()
+    {
+        return *page_;
+    }
+
+    const Page& page() const
+    {
+        return *page_;
+    }
+
+private:
+    BufferManager* bufferManager_;
+    PageId pageId_;
+    Page* page_;
+};
+
+
 class BufferManager
 {
 public:
@@ -16,12 +65,17 @@ public:
 
     explicit BufferManager(std::filesystem::path path);
 
-    Page &getPage(std::uint32_t pageId, const PageReader &reader);
+    Page &fetchPage(std::uint32_t pageId, const PageReader &reader);
     void markDirty(std::uint32_t pageId);
     void insertAllRows(const std::vector<Row> &rows, Page &headerPage);
     void flushPage(std::uint32_t pageId);
     void flushAll();
     void setPage(const Page &page, std::uint32_t pageId);
+
+    void unpinPage(std::uint32_t pageId);
+    void pinPage(std::uint32_t pageId);
+    PageGuard getPage(PageId id,
+    const PageReader &reader);
 
 private:
     std::filesystem::path path;

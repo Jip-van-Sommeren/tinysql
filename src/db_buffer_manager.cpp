@@ -36,7 +36,7 @@ BufferManager::BufferManager(std::filesystem::path path)
 {
 }
 
-Page &BufferManager::getPage(
+Page &BufferManager::fetchPage(
     std::uint32_t pageId,
     const PageReader &reader)
 {
@@ -53,11 +53,53 @@ Page &BufferManager::getPage(
         pageId,
         PageFrame{
             .pageId = pageId,
-            .page = std::move(decodedPage),
-            .dirty = false});
+            .page = std::move(decodedPage)
+        });
 
     return inserted.first->second.page;
 }
+
+PageGuard BufferManager::getPage(PageId id,
+    const PageReader &reader)
+{
+    Page page = fetchPage(id, reader);
+
+    pinPage(id);
+
+    return PageGuard(
+        *this,
+        id,
+        &page);
+}
+
+void BufferManager::pinPage(std::uint32_t pageId)
+{
+    auto it = pages.find(pageId);
+    if (it == pages.end())
+    {
+        throw std::runtime_error("Page not found in buffer manager");
+    }
+    ++it->second.pinCount;
+
+    // Pinning logic can be implemented here if needed
+}
+
+void BufferManager::unpinPage(std::uint32_t pageId)
+{
+    auto it = pages.find(pageId);
+    if (it == pages.end())
+    {
+        throw std::runtime_error("Page not found in buffer manager");
+    }
+    if (it->second.pinCount == 0)
+    {
+        throw std::runtime_error("Page is not pinned");
+    }
+    --it->second.pinCount;
+
+    // Unpinning logic can be implemented here if needed
+}
+
 
 void BufferManager::markDirty(std::uint32_t pageId)
 {

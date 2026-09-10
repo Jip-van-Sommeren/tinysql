@@ -735,8 +735,8 @@ PageHeader decodePageHeader(const RawPage &page)
 Page decodeHeaderPage(const RawPage &page)
 {
     PageDecoder decoder(page);
-    HeaderPageDecoder headerDecoder(decoder);
-    return headerDecoder.decode();
+    HeaderPageDecoder headerPageDecoder(decoder);
+    return headerPageDecoder.decode();
 }
 
 Page decodeDataPage(const RawPage &page, const HeaderPage &headerPage)

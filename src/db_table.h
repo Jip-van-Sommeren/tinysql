@@ -10,6 +10,25 @@
 struct BoundInsert;
 struct BoundDelete;
 
+
+class TableCursor
+{
+public:
+    explicit TableCursor(const Table& table)
+        : table_(table),
+          pageId_(table.firstDataPageId())
+    {
+    }
+
+    std::optional<Row> next();
+
+private:
+    const Table& table_;
+
+    PageId pageId_;
+    std::uint32_t slotIndex_ = 0;
+};
+
 class Table
 {
 public:
@@ -24,7 +43,13 @@ public:
 
     void insertRows(const BoundInsert &insert);
     std::vector<Row> scan();
+    TableCursor scan() const
+    {
+        return TableCursor(*this);
+    }
     std::uint64_t deleteRows(const BoundDelete &del);
+    PageId firstDataPageId() ;
+    PageGuard getPageForScan(PageId pageId) ;
 
 private:
     explicit Table(std::filesystem::path tablePath);

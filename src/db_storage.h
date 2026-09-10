@@ -153,13 +153,26 @@ struct Page
 {
     PageHeader header;
     PageData data;
+    std::uint32_t pageId() const
+    {
+        return header.pageId;
+    }
+    std::uint16_t slotCount() const
+    {
+        return header.slotCount;
+    }
+    std::uint16_t nextPageId() const
+    {
+        return header.nextPageId;
+    }
 };
 
 struct PageFrame
 {
-    uint32_t pageId;
+    std::uint32_t pageId;
     Page page;
-    bool dirty;
+    bool dirty = false;
+    std::uint32_t pinCount = 0;
 };
 
 struct FreePageHeader
