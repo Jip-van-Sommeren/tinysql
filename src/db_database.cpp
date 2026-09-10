@@ -40,7 +40,13 @@ void Database::insertRows(
 std::vector<Row> Database::selectAllRows(const std::string &tableName)
 {
     Table table = storageEngine.openTable(tableName);
-    return table.scan();
+    TableCursor cursor = table.scan();
+    std::vector<Row> rows;
+    while (auto row = cursor.next())
+    {
+        rows.push_back(std::move(*row));
+    }
+    return rows;
 }
 
 QueryResult Database::execute(const BoundQuery &query)

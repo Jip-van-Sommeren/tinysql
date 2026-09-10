@@ -224,15 +224,16 @@ namespace
             projections.push_back(std::move(expr));
         }
 
-        for (const Row &row : table.scan())
+        TableCursor cursor = table.scan();
+        while (auto row = cursor.next())
         {
-            if (select.where && !evaluatePredicate(*select.where, row))
+            if (select.where && !evaluatePredicate(*select.where, *row))
             {
                 continue;
             }
             for (AggregateState &aggregate : aggregates)
             {
-                accumulateAggregate(aggregate, row);
+                accumulateAggregate(aggregate, *row);
             }
         }
 
@@ -292,9 +293,10 @@ QueryResult SelectExecutor::execute(
         return result;
     }
 
-    for (const Row &row : table.scan())
+    TableCursor cursor = table.scan();
+    while (auto row = cursor.next())
     {
-        if (select.where && !evaluatePredicate(*select.where, row))
+        if (select.where && !evaluatePredicate(*select.where, *row))
         {
             continue;
         }
@@ -305,7 +307,7 @@ QueryResult SelectExecutor::execute(
         for (const BoundSelectItem &projection : select.projections)
         {
             resultRow.values.push_back(
-                evaluateValue(*projection.expr, row));
+                evaluateValue(*projection.expr, *row));
         }
 
         result.rows.push_back(std::move(resultRow));

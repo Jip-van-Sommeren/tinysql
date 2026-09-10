@@ -5,8 +5,10 @@
 #include "db_row_validator.h"
 #include "db_write.h"
 
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -31,13 +33,72 @@ namespace
     }
 }
 
+PageGuard::PageGuard(
+    BufferManager &bufferManager, PageId pageId, Page &page) noexcept
+    : bufferManager_(&bufferManager), pageId_(pageId), page_(&page)
+{
+}
+
+PageGuard::PageGuard(PageGuard &&other) noexcept
+    : bufferManager_(std::exchange(other.bufferManager_, nullptr)),
+      pageId_(std::exchange(other.pageId_, 0)),
+      page_(std::exchange(other.page_, nullptr))
+{
+}
+
+PageGuard &PageGuard::operator=(PageGuard &&other) noexcept
+{
+    if (this != &other)
+    {
+        release();
+        bufferManager_ = std::exchange(other.bufferManager_, nullptr);
+        pageId_ = std::exchange(other.pageId_, 0);
+        page_ = std::exchange(other.page_, nullptr);
+    }
+    return *this;
+}
+
+PageGuard::~PageGuard() noexcept
+{
+    release();
+}
+
+void PageGuard::release() noexcept
+{
+    if (bufferManager_)
+    {
+        bufferManager_->unpinPage(pageId_);
+        bufferManager_ = nullptr;
+        page_ = nullptr;
+        pageId_ = 0;
+    }
+}
+
+Page &PageGuard::page()
+{
+    assert(page_ != nullptr);
+    return *page_;
+}
+
+const Page &PageGuard::page() const
+{
+    assert(page_ != nullptr);
+    return *page_;
+}
+
+void PageGuard::markDirty()
+{
+    assert(bufferManager_ != nullptr);
+    bufferManager_->markDirty(pageId_);
+}
+
 BufferManager::BufferManager(std::filesystem::path path)
     : path(std::move(path))
 {
 }
 
 Page &BufferManager::fetchPage(
-    std::uint32_t pageId,
+    PageId pageId,
     const PageReader &reader)
 {
     auto existing = pages.find(pageId);
@@ -53,82 +114,86 @@ Page &BufferManager::fetchPage(
         pageId,
         PageFrame{
             .pageId = pageId,
-            .page = std::move(decodedPage)
-        });
+            .page = std::move(decodedPage)});
 
     return inserted.first->second.page;
 }
 
-PageGuard BufferManager::getPage(PageId id,
-    const PageReader &reader)
+PageGuard BufferManager::getPage(PageId pageId, const PageReader &reader)
 {
-    Page page = fetchPage(id, reader);
-
-    pinPage(id);
-
-    return PageGuard(
-        *this,
-        id,
-        &page);
+    Page &page = fetchPage(pageId, reader);
+    pinPage(pageId);
+    return PageGuard(*this, pageId, page);
 }
 
-void BufferManager::pinPage(std::uint32_t pageId)
+PageGuard BufferManager::getHeaderPage()
 {
-    auto it = pages.find(pageId);
-    if (it == pages.end())
+    PageGuard header = getPage(0, decodeHeaderPage);
+    if (header.page().header.pageType != PageType::HeaderPage)
     {
-        throw std::runtime_error("Page not found in buffer manager");
+        throw std::runtime_error("Page 0 is not a table header page");
     }
-    ++it->second.pinCount;
-
-    // Pinning logic can be implemented here if needed
+    return header;
 }
 
-void BufferManager::unpinPage(std::uint32_t pageId)
+PageGuard BufferManager::getDataPage(PageId pageId)
+{
+    const PageGuard header = getHeaderPage();
+    PageGuard data = getPage(
+        pageId,
+        [&header](const RawPage &rawPage)
+        {
+            return decodeDataPage(rawPage, header.as<HeaderPage>());
+        });
+    if (data.page().header.pageType != PageType::DataPage)
+    {
+        throw std::runtime_error("Page is not a data page");
+    }
+    return data;
+}
+
+void BufferManager::pinPage(PageId pageId)
+{
+    PageFrame &frame = pages.at(pageId);
+    if (frame.pinCount == std::numeric_limits<std::uint32_t>::max())
+    {
+        throw std::overflow_error("Page pin count overflow");
+    }
+    ++frame.pinCount;
+}
+
+void BufferManager::unpinPage(PageId pageId) noexcept
 {
     auto it = pages.find(pageId);
-    if (it == pages.end())
+    if (it == pages.end() || it->second.pinCount == 0)
     {
-        throw std::runtime_error("Page not found in buffer manager");
-    }
-    if (it->second.pinCount == 0)
-    {
-        throw std::runtime_error("Page is not pinned");
+        // Only a live guard can release a pin. A mismatch is an ownership bug.
+        std::terminate();
     }
     --it->second.pinCount;
-
-    // Unpinning logic can be implemented here if needed
 }
 
-
-void BufferManager::markDirty(std::uint32_t pageId)
+void BufferManager::markDirty(PageId pageId)
 {
     pages.at(pageId).dirty = true;
 }
 
-void BufferManager::insertAllRows(
-    const std::vector<Row> &rows,
-    Page &headerPageContainer)
+void BufferManager::insertAllRows(const std::vector<Row> &rows)
 {
-    if (headerPageContainer.header.pageType != PageType::HeaderPage)
-    {
-        throw std::runtime_error("No header page was passed");
-    }
-
-    HeaderPage &headerPage =
-        std::get<HeaderPage>(headerPageContainer.data);
-
     if (rows.empty())
     {
         return;
     }
 
+    PageGuard header = getHeaderPage();
+    HeaderPage &headerPage = header.as<HeaderPage>();
+
     if (headerPage.lastDataPageId == 0)
     {
-        createDataPage(headerPageContainer);
+        createDataPage(header);
     }
 
-    std::uint32_t currentPageId = headerPage.firstDataPageId;
+    PageId currentPageId = headerPage.firstDataPageId;
     std::size_t rowIndex = 0;
 
     while (rowIndex < rows.size())
@@ -142,35 +207,30 @@ void BufferManager::insertAllRows(
             throw std::runtime_error(validation.message);
         }
 
-        Page &dataPage = getPage(
-            currentPageId,
-            [&headerPage](const RawPage &rawPage)
-            {
-                return decodeDataPage(rawPage, headerPage);
-            });
+        PageGuard data = getDataPage(currentPageId);
 
         if (enoughSpaceForInsert(
-                dataPage,
+                data.page(),
                 encodedRowSize(headerPage, row)))
         {
             appendRowToExistingDataPage(
-                headerPageContainer,
-                dataPage,
+                header,
+                data,
                 row);
             ++rowIndex;
         }
-        else if (dataPage.header.nextPageId != 0)
+        else if (data.page().nextPageId() != 0)
         {
-            currentPageId = dataPage.header.nextPageId;
+            currentPageId = data.page().nextPageId();
         }
         else
         {
-            currentPageId = createDataPage(headerPageContainer);
+            currentPageId = createDataPage(header);
         }
     }
 }
 
-void BufferManager::flushPage(std::uint32_t pageId)
+void BufferManager::flushPage(PageId pageId)
 {
     PageFrame &frame = pages.at(pageId);
 
@@ -186,21 +246,23 @@ void BufferManager::flushPage(std::uint32_t pageId)
 
 void BufferManager::flushAll()
 {
-    for (auto &[pageId, frame] : pages)
+    for (const auto &[pageId, frame] : pages)
     {
-        if (!frame.dirty)
+        if (frame.dirty)
         {
-            continue;
+            flushPage(pageId);
         }
-
-        RawPage encodedPage = encodeCachedPage(frame.page);
-        writePageToFile(pageId, encodedPage);
-        frame.dirty = false;
     }
 }
 
-void BufferManager::setPage(const Page &page, std::uint32_t pageId)
+void BufferManager::setPage(const Page &page, PageId pageId)
 {
+    const auto existing = pages.find(pageId);
+    if (existing != pages.end() && existing->second.pinCount != 0)
+    {
+        throw std::runtime_error("Cannot replace a pinned page");
+    }
+
     pages.insert_or_assign(
         pageId,
         PageFrame{
@@ -236,7 +298,7 @@ RawPage BufferManager::encodeCachedPage(const Page &page)
 }
 
 void BufferManager::writePageToFile(
-    std::uint32_t pageId,
+    PageId pageId,
     const RawPage &pageData)
 {
     std::fstream file{openOrCreateFile(path)};
@@ -253,21 +315,13 @@ void BufferManager::writePageToFile(
 }
 
 void BufferManager::appendRowToExistingDataPage(
-    Page &headerPageContainer,
-    Page &dataPageContainer,
+    PageGuard &header,
+    PageGuard &data,
     const Row &row)
 {
-    HeaderPage &headerPage =
-        std::get<HeaderPage>(headerPageContainer.data);
-    DataPage &dataPage = std::get<DataPage>(dataPageContainer.data);
-
-    PageHeader &headerPageHeader = headerPageContainer.header;
-    PageHeader &dataPageHeader = dataPageContainer.header;
-
-    if (dataPageHeader.pageType != PageType::DataPage)
-    {
-        throw std::runtime_error("Page is not a data page");
-    }
+    HeaderPage &headerPage = header.as<HeaderPage>();
+    DataPage &dataPage = data.as<DataPage>();
+    PageHeader &dataPageHeader = data.page().header;
 
     const std::size_t encodedSize = encodedRowSize(headerPage, row);
     if (encodedSize > std::numeric_limits<std::uint16_t>::max())
@@ -336,23 +390,16 @@ void BufferManager::appendRowToExistingDataPage(
     }
 
     ++headerPage.totalRowCount;
-    markDirty(dataPageHeader.pageId);
-    markDirty(headerPageHeader.pageId);
+    data.markDirty();
+    header.markDirty();
 }
 
-std::uint32_t BufferManager::createDataPage(Page &headerPageContainer)
+PageId BufferManager::createDataPage(PageGuard &header)
 {
-    if (headerPageContainer.header.pageType != PageType::HeaderPage)
-    {
-        throw std::runtime_error("Incorrect page type passed");
-    }
+    HeaderPage &headerPage = header.as<HeaderPage>();
 
-    HeaderPage &headerPage =
-        std::get<HeaderPage>(headerPageContainer.data);
-    PageHeader &headerPageHeader = headerPageContainer.header;
-
-    std::uint32_t previousPageId = headerPage.lastDataPageId;
-    std::uint32_t newPageId = headerPage.nextUnusedPageId;
+    PageId previousPageId = headerPage.lastDataPageId;
+    PageId newPageId = headerPage.nextUnusedPageId;
 
     if (newPageId == 0)
     {
@@ -361,14 +408,9 @@ std::uint32_t BufferManager::createDataPage(Page &headerPageContainer)
 
     if (previousPageId != 0)
     {
-        Page &previousPage = getPage(
-            previousPageId,
-            [&headerPage](const RawPage &rawPage)
-            {
-                return decodeDataPage(rawPage, headerPage);
-            });
-        previousPage.header.nextPageId = newPageId;
-        markDirty(previousPageId);
+        PageGuard previous = getDataPage(previousPageId);
+        previous.page().header.nextPageId = newPageId;
+        previous.markDirty();
     }
     else
     {
@@ -379,7 +421,7 @@ std::uint32_t BufferManager::createDataPage(Page &headerPageContainer)
 
     headerPage.lastDataPageId = newPageId;
     headerPage.nextUnusedPageId = newPageId + 1;
-    markDirty(headerPageHeader.pageId);
+    header.markDirty();
     setPage(newDataPage, newPageId);
 
     return newPageId;

@@ -161,7 +161,7 @@ struct Page
     {
         return header.slotCount;
     }
-    std::uint16_t nextPageId() const
+    std::uint32_t nextPageId() const
     {
         return header.nextPageId;
     }

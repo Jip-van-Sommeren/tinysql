@@ -3,7 +3,6 @@
 #include "db_expression_evaluator.h"
 #include "db_page_factory.h"
 #include "db_query_validator.h"
-#include "db_read.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -13,34 +12,60 @@
 #include <variant>
 #include <vector>
 
+TableCursor::TableCursor(Table &table)
+    : table_(&table)
+{
+    const PageGuard header = table_->bufferManager.getHeaderPage();
+    pageId_ = header.as<HeaderPage>().firstDataPageId;
+}
+
+TableCursor::TableCursor(TableCursor &&other) noexcept
+    : table_(std::exchange(other.table_, nullptr)),
+      pageId_(std::exchange(other.pageId_, 0)),
+      rowIndex_(std::exchange(other.rowIndex_, 0)),
+      currentPage_(std::move(other.currentPage_))
+{
+    other.currentPage_.reset();
+}
+
+TableCursor &TableCursor::operator=(TableCursor &&other) noexcept
+{
+    if (this != &other)
+    {
+        currentPage_ = std::move(other.currentPage_);
+        other.currentPage_.reset();
+        table_ = std::exchange(other.table_, nullptr);
+        pageId_ = std::exchange(other.pageId_, 0);
+        rowIndex_ = std::exchange(other.rowIndex_, 0);
+    }
+    return *this;
+}
 
 std::optional<Row> TableCursor::next()
 {
     while (pageId_ != 0)
     {
-        auto pageGuard =
-            table_.getPageForScan(pageId_);
-
-        auto& page = pageGuard.page();
-        DataPage &dataPage = std::get<DataPage>(page.data);
-        while (slotIndex_ < page.slotCount())
+        if (!currentPage_)
         {
-            const auto slot = slotIndex_++;
-
-            if (dataPage.slots[slot].has(SlotFlag::Deleted))
-            {
-                continue;
-            }
-
-            return dataPage.rows[slot].row;
+            currentPage_.emplace(table_->bufferManager.getDataPage(pageId_));
         }
 
-        pageId_ = page.nextPageId();
-        slotIndex_ = 0;
+        const DataPage &dataPage = currentPage_->as<DataPage>();
+        if (rowIndex_ < dataPage.rows.size())
+        {
+            Row row = dataPage.rows[rowIndex_].row;
+            ++rowIndex_;
+            return row;
+        }
+
+        pageId_ = currentPage_->page().nextPageId();
+        rowIndex_ = 0;
+        currentPage_.reset();
     }
 
     return std::nullopt;
 }
+
 Table Table::create(
     std::filesystem::path tablePath,
     const std::string &tableName,
@@ -53,22 +78,6 @@ Table Table::create(
     return table;
 }
 
-PageId Table::firstDataPageId() {
-    PageGuard headerPageContainer = bufferManager.getPage(0, decodeHeaderPage);
-    const HeaderPage &headerPage = std::get<HeaderPage>(headerPageContainer.page().data);
-    return headerPage.firstDataPageId;
-
-}
-PageGuard Table::getPageForScan(PageId pageId) {
-    PageGuard headerPageContainer = bufferManager.getPage(0, decodeHeaderPage);
-    HeaderPage &headerPage = std::get<HeaderPage>(headerPageContainer.page().data);
-    return bufferManager.getPage(pageId, 
-        [&headerPage](const RawPage &rawPage)
-            {
-                return decodeDataPage(rawPage, headerPage);
-            });
-}
-
 Table Table::open(std::filesystem::path tablePath)
 {
     Table table{std::move(tablePath)};
@@ -78,57 +87,26 @@ Table Table::open(std::filesystem::path tablePath)
 
 void Table::insertRows(const BoundInsert &insert)
 {
-    PageGuard headerPage = bufferManager.getPage(0, decodeHeaderPage);
-    bufferManager.insertAllRows(insert.rows, headerPage.page());
+    bufferManager.insertAllRows(insert.rows);
     bufferManager.flushAll();
 }
 
-std::vector<Row> Table::scan()
+TableCursor Table::scan() &
 {
-    PageGuard headerPageContainer = bufferManager.getPage(0, decodeHeaderPage);
-    std::vector<Row> result;
-    HeaderPage &headerPage = std::get<HeaderPage>(headerPageContainer.page().data);
-
-    std::uint32_t pageId = headerPage.firstDataPageId;
-    while (pageId != 0)
-    {
-        PageGuard dataPageContainer = bufferManager.getPage(
-            pageId,
-            [&headerPage](const RawPage &rawPage)
-            {
-                return decodeDataPage(rawPage, headerPage);
-            });
-        DataPage &dataPage = std::get<DataPage>(dataPageContainer.page().data);
-
-        for (const RowEntry &entry : dataPage.rows)
-        {
-            result.push_back(entry.row);
-        }
-
-        pageId = dataPageContainer.page().header.nextPageId;
-    }
-
-    return result;
+    return TableCursor(*this);
 }
 
 std::uint64_t Table::deleteRows(const BoundDelete &del)
 {
-    std::uint32_t headerPageId{0};
-    PageGuard headerPageContainer = bufferManager.getPage(headerPageId, decodeHeaderPage);
-    HeaderPage &headerPage =
-        std::get<HeaderPage>(headerPageContainer.page().data);
+    PageGuard header = bufferManager.getHeaderPage();
+    HeaderPage &headerPage = header.as<HeaderPage>();
     std::uint64_t deletedCount = 0;
 
-    std::uint32_t pageId = headerPage.firstDataPageId;
+    PageId pageId = headerPage.firstDataPageId;
     while (pageId != 0)
     {
-        PageGuard dataPageContainer = bufferManager.getPage(
-            pageId,
-            [&headerPage](const RawPage &rawPage)
-            {
-                return decodeDataPage(rawPage, headerPage);
-            });
-        DataPage &dataPage = std::get<DataPage>(dataPageContainer.page().data);
+        PageGuard data = bufferManager.getDataPage(pageId);
+        DataPage &dataPage = data.as<DataPage>();
 
         const std::size_t previousRowCount = dataPage.rows.size();
         std::erase_if(
@@ -147,10 +125,10 @@ std::uint64_t Table::deleteRows(const BoundDelete &del)
 
         if (dataPage.rows.size() != previousRowCount)
         {
-            bufferManager.markDirty(pageId);
+            data.markDirty();
         }
 
-        pageId = dataPageContainer.page().header.nextPageId;
+        pageId = data.page().nextPageId();
     }
 
     if (deletedCount > headerPage.totalRowCount)
@@ -161,7 +139,7 @@ std::uint64_t Table::deleteRows(const BoundDelete &del)
     if (deletedCount != 0)
     {
         headerPage.totalRowCount -= deletedCount;
-        bufferManager.markDirty(headerPageContainer.page().header.pageId);
+        header.markDirty();
     }
 
     bufferManager.flushAll();
@@ -188,20 +166,12 @@ void Table::initializeNewTable(
     header.nextUnusedPageId = 2;
     header.totalRowCount = 0;
 
-    std::uint32_t firstDataPageId = header.firstDataPageId;
-    std::uint32_t headerPageId{0};
-    bufferManager.setPage(headerPage, headerPageId);
-    bufferManager.setPage(firstDataPage, firstDataPageId);
+    bufferManager.setPage(headerPage, 0);
+    bufferManager.setPage(firstDataPage, header.firstDataPageId);
     bufferManager.flushAll();
 }
 
 void Table::validateHeaderPage()
 {
-    std::uint32_t headerPageId{0};
-    PageGuard headerPage = bufferManager.getPage(headerPageId, decodeHeaderPage);
-
-    if (headerPage.page().header.pageType != PageType::HeaderPage)
-    {
-        throw std::runtime_error("Page 0 is not a table header page");
-    }
+    bufferManager.getHeaderPage();
 }
