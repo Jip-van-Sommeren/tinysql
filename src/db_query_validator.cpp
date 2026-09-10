@@ -942,7 +942,7 @@ BoundSelect QueryValidator::validateSelect(const SelectStatement &statement)
             }
 
             projections.push_back(BoundSelectItem{
-                .expr = bindExpr(*exprItem->expr, context),
+                .expr = bindExpr(*exprItem->expr, context, true),
                 .outputName = std::move(outputName)});
             continue;
         }
@@ -1483,7 +1483,8 @@ Value evaluateConstantBinary(
 
 std::unique_ptr<BoundExpr> QueryValidator::bindExpr(
     const Expr &expr,
-    const BindContext &context) const
+    const BindContext &context,
+    bool allowAggregates) const
 {
     if (const auto *column =
             dynamic_cast<const ColumnExpr *>(&expr))
@@ -1546,16 +1547,16 @@ std::unique_ptr<BoundExpr> QueryValidator::bindExpr(
         }
         auto category = resolveFunctionCategory(*id);
 
-        if (category == FunctionCategory::Aggregate)
+        if (category == FunctionCategory::Aggregate && !allowAggregates)
         {
             throw std::runtime_error(
-                "Aggregate functions are not supported yet");
+                "Aggregate functions are not allowed in this expression");
         }
 
-        if (functionCall->starArgument)
+        if (functionCall->starArgument && *id != FunctionId::Count)
         {
             throw std::runtime_error(
-                "A scalar function cannot use '*' as an argument");
+                "Only COUNT accepts '*' as an argument");
         }
 
         std::vector<std::unique_ptr<BoundExpr>> boundList;
@@ -1563,12 +1564,41 @@ std::unique_ptr<BoundExpr> QueryValidator::bindExpr(
 
         for (const auto &item : functionCall->arguments)
         {
-            boundList.push_back(bindExpr(*item, context));
+            boundList.push_back(bindExpr(
+                *item,
+                context,
+                allowAggregates && category != FunctionCategory::Aggregate));
         }
 
         DataType resultType;
         switch (*id)
         {
+        case FunctionId::Count:
+            if (functionCall->starArgument ? !boundList.empty() : boundList.size() != 1)
+            {
+                throw std::runtime_error("COUNT requires '*' or exactly one argument");
+            }
+            resultType = DataType::BigInt;
+            break;
+
+        case FunctionId::Sum:
+            if (boundList.size() != 1 ||
+                (!isNumericType(boundList[0]->type()) &&
+                 boundList[0]->type() != DataType::Null))
+            {
+                throw std::runtime_error("SUM requires exactly one numeric argument");
+            }
+            resultType = boundList[0]->type();
+            if (resultType == DataType::Int)
+            {
+                resultType = DataType::BigInt;
+            }
+            else if (resultType == DataType::Float)
+            {
+                resultType = DataType::Double;
+            }
+            break;
+
         case FunctionId::Abs:
             if (boundList.size() != 1 ||
                 !isNumericType(boundList[0]->type()))
@@ -1581,27 +1611,29 @@ std::unique_ptr<BoundExpr> QueryValidator::bindExpr(
 
         default:
             throw std::runtime_error(
-                "Scalar function is not supported yet");
+                "Function is not supported yet: " + functionCall->name);
         }
 
-        return std::make_unique<BoundFunctionCall>(
+        auto boundFunction = std::make_unique<BoundFunctionCall>(
             *id,
             category,
             std::move(boundList),
             resultType);
+        boundFunction->starArgument = functionCall->starArgument;
+        return boundFunction;
     }
 
     if (const auto *isNull = dynamic_cast<const IsNullExpr *>(&expr))
     {
         return std::make_unique<BoundIsNullExpr>(
-            bindExpr(*isNull->operand, context),
+            bindExpr(*isNull->operand, context, allowAggregates),
             isNull->negated);
     }
 
     if (const auto *binary = dynamic_cast<const BinaryExpr *>(&expr))
     {
-        auto leftBound = bindExpr(*binary->left, context);
-        auto rightBound = bindExpr(*binary->right, context);
+        auto leftBound = bindExpr(*binary->left, context, allowAggregates);
+        auto rightBound = bindExpr(*binary->right, context, allowAggregates);
         DataType resultType = resolveBinaryResultType(
             binary->op,
             leftBound->type(),
@@ -1639,7 +1671,8 @@ std::unique_ptr<BoundExpr> QueryValidator::bindExpr(
     {
         auto operand = bindExpr(
             *unary->operand,
-            context);
+            context,
+            allowAggregates);
 
         DataType resultType = resolveUnaryResultType(
             unary->op,

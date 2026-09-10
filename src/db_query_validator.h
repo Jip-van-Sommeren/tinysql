@@ -220,7 +220,8 @@ private:
     Constraint bindConstraintExpr(const ConstraintExpr &expr, BindContext &context);
     std::unique_ptr<BoundExpr> bindExpr(
         const Expr &expr,
-        const BindContext &context) const;
+        const BindContext &context,
+        bool allowAggregates = false) const;
     Column bindColumnDefinition(
         const ColumnDefExpr &colDef,
         std::uint32_t columnIndex);
