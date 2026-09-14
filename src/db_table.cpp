@@ -11,6 +11,7 @@
 #include <utility>
 #include <variant>
 #include <vector>
+#include <unordered_set>
 
 TableCursor::TableCursor(Table &table)
     : table_(&table)
@@ -23,7 +24,8 @@ TableCursor::TableCursor(TableCursor &&other) noexcept
     : table_(std::exchange(other.table_, nullptr)),
       pageId_(std::exchange(other.pageId_, 0)),
       rowIndex_(std::exchange(other.rowIndex_, 0)),
-      currentPage_(std::move(other.currentPage_))
+      currentPage_(std::move(other.currentPage_)),
+      seenPageIds_(std::move(other.seenPageIds_))
 {
     other.currentPage_.reset();
 }
@@ -37,6 +39,7 @@ TableCursor &TableCursor::operator=(TableCursor &&other) noexcept
         table_ = std::exchange(other.table_, nullptr);
         pageId_ = std::exchange(other.pageId_, 0);
         rowIndex_ = std::exchange(other.rowIndex_, 0);
+        seenPageIds_ = std::move(other.seenPageIds_);
     }
     return *this;
 }
@@ -47,6 +50,11 @@ std::optional<Row> TableCursor::next()
     {
         if (!currentPage_)
         {
+            if (!seenPageIds_.insert(pageId_).second)
+            {
+                throw std::runtime_error(
+                    "Detected a cycle at page " + std::to_string(pageId_));
+            }
             currentPage_.emplace(table_->bufferManager.getDataPage(pageId_));
         }
 

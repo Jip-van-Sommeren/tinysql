@@ -8,6 +8,170 @@
 #include <limits>
 #include <stdexcept>
 #include <variant>
+#include <iostream>
+
+// void writePageToFile(
+//     const std::filesystem::path &path,
+//     std::uint32_t pageId,
+//     const RawPage &page)
+// {
+
+//     std::fstream file{openOrCreateFile(path)};
+//     if (!file)
+//     {
+//         throw std::runtime_error("Failed to open file: " + path.string());
+//     }
+
+//     file.seekp(static_cast<std::streamoff>(pageId) * PAGE_SIZE, std::ios::beg);
+
+//     if (!file)
+//     {
+//         throw std::runtime_error(
+//             "Failed to seek to page " + std::to_string(pageId));
+//     }
+
+//     file.write(
+//         reinterpret_cast<const char *>(page.data()),
+//         static_cast<std::streamsize>(page.size()));
+
+//     if (!file)
+//     {
+//         throw std::runtime_error(
+//             "Failed to write page " + std::to_string(pageId));
+//     }
+
+//     file.close();
+//     if (!file)
+//     {
+//         throw std::runtime_error("Failed to close file");
+//     }
+// }
+
+RawPage encodeHeaderPage(const PageHeader &pageHeader, const HeaderPage &headerPage)
+{
+    RawPage rawPage{};
+    PageWriter writer(rawPage);
+
+    PageHeaderWriter pageHeaderWriter(writer);
+    pageHeaderWriter.write(pageHeader);
+
+    writer.seek(PageHeaderLayout::Size);
+
+    HeaderPageWriter headerPageWriter(writer);
+    headerPageWriter.write(headerPage);
+
+    return rawPage;
+}
+
+RawPage encodeDataPage(
+    const PageHeader &pageHeader,
+    const HeaderPage &tableHeader,
+    const std::vector<Row> &rows)
+{
+    RawPage rawPage{};
+    PageWriter writer(rawPage);
+
+    DataPageWriter dataPageWriter(writer, tableHeader);
+    dataPageWriter.write(pageHeader, rows);
+
+    return rawPage;
+}
+
+RawPage encodeDataPage(
+    const PageHeader &pageHeader,
+    const HeaderPage &tableHeader,
+    const DataPage &dataPage)
+{
+    RawPage rawPage{};
+    PageWriter writer(rawPage);
+
+    PageHeader storedHeader = pageHeader;
+    if (dataPage.slots.size() > std::numeric_limits<std::uint16_t>::max())
+    {
+        throw std::runtime_error("Too many slots in data page");
+    }
+    storedHeader.slotCount =
+        static_cast<std::uint16_t>(dataPage.slots.size());
+
+    PageHeaderWriter headerWriter(writer);
+    headerWriter.write(storedHeader);
+
+    SlotWriter slotWriter(writer);
+    for (std::size_t index = 0; index < dataPage.slots.size(); ++index)
+    {
+        slotWriter.writeSlot(
+            static_cast<std::uint16_t>(index),
+            dataPage.slots[index]);
+    }
+
+    std::vector<bool> occupiedSlots(dataPage.slots.size(), false);
+    for (const RowEntry &entry : dataPage.rows)
+    {
+        if (entry.slotIndex >= dataPage.slots.size())
+        {
+            throw std::runtime_error("Row entry references an invalid slot");
+        }
+        if (occupiedSlots[entry.slotIndex])
+        {
+            throw std::runtime_error("Multiple rows reference the same slot");
+        }
+
+        const Slot &slot = dataPage.slots[entry.slotIndex];
+        if (slot.has(SlotFlag::Deleted))
+        {
+            throw std::runtime_error("Active row references a deleted slot");
+        }
+
+        writer.seek(slot.offset);
+        RowWriter rowWriter(writer, tableHeader);
+        rowWriter.writeRow(entry.row.values);
+
+        const std::size_t writtenSize = writer.position() - slot.offset;
+        if (writtenSize != slot.size)
+        {
+            throw std::runtime_error(
+                "Encoded row size does not match its slot size");
+        }
+
+        occupiedSlots[entry.slotIndex] = true;
+    }
+
+    return rawPage;
+}
+
+RawPage encodeDataPage(
+    std::uint32_t pageId,
+    const HeaderPage &tableHeader,
+    const std::vector<Row> &rows)
+{
+    RawPage rawPage{};
+    PageWriter writer(rawPage);
+
+    DataPageWriter dataPageWriter(writer, tableHeader);
+    dataPageWriter.write(pageId, rows);
+
+    return rawPage;
+}
+
+RawPage encodePage(const Page &page)
+{
+    if (page.header.pageType == PageType::HeaderPage)
+    {
+        return encodeHeaderPage(page.header, std::get<HeaderPage>(page.data));
+    }
+
+    throw std::runtime_error("encoding data pages requires table header; use encodeDataPage");
+}
+
+std::size_t encodedSlotSize()
+{
+    return SlotWriter::SlotSize;
+}
+
+std::size_t encodedRowSize(const HeaderPage &tableHeader, const Row &row)
+{
+    return RowWriter::computeSerializedRowSize(tableHeader, row.values);
+}
 
 PageWriter::PageWriter(RawPage &buffer)
     : buffer(buffer) {}
@@ -144,21 +308,19 @@ std::vector<std::byte> ValueSerializer::serializeValue(
         return std::vector<std::byte>(data, data + s.size());
     }
     case DataType::Null:
+    {
+        if (!std::holds_alternative<std::monostate>(value))
         {
-            if (!std::holds_alternative<std::monostate>(value))
-            {
-                throw std::runtime_error("Expected NULL value");
-            }
-
-            return {};
+            throw std::runtime_error("Expected NULL value");
         }
+
+        return {};
+    }
 
     default:
         throw std::runtime_error("Unsupported fixed-width type");
     }
 }
-
-
 
 RowWriter::RowWriter(PageWriter &writer, const HeaderPage &headerPage)
     : writer(writer), headerPage(headerPage) {}
@@ -264,7 +426,7 @@ void RowWriter::writeFixedValue(
     const Value &value)
 {
     std::size_t absoluteOffset = rowStart + fixedAreaStartOffset + fixed.offset;
-    
+
     switch (column.type)
     {
     case DataType::Int:
@@ -339,7 +501,6 @@ void RowWriter::writeFixedValue(
         throw std::runtime_error("Unsupported fixed-width type");
     }
 };
-
 
 void RowWriter::writeVariableValues(const std::vector<Value> &values)
 {
@@ -736,254 +897,128 @@ void HeaderPageWriter::writeConstraint(
 }
 
 void ExpressionSerializer::serialize(
-    const BoundExpr& expression,
-    PageWriter& writer)
+    const BoundExpr &expression,
+    PageWriter &writer)
 {
     writer.writeUnsigned<std::uint8_t>(
         static_cast<std::uint8_t>(expression.kind()));
 
     switch (expression.kind())
     {
-        case BoundExprKind::FunctionCall:
-            throw std::runtime_error(
-                "Stored function expressions are not supported");
+    case BoundExprKind::FunctionCall:
+        throw std::runtime_error(
+            "Stored function expressions are not supported");
 
-        case BoundExprKind::ColumnReference:
+    case BoundExprKind::ColumnReference:
+    {
+        const auto &column =
+            static_cast<const BoundColumnExpr &>(expression);
+
+        writer.writeUnsigned<std::uint32_t>(column.columnIndex);
+        writer.writeUnsigned<std::uint8_t>(
+            static_cast<std::uint8_t>(column.type()));
+        break;
+    }
+
+    case BoundExprKind::Literal:
+    {
+        const auto &literal =
+            static_cast<const BoundLiteralExpr &>(expression);
+
+        writer.writeUnsigned<std::uint8_t>(
+            static_cast<std::uint8_t>(literal.type()));
+
+        switch (literal.type())
         {
-            const auto& column =
-                static_cast<const BoundColumnExpr&>(expression);
-
-            writer.writeUnsigned<std::uint32_t>(column.columnIndex);
-            writer.writeUnsigned<std::uint8_t>(
-                static_cast<std::uint8_t>(column.type()));
+        case DataType::Null:
             break;
-        }
 
-        case BoundExprKind::Literal:
+        case DataType::Int:
+            writer.writeUnsigned<std::uint32_t>(
+                std::bit_cast<std::uint32_t>(
+                    std::get<std::int32_t>(literal.value)));
+            break;
+
+        case DataType::BigInt:
+            writer.writeUnsigned<std::uint64_t>(
+                std::bit_cast<std::uint64_t>(
+                    std::get<std::int64_t>(literal.value)));
+            break;
+
+        case DataType::Double:
+            writer.writeUnsigned<std::uint64_t>(
+                std::bit_cast<std::uint64_t>(
+                    std::get<std::float64_t>(literal.value)));
+            break;
+
+        case DataType::Decimal:
         {
-            const auto& literal =
-                static_cast<const BoundLiteralExpr&>(expression);
-
-            writer.writeUnsigned<std::uint8_t>(
-                static_cast<std::uint8_t>(literal.type()));
-
-            switch (literal.type())
+            const DecimalValue decimal =
+                std::get<DecimalValue>(literal.value);
+            if (decimal.scale > MAX_DECIMAL_SCALE)
             {
-            case DataType::Null:
-                break;
-
-            case DataType::Int:
-                writer.writeUnsigned<std::uint32_t>(
-                    std::bit_cast<std::uint32_t>(
-                        std::get<std::int32_t>(literal.value)));
-                break;
-
-            case DataType::BigInt:
-                writer.writeUnsigned<std::uint64_t>(
-                    std::bit_cast<std::uint64_t>(
-                        std::get<std::int64_t>(literal.value)));
-                break;
-
-            case DataType::Double:
-                writer.writeUnsigned<std::uint64_t>(
-                    std::bit_cast<std::uint64_t>(
-                        std::get<std::float64_t>(literal.value)));
-                break;
-
-            case DataType::Decimal:
-            {
-                const DecimalValue decimal =
-                    std::get<DecimalValue>(literal.value);
-                if (decimal.scale > MAX_DECIMAL_SCALE)
-                {
-                    throw std::runtime_error(
-                        "DECIMAL literal scale exceeds 18 digits");
-                }
-                writer.writeUnsigned<std::uint64_t>(
-                    std::bit_cast<std::uint64_t>(decimal.coefficient));
-                writer.writeUnsigned<std::uint32_t>(decimal.scale);
-                break;
-            }
-
-            case DataType::Boolean:
-                writer.writeUnsigned<std::uint8_t>(
-                    std::get<bool>(literal.value) ? 1u : 0u);
-                break;
-
-            case DataType::Text:
-                writer.writeString(std::get<std::string>(literal.value));
-                break;
-
-            default:
                 throw std::runtime_error(
-                    "Unsupported literal type in stored expression");
+                    "DECIMAL literal scale exceeds 18 digits");
             }
+            writer.writeUnsigned<std::uint64_t>(
+                std::bit_cast<std::uint64_t>(decimal.coefficient));
+            writer.writeUnsigned<std::uint32_t>(decimal.scale);
             break;
         }
 
-        case BoundExprKind::Binary:
-        {
-            const auto& binary =
-                static_cast<const BoundBinaryExpr&>(expression);
-
+        case DataType::Boolean:
             writer.writeUnsigned<std::uint8_t>(
-                static_cast<std::uint8_t>(binary.op));
-            writer.writeUnsigned<std::uint8_t>(
-                static_cast<std::uint8_t>(binary.type()));
-
-            serialize(*binary.left, writer);
-            serialize(*binary.right, writer);
+                std::get<bool>(literal.value) ? 1u : 0u);
             break;
-        }
 
-        case BoundExprKind::Unary:
-        {
-            const auto& unary =
-                static_cast<const BoundUnaryExpr&>(expression);
-
-            writer.writeUnsigned<std::uint8_t>(
-                static_cast<std::uint8_t>(unary.op));
-            writer.writeUnsigned<std::uint8_t>(
-                static_cast<std::uint8_t>(unary.type()));
-
-            serialize(*unary.operand, writer);
+        case DataType::Text:
+            writer.writeString(std::get<std::string>(literal.value));
             break;
-        }
 
-        case BoundExprKind::IsNull:
-        {
-            const auto &isNull =
-                static_cast<const BoundIsNullExpr &>(expression);
-
-            serialize(*isNull.operand, writer);
-            writer.writeUnsigned<std::uint8_t>(isNull.negated ? 1 : 0);
-            break;
-        }
-    }
-}
-
-RawPage encodeHeaderPage(const PageHeader &pageHeader, const HeaderPage &headerPage)
-{
-    RawPage rawPage{};
-    PageWriter writer(rawPage);
-
-    PageHeaderWriter pageHeaderWriter(writer);
-    pageHeaderWriter.write(pageHeader);
-
-    writer.seek(PageHeaderLayout::Size);
-
-    HeaderPageWriter headerPageWriter(writer);
-    headerPageWriter.write(headerPage);
-
-    return rawPage;
-}
-
-RawPage encodeDataPage(
-    const PageHeader &pageHeader,
-    const HeaderPage &tableHeader,
-    const std::vector<Row> &rows)
-{
-    RawPage rawPage{};
-    PageWriter writer(rawPage);
-
-    DataPageWriter dataPageWriter(writer, tableHeader);
-    dataPageWriter.write(pageHeader, rows);
-
-    return rawPage;
-}
-
-RawPage encodeDataPage(
-    const PageHeader &pageHeader,
-    const HeaderPage &tableHeader,
-    const DataPage &dataPage)
-{
-    RawPage rawPage{};
-    PageWriter writer(rawPage);
-
-    PageHeader storedHeader = pageHeader;
-    if (dataPage.slots.size() > std::numeric_limits<std::uint16_t>::max())
-    {
-        throw std::runtime_error("Too many slots in data page");
-    }
-    storedHeader.slotCount =
-        static_cast<std::uint16_t>(dataPage.slots.size());
-
-    PageHeaderWriter headerWriter(writer);
-    headerWriter.write(storedHeader);
-
-    SlotWriter slotWriter(writer);
-    for (std::size_t index = 0; index < dataPage.slots.size(); ++index)
-    {
-        slotWriter.writeSlot(
-            static_cast<std::uint16_t>(index),
-            dataPage.slots[index]);
-    }
-
-    std::vector<bool> occupiedSlots(dataPage.slots.size(), false);
-    for (const RowEntry &entry : dataPage.rows)
-    {
-        if (entry.slotIndex >= dataPage.slots.size())
-        {
-            throw std::runtime_error("Row entry references an invalid slot");
-        }
-        if (occupiedSlots[entry.slotIndex])
-        {
-            throw std::runtime_error("Multiple rows reference the same slot");
-        }
-
-        const Slot &slot = dataPage.slots[entry.slotIndex];
-        if (slot.has(SlotFlag::Deleted))
-        {
-            throw std::runtime_error("Active row references a deleted slot");
-        }
-
-        writer.seek(slot.offset);
-        RowWriter rowWriter(writer, tableHeader);
-        rowWriter.writeRow(entry.row.values);
-
-        const std::size_t writtenSize = writer.position() - slot.offset;
-        if (writtenSize != slot.size)
-        {
+        default:
             throw std::runtime_error(
-                "Encoded row size does not match its slot size");
+                "Unsupported literal type in stored expression");
         }
-
-        occupiedSlots[entry.slotIndex] = true;
+        break;
     }
 
-    return rawPage;
-}
-
-RawPage encodeDataPage(
-    std::uint32_t pageId,
-    const HeaderPage &tableHeader,
-    const std::vector<Row> &rows)
-{
-    RawPage rawPage{};
-    PageWriter writer(rawPage);
-
-    DataPageWriter dataPageWriter(writer, tableHeader);
-    dataPageWriter.write(pageId, rows);
-
-    return rawPage;
-}
-
-RawPage encodePage(const Page &page)
-{
-    if (page.header.pageType == PageType::HeaderPage)
+    case BoundExprKind::Binary:
     {
-        return encodeHeaderPage(page.header, std::get<HeaderPage>(page.data));
+        const auto &binary =
+            static_cast<const BoundBinaryExpr &>(expression);
+
+        writer.writeUnsigned<std::uint8_t>(
+            static_cast<std::uint8_t>(binary.op));
+        writer.writeUnsigned<std::uint8_t>(
+            static_cast<std::uint8_t>(binary.type()));
+
+        serialize(*binary.left, writer);
+        serialize(*binary.right, writer);
+        break;
     }
 
-    throw std::runtime_error("encoding data pages requires table header; use encodeDataPage");
-}
+    case BoundExprKind::Unary:
+    {
+        const auto &unary =
+            static_cast<const BoundUnaryExpr &>(expression);
 
-std::size_t encodedSlotSize()
-{
-    return SlotWriter::SlotSize;
-}
+        writer.writeUnsigned<std::uint8_t>(
+            static_cast<std::uint8_t>(unary.op));
+        writer.writeUnsigned<std::uint8_t>(
+            static_cast<std::uint8_t>(unary.type()));
 
-std::size_t encodedRowSize(const HeaderPage &tableHeader, const Row &row)
-{
-    return RowWriter::computeSerializedRowSize(tableHeader, row.values);
+        serialize(*unary.operand, writer);
+        break;
+    }
+
+    case BoundExprKind::IsNull:
+    {
+        const auto &isNull =
+            static_cast<const BoundIsNullExpr &>(expression);
+
+        serialize(*isNull.operand, writer);
+        writer.writeUnsigned<std::uint8_t>(isNull.negated ? 1 : 0);
+        break;
+    }
+    }
 }

@@ -18,21 +18,6 @@
 #include <variant>
 #include <vector>
 
-namespace
-{
-    std::fstream openOrCreateFile(const std::filesystem::path &path)
-    {
-        if (!std::filesystem::exists(path))
-        {
-            std::ofstream createFile{path, std::ios::binary};
-        }
-
-        return std::fstream{
-            path,
-            std::ios::in | std::ios::out | std::ios::binary};
-    }
-}
-
 PageGuard::PageGuard(
     BufferManager &bufferManager, PageId pageId, Page &page) noexcept
     : bufferManager_(&bufferManager), pageId_(pageId), page_(&page)
@@ -93,7 +78,7 @@ void PageGuard::markDirty()
 }
 
 BufferManager::BufferManager(std::filesystem::path path)
-    : path(std::move(path))
+    : pageFile_(path)
 {
 }
 
@@ -107,7 +92,7 @@ Page &BufferManager::fetchPage(
         return existing->second.page;
     }
 
-    RawPage rawPage = readPageFromFile(path, pageId);
+    RawPage rawPage = pageFile_.readPage(pageId);
     Page decodedPage = reader(rawPage);
 
     auto inserted = pages.emplace(
@@ -240,7 +225,7 @@ void BufferManager::flushPage(PageId pageId)
     }
 
     RawPage encodedPage = encodeCachedPage(frame.page);
-    writePageToFile(pageId, encodedPage);
+    pageFile_.writePage(pageId, encodedPage);
     frame.dirty = false;
 }
 
@@ -250,8 +235,15 @@ void BufferManager::flushAll()
     {
         if (frame.dirty)
         {
-            flushPage(pageId);
+            pageFile_.writePage(pageId, encodeCachedPage(frame.page));
         }
+    }
+
+    pageFile_.flush(); // If this throws, dirty flags remain set.
+
+    for (auto &[pageId, frame] : pages)
+    {
+        frame.dirty = false;
     }
 }
 
@@ -297,23 +289,6 @@ RawPage BufferManager::encodeCachedPage(const Page &page)
     throw std::runtime_error("Unsupported page type while encoding cached page");
 }
 
-void BufferManager::writePageToFile(
-    PageId pageId,
-    const RawPage &pageData)
-{
-    std::fstream file{openOrCreateFile(path)};
-    if (!file)
-    {
-        std::cout << "Failed to open file\n";
-        return;
-    }
-
-    file.seekp(static_cast<std::streamoff>(pageId) * PAGE_SIZE);
-    file.write(
-        reinterpret_cast<const char *>(pageData.data()),
-        static_cast<std::streamsize>(pageData.size()));
-}
-
 void BufferManager::appendRowToExistingDataPage(
     PageGuard &header,
     PageGuard &data,
@@ -328,10 +303,18 @@ void BufferManager::appendRowToExistingDataPage(
     {
         throw std::runtime_error("Row is too large for uint16_t slot size");
     }
+    if (encodedSize > PAGE_SIZE)
+    {
+        throw std::runtime_error("Row is too large for page size");
+    }
 
     const std::uint16_t rowSize = static_cast<std::uint16_t>(encodedSize);
     const std::size_t slotSize = encodedSlotSize();
 
+    if (dataPage.slots.size() > std::numeric_limits<std::uint16_t>::max())
+    {
+        throw std::runtime_error("Data page has too many slots");
+    }
     dataPageHeader.slotCount =
         static_cast<std::uint16_t>(dataPage.slots.size());
 
@@ -403,6 +386,11 @@ PageId BufferManager::createDataPage(PageGuard &header)
 
     if (newPageId == 0)
     {
+        if (previousPageId > std::numeric_limits<PageId>::max() - 1)
+        {
+            throw std::runtime_error("No more page IDs available");
+        }
+
         newPageId = previousPageId + 1;
     }
 
@@ -418,6 +406,10 @@ PageId BufferManager::createDataPage(PageGuard &header)
     }
 
     Page newDataPage = makeEmptyDataPage(newPageId);
+    if (newDataPage.header.pageType != PageType::DataPage)
+    {
+        throw std::runtime_error("New page is not a data page");
+    }
 
     headerPage.lastDataPageId = newPageId;
     headerPage.nextUnusedPageId = newPageId + 1;

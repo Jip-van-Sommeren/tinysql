@@ -302,13 +302,41 @@ namespace
         }
     }
 
-    bool compareValues(
+    SqlTruth asSqlTruth(const Value &value)
+    {
+        if (std::holds_alternative<std::monostate>(value))
+        {
+            return SqlTruth::Unknown;
+        }
+        if (const auto *boolean = std::get_if<bool>(&value))
+        {
+            return *boolean ? SqlTruth::True : SqlTruth::False;
+        }
+        throw std::runtime_error("Expected a boolean or NULL in a logical expression");
+    }
+
+    Value truthAsValue(SqlTruth truth)
+    {
+        // Boolean expressions use NULL to represent UNKNOWN in a result row.
+        switch (truth)
+        {
+        case SqlTruth::True:
+            return true;
+        case SqlTruth::False:
+            return false;
+        case SqlTruth::Unknown:
+            return std::monostate{};
+        }
+        throw std::runtime_error("Invalid SQL truth value");
+    }
+
+    SqlTruth compareValues(
         BinaryOperator op,
         const Value &left,
         const Value &right)
     {
         return std::visit(
-            [op](const auto &lhs, const auto &rhs) -> bool
+            [op](const auto &lhs, const auto &rhs) -> SqlTruth
             {
                 using L = std::decay_t<decltype(lhs)>;
                 using R = std::decay_t<decltype(rhs)>;
@@ -316,17 +344,18 @@ namespace
                 if constexpr (std::is_same_v<L, std::monostate> ||
                               std::is_same_v<R, std::monostate>)
                 {
-                    throw std::runtime_error("Cannot directly compare NULL");
+                    return SqlTruth::Unknown;
                 }
                 else if constexpr (!std::is_same_v<L, R>)
                 {
                     if constexpr (isExactNumericValue<L> &&
                                   isExactNumericValue<R>)
                     {
-                        return applyComparison(
+                        const bool result = applyComparison(
                             op,
                             exactAsDecimal(lhs),
                             exactAsDecimal(rhs));
+                        return result ? SqlTruth::True : SqlTruth::False;
                     }
                     else if constexpr (isNumericValue<L> && isNumericValue<R>)
                     {
@@ -342,7 +371,9 @@ namespace
                                 return static_cast<std::float64_t>(value);
                             }
                         };
-                        return applyComparison(op, toFloat(lhs), toFloat(rhs));
+                        return applyComparison(op, toFloat(lhs), toFloat(rhs))
+                                   ? SqlTruth::True
+                                   : SqlTruth::False;
                     }
                     else
                     {
@@ -352,21 +383,13 @@ namespace
                 }
                 else
                 {
-                    return applyComparison(op, lhs, rhs);
+                    return applyComparison(op, lhs, rhs)
+                               ? SqlTruth::True
+                               : SqlTruth::False;
                 }
             },
             left,
             right);
-    }
-
-    bool asBoolean(const Value &value, const char *context)
-    {
-        if (const auto *boolean = std::get_if<bool>(&value))
-        {
-            return *boolean;
-        }
-        throw std::runtime_error(
-            std::string{context} + " expression did not produce a boolean");
     }
 
     Value evaluateAbs(const Value &value)
@@ -428,15 +451,21 @@ namespace
     Value evaluateUnary(const BoundUnaryExpr &unary, const Row &row)
     {
         Value operand = evaluateValue(*unary.operand, row);
+        if (unary.op == UnaryOperator::Not)
+        {
+            const SqlTruth truth = asSqlTruth(operand);
+            if (truth == SqlTruth::Unknown)
+            {
+                return truthAsValue(SqlTruth::Unknown);
+            }
+            return truth == SqlTruth::False;
+        }
+
         if (std::holds_alternative<std::monostate>(operand))
         {
             return std::monostate{};
         }
 
-        if (unary.op == UnaryOperator::Not)
-        {
-            return !asBoolean(operand, "NOT");
-        }
         if (unary.op == UnaryOperator::Positive)
         {
             return operand;
@@ -519,23 +548,37 @@ Value evaluateValue(const BoundExpr &expr, const Row &row)
 
         if (binary.op == BinaryOperator::And)
         {
-            if (!asBoolean(left, "AND"))
+            const SqlTruth lhs = asSqlTruth(left);
+            if (lhs == SqlTruth::False)
             {
                 return false;
             }
-            return asBoolean(
-                evaluateValue(*binary.right, row),
-                "AND");
+            const SqlTruth rhs = asSqlTruth(evaluateValue(*binary.right, row));
+            if (rhs == SqlTruth::False)
+            {
+                return false;
+            }
+            return truthAsValue(
+                lhs == SqlTruth::Unknown || rhs == SqlTruth::Unknown
+                    ? SqlTruth::Unknown
+                    : SqlTruth::True);
         }
         if (binary.op == BinaryOperator::Or)
         {
-            if (asBoolean(left, "OR"))
+            const SqlTruth lhs = asSqlTruth(left);
+            if (lhs == SqlTruth::True)
             {
                 return true;
             }
-            return asBoolean(
-                evaluateValue(*binary.right, row),
-                "OR");
+            const SqlTruth rhs = asSqlTruth(evaluateValue(*binary.right, row));
+            if (rhs == SqlTruth::True)
+            {
+                return true;
+            }
+            return truthAsValue(
+                lhs == SqlTruth::Unknown || rhs == SqlTruth::Unknown
+                    ? SqlTruth::Unknown
+                    : SqlTruth::False);
         }
 
         Value right = evaluateValue(*binary.right, row);
@@ -557,7 +600,7 @@ Value evaluateValue(const BoundExpr &expr, const Row &row)
         case BinaryOperator::Ge:
         case BinaryOperator::Lt:
         case BinaryOperator::Le:
-            return compareValues(binary.op, left, right);
+            return truthAsValue(compareValues(binary.op, left, right));
 
         case BinaryOperator::And:
         case BinaryOperator::Or:
@@ -583,5 +626,5 @@ Value evaluateValue(const BoundExpr &expr, const Row &row)
 
 bool evaluatePredicate(const BoundExpr &expr, const Row &row)
 {
-    return asBoolean(evaluateValue(expr, row), "WHERE");
+    return asSqlTruth(evaluateValue(expr, row)) == SqlTruth::True;
 }

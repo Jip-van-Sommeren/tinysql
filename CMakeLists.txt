@@ -40,6 +40,7 @@ add_library(db_core
     src/db_storage_engine.cpp
     src/db_table.cpp
     src/db_write.cpp
+    src/db_page_file.cpp
 )
 db_configure_target(db_core PUBLIC)
 target_link_libraries(db_core PUBLIC db_sql)
@@ -62,6 +63,16 @@ if(BUILD_TESTING)
     db_configure_target(db_decimal_test PRIVATE)
     target_link_libraries(db_decimal_test PRIVATE db_core)
     add_test(NAME db_decimal_test COMMAND db_decimal_test)
+
+    add_executable(db_expression_evaluator_test tests/db_expression_evaluator_test.cpp)
+    db_configure_target(db_expression_evaluator_test PRIVATE)
+    target_link_libraries(db_expression_evaluator_test PRIVATE db_core)
+    add_test(NAME db_expression_evaluator_test COMMAND db_expression_evaluator_test)
+
+    add_executable(db_query_validator_test tests/db_query_validator_test.cpp)
+    db_configure_target(db_query_validator_test PRIVATE)
+    target_link_libraries(db_query_validator_test PRIVATE db_core)
+    add_test(NAME db_query_validator_test COMMAND db_query_validator_test)
 
     add_executable(db_select_executor_test tests/db_select_executor_test.cpp)
     db_configure_target(db_select_executor_test PRIVATE)

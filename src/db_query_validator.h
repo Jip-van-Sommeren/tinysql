@@ -17,8 +17,6 @@
 
 using TableId = std::uint32_t;
 
-
-
 struct BoundNamedTableRef
 {
     std::string tableName;
@@ -81,6 +79,7 @@ struct BindContext
 {
     std::string tableName;
     std::vector<Column> columns;
+    std::vector<Constraint> constraints;
 
     Column &resolveColumn(std::string_view name)
     {
@@ -147,6 +146,63 @@ struct BindContext
 
         return *it;
     }
+
+    const Constraint &resolveConstraint(std::string_view name) const
+    {
+        auto it = std::find_if(
+            constraints.begin(),
+            constraints.end(),
+            [&](const Constraint &constraint)
+            {
+                return std::visit(
+                    [&](const auto &c)
+                    {
+                        return c.constraintName == name;
+                    },
+                    constraint);
+            });
+
+        if (it == constraints.end())
+        {
+            throw std::runtime_error(
+                std::format(
+                    "Unknown constraint '{}.{}'",
+                    tableName,
+                    name));
+        }
+
+        return *it;
+    }
+
+    const BoundDefaultConstraintExpr *findDefaultConstraint(ColumnId columnId) const
+    {
+        for (const Constraint &constraint : constraints)
+        {
+            const auto *defaultConstraint =
+                std::get_if<BoundDefaultConstraintExpr>(&constraint);
+            if (defaultConstraint && defaultConstraint->columnId == columnId)
+            {
+                return defaultConstraint;
+            }
+        }
+        return nullptr;
+    }
+
+    bool hasDefaultConstraint(ColumnId columnId) const
+    {
+        return findDefaultConstraint(columnId) != nullptr;
+    }
+
+    const BoundDefaultConstraintExpr &getDefaultConstraint(ColumnId columnId) const
+    {
+        const auto *constraint = findDefaultConstraint(columnId);
+        if (!constraint)
+        {
+            throw std::runtime_error("No default constraint found for column");
+        }
+
+        return *constraint;
+    }
 };
 
 class Catalog
@@ -191,7 +247,8 @@ public:
         HeaderPage schema = getTableHeader(tableName);
         return BindContext{
             .tableName = tableName,
-            .columns = std::move(schema.columns)};
+            .columns = std::move(schema.columns),
+            .constraints = std::move(schema.constraints)};
     }
 
 private:
@@ -231,6 +288,11 @@ private:
 
     Value bindLiteralValue(
         const Expr &expr,
+        const BindContext &context,
+        const Column &targetColumn) const;
+
+    Value convertForColumn(
+        const Value &value,
         const Column &targetColumn) const;
 
     DataType binaryResultType(

@@ -9,6 +9,7 @@
 #include <utility>
 #include <variant>
 #include <vector>
+#include <unordered_set>
 
 #ifdef _MSC_VER
 #include "msvc_stdfloat.hpp"
@@ -23,6 +24,13 @@ static_assert(sizeof(std::float32_t) == 4);
 #endif
 
 using ColumnId = std::uint32_t;
+
+enum class SqlTruth
+{
+    True,
+    False,
+    Unknown
+};
 
 enum class FunctionId : std::uint8_t
 {
@@ -128,8 +136,6 @@ enum class BoundExprKind : std::uint8_t
     IsNull
 };
 
-
-
 struct BoundExpr
 {
     explicit BoundExpr(BoundExprKind kind, DataType type)
@@ -154,9 +160,6 @@ private:
     BoundExprKind kind_;
     DataType type_;
 };
-
-
-
 
 struct BoundFunctionCall final : BoundExpr
 {
@@ -192,7 +195,7 @@ struct BoundFunctionCall final : BoundExpr
     FunctionCategory category;
     std::vector<std::unique_ptr<BoundExpr>> arguments;
     bool starArgument = false; // Indicates if the function call has a star argument (e.g., COUNT(*))
-};  
+};
 
 struct BoundBinaryExpr final : BoundExpr
 {

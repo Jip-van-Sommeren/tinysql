@@ -675,7 +675,7 @@ std::unique_ptr<InsertStatement> Parser::parseInsertStatement()
     {
         // expect(TokenType::LeftParen);
         // std::vector<std::unique_ptr<Expr>> values;
-        
+
         auto values = parseExpressionList(columns.size());
         valuesList.push_back(std::move(values));
         expect(TokenType::RightParen);
@@ -1243,6 +1243,12 @@ UnaryOperator Parser::parseUnaryOp()
 
 std::unique_ptr<Expr> Parser::parsePrimary()
 {
+    if (match(TokenType::LeftParen))
+    {
+        auto expr = parseExpression();
+        expect(TokenType::RightParen);
+        return expr;
+    }
     if (check(TokenType::Identifier))
     {
         return parseIdentifierExpr();
@@ -1294,6 +1300,7 @@ std::unique_ptr<Expr> Parser::parsePrimary()
 
 std::unique_ptr<Expr> Parser::parseExpression()
 {
+
     return parseOr();
 }
 
@@ -1315,11 +1322,11 @@ std::unique_ptr<Expr> Parser::parseOr()
 
 std::unique_ptr<Expr> Parser::parseAnd()
 {
-    auto left = parseComparison();
+    auto left = parseNot();
 
     while (matchKeyword("AND"))
     {
-        auto right = parseComparison();
+        auto right = parseNot();
         left = std::make_unique<BinaryExpr>(
             BinaryOperator::And,
             std::move(left),

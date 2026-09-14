@@ -1,5 +1,6 @@
 #include "db_query_validator.h"
 #include "db_decimal.h"
+#include "db_expression_evaluator.h"
 
 #include <cmath>
 #include <format>
@@ -26,18 +27,17 @@ namespace
         throw std::runtime_error("Only single-table queries are supported");
     }
 
-
-
-    bool iequals(std::string_view a, std::string_view b) {
-        if (a.size() != b.size()) return false;
-        return std::equal(a.begin(), a.end(), b.begin(), [](char c1, char c2) {
-            return std::tolower(static_cast<unsigned char>(c1)) == 
-                std::tolower(static_cast<unsigned char>(c2));
-        });
+    bool iequals(std::string_view a, std::string_view b)
+    {
+        if (a.size() != b.size())
+            return false;
+        return std::equal(a.begin(), a.end(), b.begin(), [](char c1, char c2)
+                          { return std::tolower(static_cast<unsigned char>(c1)) ==
+                                   std::tolower(static_cast<unsigned char>(c2)); });
     }
 
     std::optional<FunctionId> resolveFunctionName(
-    std::string_view name)
+        std::string_view name)
     {
         if (iequals(name, "COUNT"))
             return FunctionId::Count;
@@ -496,7 +496,8 @@ namespace
             const std::string operatorText =
                 unary->op == UnaryOperator::Not
                     ? "NOT "
-                    : unary->op == UnaryOperator::Negate ? "-" : "+";
+                : unary->op == UnaryOperator::Negate ? "-"
+                                                     : "+";
             return operatorText + formatExpression(*unary->operand, 80);
         }
 
@@ -543,6 +544,18 @@ namespace
             return containsColumnReference(*unary->operand);
         }
 
+        if (const auto *function = dynamic_cast<const BoundFunctionCall *>(&expr))
+        {
+            return std::any_of(
+                function->arguments.begin(), function->arguments.end(),
+                [](const auto &argument) { return containsColumnReference(*argument); });
+        }
+
+        if (const auto *isNull = dynamic_cast<const BoundIsNullExpr *>(&expr))
+        {
+            return containsColumnReference(*isNull->operand);
+        }
+
         return false;
     }
 
@@ -554,35 +567,15 @@ namespace
                op == BinaryOperator::Divide;
     }
 
-    DecimalValue numberToDecimal(const NumberValue &number)
+    std::int64_t valueToInt64Exact(const Value &value)
     {
         return std::visit(
-            [](const auto &value) -> DecimalValue
+            [](const auto &inner) -> std::int64_t
             {
-                using T = std::decay_t<decltype(value)>;
-                if constexpr (std::is_same_v<T, DecimalLiteral>)
+                using T = std::decay_t<decltype(inner)>;
+                if constexpr (std::is_same_v<T, DecimalValue>)
                 {
-                    return parseDecimalLiteral(value.text);
-                }
-                else
-                {
-                    return decimalFromInt64(
-                        static_cast<std::int64_t>(value));
-                }
-            },
-            number);
-    }
-
-    std::int64_t numberToInt64Exact(const NumberValue &number)
-    {
-        return std::visit(
-            [](const auto &value) -> std::int64_t
-            {
-                using T = std::decay_t<decltype(value)>;
-                if constexpr (std::is_same_v<T, DecimalLiteral>)
-                {
-                    const auto converted =
-                        decimalToInt64Exact(parseDecimalLiteral(value.text));
+                    const auto converted = decimalToInt64Exact(inner);
                     if (!converted)
                     {
                         throw std::runtime_error(
@@ -590,73 +583,46 @@ namespace
                     }
                     return *converted;
                 }
+                else if constexpr (std::is_same_v<T, std::int32_t> ||
+                                   std::is_same_v<T, std::int64_t>)
+                {
+                    return inner;
+                }
+                else if constexpr (std::is_same_v<T, std::float32_t> ||
+                                   std::is_same_v<T, std::float64_t>)
+                {
+                    const long double number = static_cast<long double>(inner);
+                    // Use an exclusive upper bound: INT64_MAX may round to 2^63.
+                    const long double limit = std::ldexp(1.0L, 63);
+                    if (!std::isfinite(number) || number < -limit || number >= limit)
+                    {
+                        throw std::overflow_error("Integer value is out of range");
+                    }
+                    if (std::trunc(number) != number)
+                    {
+                        throw std::runtime_error("Expected an integer numeric value");
+                    }
+                    return static_cast<std::int64_t>(number);
+                }
                 else
                 {
-                    return static_cast<std::int64_t>(value);
+                    throw std::runtime_error("Expected numeric value");
                 }
             },
-            number);
+            value);
     }
 
-    std::float64_t numberToFloat64(const NumberValue &number)
+    bool isNumericLiteral(const Expr &expr)
     {
-        return std::visit(
-            [](const auto &value) -> std::float64_t
-            {
-                using T = std::decay_t<decltype(value)>;
-                if constexpr (std::is_same_v<T, DecimalLiteral>)
-                {
-                    return decimalToFloat64(
-                        parseDecimalLiteral(value.text));
-                }
-                else
-                {
-                    return static_cast<std::float64_t>(value);
-                }
-            },
-            number);
-    }
-
-    std::optional<NumberValue> numberFromExpr(const Expr &expr)
-    {
-        if (const auto *number = dynamic_cast<const NumberExpr *>(&expr))
+        if (dynamic_cast<const NumberExpr *>(&expr))
         {
-            return number->value;
+            return true;
         }
 
         const auto *unary = dynamic_cast<const UnaryExpr *>(&expr);
-        if (!unary || unary->op == UnaryOperator::Not)
-        {
-            return std::nullopt;
-        }
-
-        std::optional<NumberValue> operand = numberFromExpr(*unary->operand);
-        if (!operand || unary->op == UnaryOperator::Positive)
-        {
-            return operand;
-        }
-
-        return std::visit(
-            [](const auto &value) -> NumberValue
-            {
-                using T = std::decay_t<decltype(value)>;
-                if constexpr (std::is_same_v<T, DecimalLiteral>)
-                {
-                    return DecimalLiteral{
-                        .text = decimalToString(
-                            negateDecimal(parseDecimalLiteral(value.text)))};
-                }
-                else
-                {
-                    if (value == std::numeric_limits<T>::min())
-                    {
-                        throw std::overflow_error(
-                            "Numeric literal negation overflow");
-                    }
-                    return static_cast<T>(-value);
-                }
-            },
-            *operand);
+        return unary &&
+               (unary->op == UnaryOperator::Positive || unary->op == UnaryOperator::Negate) &&
+               isNumericLiteral(*unary->operand);
     }
 
     DataType numberDataType(const NumberValue &number)
@@ -731,6 +697,10 @@ namespace
 
     std::float64_t valueToFloat64(const Value &value)
     {
+        if (const auto *floating = std::get_if<std::float32_t>(&value))
+        {
+            return static_cast<std::float64_t>(*floating);
+        }
         if (const auto *floating = std::get_if<std::float64_t>(&value))
         {
             return *floating;
@@ -988,16 +958,18 @@ BoundCreateTable QueryValidator::bindCreateTable(
 
     BindContext context{
         .tableName = result.tableName,
-        .columns = result.columns};
+        .columns = std::move(result.columns),
+        .constraints = {}};
 
     // Second pass: bind constraints.
     for (const auto &constraint : statement.constraints)
     {
-        result.constraints.push_back(
+        context.constraints.push_back(
             bindConstraintExpr(*constraint, context));
     }
 
     result.columns = std::move(context.columns);
+    result.constraints = std::move(context.constraints);
 
     return result;
 }
@@ -1013,7 +985,7 @@ Constraint QueryValidator::bindConstraintExpr(
     case ConstraintType::NotNull:
     {
         const auto &notNullExpr =
-            dynamic_cast<const NotNullConstraintExpr &>(expr);
+            static_cast<const NotNullConstraintExpr &>(expr);
         Column &column = context.resolveColumn(notNullExpr.columnName);
         column.nullable = false;
         constraintName = expr.constraintName.value_or(
@@ -1027,7 +999,7 @@ Constraint QueryValidator::bindConstraintExpr(
     case ConstraintType::Null:
     {
         const auto &nullExpr =
-            dynamic_cast<const NullConstraintExpr &>(expr);
+            static_cast<const NullConstraintExpr &>(expr);
         Column &column = context.resolveColumn(nullExpr.columnName);
         column.nullable = true;
         constraintName = expr.constraintName.value_or(
@@ -1044,9 +1016,13 @@ Constraint QueryValidator::bindConstraintExpr(
     case ConstraintType::Default:
     {
         const auto &defaultExpr =
-            dynamic_cast<const DefaultConstraintExpr &>(expr);
+            static_cast<const DefaultConstraintExpr &>(expr);
 
         Column &column = context.resolveColumn(defaultExpr.columnName);
+        if (context.hasDefaultConstraint(column.columnIndex))
+        {
+            throw std::runtime_error("Multiple DEFAULT constraints for column: " + column.name);
+        }
         constraintName = expr.constraintName.value_or(
             std::format("{}_{}", constraintTypeToString(defaultExpr.constraintType), defaultExpr.columnName)); // Use a format for the constraint name if not provided
 
@@ -1194,7 +1170,7 @@ Constraint QueryValidator::bindConstraintExpr(
     case ConstraintType::Check:
     {
         const auto &checkExpr =
-            dynamic_cast<const CheckConstraintExpr &>(expr);
+            static_cast<const CheckConstraintExpr &>(expr);
         auto condition = bindExpr(*checkExpr.condition, context);
 
         if (condition->type() != DataType::Boolean)
@@ -1224,6 +1200,7 @@ BoundInsert QueryValidator::validateInsert(const InsertStatement &statement)
     BindContext context = catalog.createBindContext(statement.tableName);
 
     std::vector<const Column *> targetColumns;
+    std::vector<bool> suppliedColumns(context.columns.size(), false);
     targetColumns.reserve(
         statement.columns.empty()
             ? context.columns.size()
@@ -1234,13 +1211,20 @@ BoundInsert QueryValidator::validateInsert(const InsertStatement &statement)
         for (const Column &column : context.columns)
         {
             targetColumns.push_back(&column);
+            suppliedColumns[column.columnIndex] = true;
         }
     }
     else
     {
         for (const std::string &columnName : statement.columns)
         {
-            targetColumns.push_back(&context.resolveColumn(columnName));
+            const Column &column = context.resolveColumn(columnName);
+            if (suppliedColumns[column.columnIndex])
+            {
+                throw std::runtime_error("Duplicate INSERT column: " + column.name);
+            }
+            targetColumns.push_back(&column);
+            suppliedColumns[column.columnIndex] = true;
         }
     }
     std::vector<Row> rows;
@@ -1260,11 +1244,22 @@ BoundInsert QueryValidator::validateInsert(const InsertStatement &statement)
         {
             const Column &column = *targetColumns[i];
             const Expr &expr = *rowValues[i];
-            row.values[column.columnIndex] = bindLiteralValue(expr, column);
+            row.values[column.columnIndex] = bindLiteralValue(expr, context, column);
         }
 
         for (const Column &column : context.columns)
         {
+            if (!suppliedColumns[column.columnIndex])
+            {
+                if (const auto *defaultConstraint =
+                        context.findDefaultConstraint(column.columnIndex))
+                {
+                    // Defaults are already bound and cannot reference a row.
+                    const Value value = evaluateValue(*defaultConstraint->value, Row{});
+                    row.values[column.columnIndex] = convertForColumn(value, column);
+                }
+            }
+
             if (!column.nullable &&
                 std::holds_alternative<std::monostate>(row.values[column.columnIndex]))
             {
@@ -1282,9 +1277,32 @@ BoundInsert QueryValidator::validateInsert(const InsertStatement &statement)
 
 Value QueryValidator::bindLiteralValue(
     const Expr &expr,
+    const BindContext &context,
     const Column &targetColumn) const
 {
-    if (dynamic_cast<const NullExpr *>(&expr))
+    if (expr.kind() == ExprKind::FunctionCall)
+    {
+        throw std::runtime_error(
+            "Function calls are not allowed in INSERT values");
+    }
+
+    if (!isNumericLiteral(expr) &&
+        !dynamic_cast<const StringExpr *>(&expr) &&
+        !dynamic_cast<const BooleanExpr *>(&expr) &&
+        !dynamic_cast<const NullExpr *>(&expr))
+    {
+        throw std::runtime_error("INSERT values must be literals or signed numeric literals");
+    }
+
+    const auto bound = bindExpr(expr, context);
+    return convertForColumn(evaluateValue(*bound, Row{}), targetColumn);
+}
+
+Value QueryValidator::convertForColumn(
+    const Value &value,
+    const Column &targetColumn) const
+{
+    if (std::holds_alternative<std::monostate>(value))
     {
         if (!targetColumn.nullable)
         {
@@ -1295,64 +1313,54 @@ Value QueryValidator::bindLiteralValue(
         return std::monostate{};
     }
 
-    const std::optional<NumberValue> number = numberFromExpr(expr);
-
     switch (targetColumn.type)
     {
     case DataType::Int:
     {
-        if (!number)
-        {
-            throw std::runtime_error(
-                "Expected numeric value for column: " + targetColumn.name);
-        }
-
-        const std::int64_t value = numberToInt64Exact(*number);
-        if (value < std::numeric_limits<std::int32_t>::min() ||
-            value > std::numeric_limits<std::int32_t>::max())
+        const std::int64_t integer = valueToInt64Exact(value);
+        if (integer < std::numeric_limits<std::int32_t>::min() ||
+            integer > std::numeric_limits<std::int32_t>::max())
         {
             throw std::runtime_error(
                 "Integer value is out of range for column: " +
                 targetColumn.name);
         }
 
-        return static_cast<std::int32_t>(value);
+        return static_cast<std::int32_t>(integer);
     }
 
     case DataType::BigInt:
     {
-        if (!number)
-        {
-            throw std::runtime_error(
-                "Expected numeric value for column: " + targetColumn.name);
-        }
-        return numberToInt64Exact(*number);
+        return valueToInt64Exact(value);
     }
 
     case DataType::Decimal:
     {
-        if (!number)
-        {
-            throw std::runtime_error(
-                "Expected numeric value for column: " + targetColumn.name);
-        }
-        return numberToDecimal(*number);
+        return valueToDecimal(value);
     }
 
     case DataType::Double:
     case DataType::Float:
     {
-        if (!number)
+        const std::float64_t floating = valueToFloat64(value);
+        if (!std::isfinite(floating))
         {
-            throw std::runtime_error(
-                "Expected numeric value for column: " + targetColumn.name);
+            throw std::overflow_error("Floating-point value is out of range for column: " + targetColumn.name);
         }
-        return numberToFloat64(*number);
+        if (targetColumn.type == DataType::Float)
+        {
+            if (std::abs(floating) > std::numeric_limits<std::float32_t>::max())
+            {
+                throw std::overflow_error("FLOAT value is out of range for column: " + targetColumn.name);
+            }
+            return static_cast<std::float32_t>(floating);
+        }
+        return floating;
     }
 
     case DataType::Text:
     {
-        const auto *string = dynamic_cast<const StringExpr *>(&expr);
+        const auto *string = std::get_if<std::string>(&value);
 
         if (!string)
         {
@@ -1360,7 +1368,7 @@ Value QueryValidator::bindLiteralValue(
                 "Expected string value for column: " + targetColumn.name);
         }
 
-        return string->value;
+        return *string;
     }
 
     case DataType::Null:
@@ -1368,13 +1376,13 @@ Value QueryValidator::bindLiteralValue(
 
     case DataType::Boolean:
     {
-        const auto *boolExpr = dynamic_cast<const BooleanExpr *>(&expr);
-        if (!boolExpr)
+        const auto *boolean = std::get_if<bool>(&value);
+        if (!boolean)
         {
             throw std::runtime_error(
                 "Expected boolean value for column: " + targetColumn.name);
         }
-        return boolExpr->value;
+        return *boolean;
     }
 
     default:
@@ -1525,18 +1533,12 @@ std::unique_ptr<BoundExpr> QueryValidator::bindExpr(
             DataType::Boolean);
     }
 
-
-
     if (dynamic_cast<const NullExpr *>(&expr))
     {
         return std::make_unique<BoundLiteralExpr>(
             Value{std::monostate{}},
             DataType::Null);
     }
-
-
-
-
 
     if (const auto *functionCall = dynamic_cast<const FunctionCallExpr *>(&expr))
     {

@@ -55,7 +55,6 @@ public:
     static std::vector<std::byte> serializeValue(
         DataType type,
         const Value &value);
-
 };
 
 class RowWriter
@@ -180,8 +179,8 @@ class ExpressionSerializer
 {
 public:
     static void serialize(
-        const BoundExpr& expression,
-        PageWriter& writer);
+        const BoundExpr &expression,
+        PageWriter &writer);
 };
 
 RawPage encodeHeaderPage(const PageHeader &pageHeader, const HeaderPage &headerPage);
@@ -201,3 +200,8 @@ RawPage encodePage(const Page &page);
 
 std::size_t encodedSlotSize();
 std::size_t encodedRowSize(const HeaderPage &tableHeader, const Row &row);
+
+void writePageToFile(
+    const std::filesystem::path &path,
+    std::uint32_t pageId,
+    const RawPage &page);

@@ -8,6 +8,7 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include <unordered_set>
 
 struct BoundInsert;
 struct BoundDelete;
@@ -34,6 +35,7 @@ private:
     PageId pageId_;
     std::size_t rowIndex_ = 0;
     std::optional<PageGuard> currentPage_;
+    std::unordered_set<std::uint32_t> seenPageIds_;
 };
 
 class Table

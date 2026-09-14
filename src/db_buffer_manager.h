@@ -1,6 +1,7 @@
 #pragma once
 
 #include "db_storage.h"
+#include "db_page_file.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -74,7 +75,7 @@ public:
 private:
     friend class PageGuard;
 
-    std::filesystem::path path;
+    PageFile pageFile_;
     std::unordered_map<PageId, PageFrame> pages;
 
     Page &fetchPage(PageId pageId, const PageReader &reader);
@@ -83,9 +84,7 @@ private:
     void markDirty(PageId pageId);
 
     RawPage encodeCachedPage(const Page &page);
-    void writePageToFile(
-        PageId pageId,
-        const RawPage &pageData);
+
     void appendRowToExistingDataPage(
         PageGuard &headerPage,
         PageGuard &dataPage,
