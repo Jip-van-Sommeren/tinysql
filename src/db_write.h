@@ -9,6 +9,46 @@
 #include <type_traits>
 #include <vector>
 
+
+class ByteWriter
+{
+public:
+    explicit ByteWriter(std::size_t size)
+        : buffer(size)
+    {
+    }
+
+    std::size_t position() const noexcept { return pos; }
+    std::size_t size() const noexcept { return buffer.size(); }
+
+    const std::vector<std::byte>& bytes() const noexcept
+    {
+        return buffer;
+    }
+
+    void seek(std::size_t newPos);
+    template <typename T>
+    void writeUnsigned(T value);
+
+    template <typename T>
+    void writeUnsignedAt(std::size_t offset, T value);
+
+    void writeBytes(const void* data, std::size_t count);
+
+    void writeBytesAt(std::size_t offset,
+                      const void* data,
+                      std::size_t count);
+    void writeString(const std::string& value);
+
+private:
+    std::vector<std::byte> buffer;
+    std::size_t pos = 0;
+
+    void ensureRange(std::size_t offset, std::size_t count) const;
+};
+
+
+
 class PageWriter
 {
 public:

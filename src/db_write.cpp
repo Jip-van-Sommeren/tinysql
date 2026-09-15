@@ -10,7 +10,81 @@
 #include <variant>
 #include <iostream>
 
-// void writePageToFile(
+void ByteWriter::seek(std::size_t newPos)
+{
+    ensureRange(newPos, 0);
+    pos = newPos;
+}
+
+template <typename T>
+void ByteWriter::writeUnsigned(T value)
+{
+    writeUnsignedAt(pos, value);
+    pos += sizeof(T);
+}
+
+template <typename T>
+void ByteWriter::writeUnsignedAt(std::size_t offset, T value)
+{
+    static_assert(CHAR_BIT == 8,
+                    "This format requires 8-bit bytes");
+
+    static_assert(
+        std::is_integral_v<T> &&
+        std::is_unsigned_v<T> &&
+        !std::is_same_v<std::remove_cv_t<T>, bool>,
+        "T must be an unsigned integer type other than bool"
+    );
+
+    ensureRange(offset, sizeof(T));
+
+    // Write directly at the offset without changing pos.
+    for (std::size_t i = 0; i < sizeof(T); ++i)
+    {
+        buffer[offset + i] =
+            static_cast<std::byte>((value >> (i * 8)) & 0xFFu);
+    }
+}
+
+void ByteWriter::writeBytes(const void* data, std::size_t count)
+{
+    writeBytesAt(pos, data, count);
+    pos += count;
+}
+void ByteWriter::writeBytesAt(std::size_t offset,
+                    const void* data,
+                    std::size_t count)
+{
+    ensureRange(offset, count);
+
+    if (count == 0)
+        return;
+
+    if (data == nullptr)
+        throw std::invalid_argument("ByteWriter: null source");
+
+    std::memmove(buffer.data() + offset, data, count);
+}
+
+void ByteWriter::writeString(const std::string& value)
+{
+    // Raw characters only: no length prefix or null terminator.
+    writeUnsigned<std::uint32_t>(value.length());
+    writeBytes(value.data(), value.size());
+}
+
+
+void ByteWriter::ensureRange(std::size_t offset, std::size_t count) const
+    {
+        // Avoid overflow that could occur with offset + count.
+        if (offset > buffer.size() ||
+            count > buffer.size() - offset)
+        {
+            throw std::out_of_range(
+                "ByteWriter: buffer bounds exceeded"
+            );
+        }
+    }
 //     const std::filesystem::path &path,
 //     std::uint32_t pageId,
 //     const RawPage &page)

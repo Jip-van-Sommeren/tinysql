@@ -9,6 +9,57 @@
 #include <type_traits>
 #include <vector>
 
+class BytesDecoder
+{
+public:
+    explicit BytesDecoder(const RawPage &buffer);
+
+    std::size_t position() const;
+    void seek(std::size_t newPos);
+
+    template <typename T>
+    T decodeUnsigned()
+    {
+        static_assert(std::is_unsigned_v<T>, "T must be an unsigned integer type");
+        ensureAvailable(sizeof(T));
+
+        T value = 0;
+
+        for (std::size_t i = 0; i < sizeof(T); ++i)
+        {
+            std::uint8_t byte = std::to_integer<std::uint8_t>(buffer[pos + i]);
+            value |= static_cast<T>(byte) << (i * 8);
+        }
+
+        pos += sizeof(T);
+        return value;
+    }
+
+    template <typename T>
+    T decodeUnsignedAt(std::size_t offset)
+    {
+        std::size_t saved = position();
+        seek(offset);
+
+        T value = decodeUnsigned<T>();
+
+        seek(saved);
+        return value;
+    }
+
+    std::string decodeString();
+    void decodeBytes(void *out, std::size_t size);
+    std::vector<std::byte> decodeBytes(std::size_t size);
+    std::vector<std::byte> decodeBytesAt(std::size_t offset, std::size_t size);
+
+private:
+    const RawPage &buffer;
+    std::size_t pos = 0;
+
+    void ensureAvailable(std::size_t size) const;
+};
+
+
 class PageDecoder
 {
 public:

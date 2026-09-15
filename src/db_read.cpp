@@ -8,6 +8,88 @@
 #include <utility>
 #include <variant>
 
+BytesDecoder::BytesDecoder(const RawPage &buffer)
+    : buffer(buffer) {}
+
+std::size_t BytesDecoder::position() const
+{
+    return pos;
+}
+
+void BytesDecoder::seek(std::size_t newPos)
+{
+    if (newPos > PAGE_SIZE)
+    {
+        throw std::runtime_error("seek past page boundary");
+    }
+
+    pos = newPos;
+}
+
+std::string BytesDecoder::decodeString()
+{
+    std::uint32_t length = decodeUnsigned<std::uint32_t>();
+    ensureAvailable(length);
+
+    std::string result;
+    result.reserve(length);
+
+    for (std::uint32_t i = 0; i < length; ++i)
+    {
+        char c = static_cast<char>(
+            std::to_integer<std::uint8_t>(buffer[pos + i]));
+
+        result.push_back(c);
+    }
+
+    pos += length;
+    return result;
+}
+
+void BytesDecoder::decodeBytes(void *out, std::size_t size)
+{
+    ensureAvailable(size);
+
+    auto *dest = static_cast<std::byte *>(out);
+
+    std::copy(
+        buffer.begin() + pos,
+        buffer.begin() + pos + size,
+        dest);
+
+    pos += size;
+}
+
+std::vector<std::byte> BytesDecoder::decodeBytes(std::size_t size)
+{
+    std::vector<std::byte> bytes(size);
+    decodeBytes(bytes.data(), size);
+    return bytes;
+}
+
+std::vector<std::byte> BytesDecoder::decodeBytesAt(std::size_t offset, std::size_t size)
+{
+    std::size_t saved = position();
+    seek(offset);
+
+    std::vector<std::byte> bytes(size);
+    decodeBytes(bytes.data(), size);
+
+    seek(saved);
+    return bytes;
+}
+
+void BytesDecoder::ensureAvailable(std::size_t size) const
+{
+    if (pos + size > PAGE_SIZE)
+    {
+        throw std::runtime_error("read past page boundary");
+    }
+}
+
+
+
+
 PageDecoder::PageDecoder(const RawPage &buffer)
     : buffer(buffer) {}
 
@@ -715,6 +797,8 @@ RawPage readPageFromFile(
 
     return page;
 }
+
+
 
 bool isValidPageType(std::uint8_t value)
 {

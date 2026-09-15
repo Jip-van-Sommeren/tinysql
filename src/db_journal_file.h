@@ -1,14 +1,24 @@
 #pragma once
 
 #include "db_storage.h"
+#include "db_write.h"
 
 #include <filesystem>
+#include <unordered_map>
 
 struct PageBeforeImage
 {
     std::filesystem::path relativeFilePath;
     std::uint32_t pageId;
     RawPage originalPage;
+
+    std::uint32_t size() const
+    {
+        return originalPage.size() + 
+        sizeof(pageId) + 
+        sizeof(std::uint32_t) + //str length also gets written
+        relativeFilePath.string().size();
+    }
 };
 
 // struct JournalFile
