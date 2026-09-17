@@ -548,7 +548,8 @@ namespace
         {
             return std::any_of(
                 function->arguments.begin(), function->arguments.end(),
-                [](const auto &argument) { return containsColumnReference(*argument); });
+                [](const auto &argument)
+                { return containsColumnReference(*argument); });
         }
 
         if (const auto *isNull = dynamic_cast<const BoundIsNullExpr *>(&expr))
@@ -777,7 +778,7 @@ namespace
 }
 
 QueryValidator::QueryValidator(const Catalog &catalog)
-    : catalog(catalog) {}
+    : catalog_(catalog) {}
 
 BoundQuery QueryValidator::validate(const Statement &statement)
 {
@@ -813,13 +814,13 @@ BoundDelete QueryValidator::validateDelete(const DeleteStatement &statement)
 
     const NamedTableRef &tableRef = requireNamedTableRef(*statement.from);
 
-    if (!catalog.tableExists(tableRef.name))
+    if (!catalog_.tableExists(tableRef.name))
     {
         throw std::runtime_error("Table does not exist: " + tableRef.name);
     }
 
     // HeaderPage schema = catalog.getTableHeader(tableRef.name);
-    BindContext context = catalog.createBindContext(tableRef.name);
+    BindContext context = createBindContext(tableRef.name);
 
     std::unique_ptr<BoundExpr> where;
 
@@ -842,13 +843,13 @@ BoundSelect QueryValidator::validateSelect(const SelectStatement &statement)
 
     const NamedTableRef &tableRef = requireNamedTableRef(*statement.from);
 
-    if (!catalog.tableExists(tableRef.name))
+    if (!catalog_.tableExists(tableRef.name))
     {
         throw std::runtime_error("Table does not exist: " + tableRef.name);
     }
 
     // HeaderPage schema = catalog.getTableHeader(tableRef.name);
-    BindContext context = catalog.createBindContext(tableRef.name);
+    BindContext context = createBindContext(tableRef.name);
     std::unique_ptr<BoundExpr> where;
 
     if (statement.where)
@@ -1097,7 +1098,7 @@ Constraint QueryValidator::bindConstraintExpr(
         }
 
         std::vector<ColumnId> referencedColumnIds;
-        BindContext referencedTable = catalog.createBindContext(fkExpr.referencedTable);
+        BindContext referencedTable = createBindContext(fkExpr.referencedTable);
         referencedColumnIds.reserve(
             fkExpr.referencedColumns.size());
 
@@ -1191,13 +1192,13 @@ Constraint QueryValidator::bindConstraintExpr(
 
 BoundInsert QueryValidator::validateInsert(const InsertStatement &statement)
 {
-    if (!catalog.tableExists(statement.tableName))
+    if (!catalog_.tableExists(statement.tableName))
     {
         throw std::runtime_error("Table does not exist: " + statement.tableName);
     }
 
     // HeaderPage schema = catalog.getTableHeader(statement.tableName);
-    BindContext context = catalog.createBindContext(statement.tableName);
+    BindContext context = createBindContext(statement.tableName);
 
     std::vector<const Column *> targetColumns;
     std::vector<bool> suppliedColumns(context.columns.size(), false);

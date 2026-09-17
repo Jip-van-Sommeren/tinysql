@@ -23,15 +23,11 @@ LinuxFile::LinuxFile(const std::filesystem::path &path, OpenMode mode)
     case OpenMode::CreateNew:
         flags |= O_RDWR | O_CREAT | O_EXCL;
         break;
-    case OpenMode::CreateNewDirectory:
-        flags |= O_RDWR | O_CREAT | O_EXCL | O_DIRECTORY;
-        break;
+
     case OpenMode::ReadOnly:
         flags |= O_RDONLY;
         break;
-    case OpenMode::Directory:
-        flags |= O_RDONLY | O_DIRECTORY
-        break;
+
     default:
         throw std::invalid_argument("Invalid LinuxFile open mode");
     }
@@ -115,7 +111,7 @@ void LinuxFile::readExactAt(std::uint64_t offset, std::span<std::byte> destinati
     while (done < destination.size())
     {
         const auto count = std::min(destination.size() - done,
-                                   static_cast<std::size_t>(std::numeric_limits<ssize_t>::max()));
+                                    static_cast<std::size_t>(std::numeric_limits<ssize_t>::max()));
         const ssize_t received = ::pread(
             fd_, destination.data() + done, count, static_cast<off_t>(offset + done));
         if (received == -1)
@@ -143,7 +139,7 @@ void LinuxFile::writeAllAt(std::uint64_t offset, std::span<const std::byte> sour
     while (done < source.size())
     {
         const auto count = std::min(source.size() - done,
-                                   static_cast<std::size_t>(std::numeric_limits<ssize_t>::max()));
+                                    static_cast<std::size_t>(std::numeric_limits<ssize_t>::max()));
         const ssize_t written = ::pwrite(
             fd_, source.data() + done, count, static_cast<off_t>(offset + done));
         if (written == -1)
@@ -210,6 +206,85 @@ void LinuxFile::sync()
 }
 
 void LinuxFile::throwError(const char *operation, int error) const
+{
+    throw std::system_error(error, std::generic_category(),
+                            std::string{operation} + " failed: " + path_.string());
+}
+
+LinuxDirectory::LinuxDirectory(const std::filesystem::path &path)
+    : path_(path)
+{
+
+    do
+    {
+        fd_ = ::open(
+            path.c_str(),
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    } while (fd_ == -1 && errno == EINTR);
+
+    if (fd_ == -1)
+    {
+        const int error = errno;
+        throwError("open directory", error);
+    }
+}
+
+LinuxDirectory::~LinuxDirectory() noexcept
+{
+    closeDescriptor();
+}
+
+LinuxDirectory::LinuxDirectory(LinuxDirectory &&other) noexcept
+    : path_(std::move(other.path_)), fd_(std::exchange(other.fd_, -1))
+{
+}
+
+LinuxDirectory &LinuxDirectory::operator=(LinuxDirectory &&other) noexcept
+{
+    if (this != &other)
+    {
+        closeDescriptor();
+        path_ = std::move(other.path_);
+        fd_ = std::exchange(other.fd_, -1);
+    }
+    return *this;
+}
+
+void LinuxDirectory::closeDescriptor() noexcept
+{
+    if (fd_ != -1)
+    {
+        const int savedError = errno;
+        // Linux releases the descriptor even when close reports EINTR or a
+        // delayed I/O error. Retrying could close an unrelated reused descriptor.
+        // Call sync() explicitly to report persistence failures before teardown.
+        (void)::close(std::exchange(fd_, -1));
+        errno = savedError;
+    }
+}
+
+void LinuxDirectory::ensureOpen() const
+{
+    if (fd_ == -1)
+    {
+        throwError("use of closed file", EBADF);
+    }
+}
+
+void LinuxDirectory::sync()
+{
+    ensureOpen();
+    while (::fsync(fd_) == -1)
+    {
+        const int error = errno;
+        if (error != EINTR)
+        {
+            throwError("fsync", error);
+        }
+    }
+}
+
+void LinuxDirectory::throwError(const char *operation, int error) const
 {
     throw std::system_error(error, std::generic_category(),
                             std::string{operation} + " failed: " + path_.string());

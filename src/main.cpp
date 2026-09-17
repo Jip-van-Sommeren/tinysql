@@ -73,7 +73,7 @@ int main()
     std::filesystem::path dbPath{"/tmp/query_test_db"};
     std::filesystem::remove_all(dbPath);
 
-    Database db{dbPath, "query_test_db"};
+    auto db = Database::create(dbPath, "query_test_db");
     std::vector<Column> columns{
         Column{
             .name = "a",

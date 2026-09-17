@@ -11,7 +11,8 @@
 class Database
 {
 public:
-    Database(std::filesystem::path dbPath, std::string name);
+    static Database create(const std::filesystem::path &path, std::string name);
+    static Database open(const std::filesystem::path &path, std::string name);
 
     void createTable(
         const std::string &tableName,
@@ -26,6 +27,8 @@ public:
     QueryResult executeSql(const std::string &sql);
 
 private:
+    Database(StorageEngine engine, std::string name);
+
     std::string dbName;
     StorageEngine storageEngine;
 

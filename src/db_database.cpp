@@ -10,12 +10,41 @@
 #include <type_traits>
 #include <utility>
 #include <variant>
+#include <algorithm>
+#include <cerrno>
+#include <fcntl.h>
+#include <limits>
+#include <system_error>
+#include <sys/stat.h>
+#include <unistd.h>
+
 #include <vector>
 
-Database::Database(std::filesystem::path dbPath, std::string name)
+Database::Database(StorageEngine engine, std::string name)
     : dbName(std::move(name)),
-      storageEngine(std::move(dbPath), LinuxFile::OpenMode::CreateNewDirectory)
+      storageEngine(std::move(engine))
 {
+}
+
+Database Database::create(
+    const std::filesystem::path &path, std::string name)
+{
+    // Create the database root before creating its subdirectories.
+
+    return Database{StorageEngine::create(path),
+                    std::move(name)};
+}
+
+Database Database::open(
+    const std::filesystem::path &path, std::string name)
+{
+    // Opening either missing subdirectory throws; nothing is created.
+
+    {
+        return Database{
+            StorageEngine::open(path),
+            std::move(name)};
+    }
 }
 
 void Database::createTable(
@@ -34,7 +63,6 @@ void Database::insertRows(
     table.insertRows(BoundInsert{
         .tableName = tableName,
         .rows = rows});
-
 }
 
 std::vector<Row> Database::selectAllRows(const std::string &tableName)
@@ -82,8 +110,7 @@ QueryResult Database::executeSql(const std::string &sql)
     Parser parser(lexer.tokenize());
     std::unique_ptr<Statement> statement = parser.parseStatement();
 
-    FileCatalog catalog{storageEngine.getTablesPath()};
-    QueryValidator validator{catalog};
+    QueryValidator validator{storageEngine};
     BoundQuery query = validator.validate(*statement);
 
     return execute(query);

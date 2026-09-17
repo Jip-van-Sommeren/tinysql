@@ -47,3 +47,28 @@ private:
     void validateRange(std::uint64_t offset, std::size_t count) const;
     [[noreturn]] void throwError(const char *operation, int error) const;
 };
+
+class LinuxDirectory
+{
+public:
+    explicit LinuxDirectory(
+        const std::filesystem::path &path);
+    ~LinuxDirectory() noexcept;
+
+    LinuxDirectory(const LinuxDirectory &) = delete;
+    LinuxDirectory &operator=(const LinuxDirectory &) = delete;
+    LinuxDirectory(LinuxDirectory &&other) noexcept;
+    LinuxDirectory &operator=(LinuxDirectory &&other) noexcept;
+
+    // On an I/O error a prefix may already have been transferred. Neither
+    // method provides rollback; successful return guarantees the full transfer.
+    void sync();
+
+private:
+    std::filesystem::path path_;
+    int fd_ = -1;
+
+    void closeDescriptor() noexcept;
+    void ensureOpen() const;
+    [[noreturn]] void throwError(const char *operation, int error) const;
+};

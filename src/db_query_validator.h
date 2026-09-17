@@ -14,66 +14,9 @@
 #include "db_storage.h"
 #include "db_sql_parser.h"
 #include "db_read.h"
+#include "db_storage_engine.h"
 
 using TableId = std::uint32_t;
-
-struct BoundNamedTableRef
-{
-    std::string tableName;
-
-    explicit BoundNamedTableRef(std::string tableName)
-        : tableName(std::move(tableName))
-    {
-    }
-};
-
-struct BoundInsert
-{
-    std::string tableName;
-    std::vector<Row> rows; // values ordered by HeaderPage.columns[columnIndex]
-};
-
-struct BoundSelectItem
-{
-    std::unique_ptr<BoundExpr> expr;
-    std::string outputName;
-};
-
-struct BoundSelect
-{
-    std::string tableName;
-
-    std::vector<BoundSelectItem> projections;
-
-    std::unique_ptr<BoundExpr> where;
-
-    std::vector<std::unique_ptr<BoundExpr>> groupBy;
-
-    std::unique_ptr<BoundExpr> having;
-};
-
-struct BoundDelete
-{
-    std::string tableName;
-    std::unique_ptr<BoundExpr> where;
-};
-
-struct BoundCreateTable
-{
-    std::string tableName;
-    std::vector<Column> columns;
-    std::vector<Constraint> constraints;
-};
-
-using BoundQuery = std::variant<BoundSelect, BoundInsert, BoundDelete, BoundCreateTable>;
-
-enum class SerializedExprType : std::uint8_t
-{
-    ColumnReference,
-    Literal,
-    Binary,
-    Unary
-};
 
 struct BindContext
 {
@@ -205,70 +148,119 @@ struct BindContext
     }
 };
 
-class Catalog
+struct BoundNamedTableRef
 {
-public:
-    virtual bool tableExists(const std::string &tableName) const = 0;
-    virtual HeaderPage getTableHeader(const std::string &tableName) const = 0;
-    virtual BindContext createBindContext(const std::string &tableName) const = 0;
-    virtual ~Catalog() = default;
+    std::string tableName;
+
+    explicit BoundNamedTableRef(std::string tableName)
+        : tableName(std::move(tableName))
+    {
+    }
 };
 
-class FileCatalog : public Catalog
+struct BoundInsert
 {
-public:
-    explicit FileCatalog(std::filesystem::path tablesPath)
-        : tablesPath(std::move(tablesPath))
-    {
-    }
-
-    bool tableExists(const std::string &tableName) const override
-    {
-        return std::filesystem::exists(tablePath(tableName));
-    }
-
-    HeaderPage getTableHeader(const std::string &tableName) const override
-    {
-        std::filesystem::path path = tablePath(tableName);
-
-        if (!std::filesystem::exists(path))
-        {
-            throw std::runtime_error("Table does not exist: " + tableName);
-        }
-
-        RawPage rawPage = readPageFromFile(path, 0);
-        Page page = decodeHeaderPage(rawPage);
-
-        return std::get<HeaderPage>(page.data);
-    }
-
-    BindContext createBindContext(const std::string &tableName) const
-    {
-        HeaderPage schema = getTableHeader(tableName);
-        return BindContext{
-            .tableName = tableName,
-            .columns = std::move(schema.columns),
-            .constraints = std::move(schema.constraints)};
-    }
-
-private:
-    std::filesystem::path tablesPath;
-
-    std::filesystem::path tablePath(const std::string &tableName) const
-    {
-        return tablesPath / (tableName + ".table");
-    }
+    std::string tableName;
+    std::vector<Row> rows; // values ordered by HeaderPage.columns[columnIndex]
 };
+
+struct BoundSelectItem
+{
+    std::unique_ptr<BoundExpr> expr;
+    std::string outputName;
+};
+
+struct BoundSelect
+{
+    std::string tableName;
+
+    std::vector<BoundSelectItem> projections;
+
+    std::unique_ptr<BoundExpr> where;
+
+    std::vector<std::unique_ptr<BoundExpr>> groupBy;
+
+    std::unique_ptr<BoundExpr> having;
+};
+
+struct BoundDelete
+{
+    std::string tableName;
+    std::unique_ptr<BoundExpr> where;
+};
+
+struct BoundCreateTable
+{
+    std::string tableName;
+    std::vector<Column> columns;
+    std::vector<Constraint> constraints;
+};
+
+using BoundQuery = std::variant<BoundSelect, BoundInsert, BoundDelete, BoundCreateTable>;
+
+enum class SerializedExprType : std::uint8_t
+{
+    ColumnReference,
+    Literal,
+    Binary,
+    Unary
+};
+
+// class FileCatalog : public Catalog
+// {
+// public:
+//     explicit FileCatalog(std::filesystem::path tablesPath)
+//         : tablesPath(std::move(tablesPath))
+//     {
+//     }
+
+//     bool tableExists(const std::string &tableName) const override
+//     {
+//         return std::filesystem::exists(tablePath(tableName));
+//     }
+
+//     HeaderPage getTableHeader(const std::string &tableName) const override
+//     {
+//         std::filesystem::path path = tablePath(tableName);
+
+//         if (!std::filesystem::exists(path))
+//         {
+//             throw std::runtime_error("Table does not exist: " + tableName);
+//         }
+
+//         RawPage rawPage = readPageFromFile(path, 0);
+//         Page page = decodeHeaderPage(rawPage);
+
+//         return std::get<HeaderPage>(page.data);
+//     }
+
+//     BindContext createBindContext(const std::string &tableName) const
+//     {
+//         HeaderPage schema = getTableHeader(tableName);
+//         return BindContext{
+//             .tableName = tableName,
+//             .columns = std::move(schema.columns),
+//             .constraints = std::move(schema.constraints)};
+//     }
+
+// private:
+//     std::filesystem::path tablesPath;
+
+//     std::filesystem::path tablePath(const std::string &tableName) const
+//     {
+//         return tablesPath / (tableName + ".table");
+//     }
+// };
 
 class QueryValidator
 {
 public:
-    explicit QueryValidator(const Catalog &catalog);
+    explicit QueryValidator(const Catalog &Catalog);
 
     BoundQuery validate(const Statement &statement);
 
 private:
-    const Catalog &catalog;
+    const Catalog &catalog_;
 
     BoundSelect validateSelect(const SelectStatement &statement);
     BoundInsert validateInsert(const InsertStatement &statement);
@@ -295,7 +287,17 @@ private:
         const Value &value,
         const Column &targetColumn) const;
 
-    DataType binaryResultType(
+    BindContext createBindContext(const std::string &name) const
+    {
+        HeaderPage schema = catalog_.getTableHeader(name);
+        return BindContext{
+            .tableName = name,
+            .columns = std::move(schema.columns),
+            .constraints = std::move(schema.constraints)};
+    }
+
+    DataType
+    binaryResultType(
         BinaryOperator op,
         DataType leftType,
         DataType rightType);

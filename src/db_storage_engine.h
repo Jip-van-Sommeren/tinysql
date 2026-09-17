@@ -1,15 +1,24 @@
 #pragma once
 
 #include "db_table.h"
+#include "db_catalog.h"
+#include "db_read.h"
 
 #include <filesystem>
 #include <string>
 #include <vector>
 
-class StorageEngine
+class StorageEngine final : public Catalog
 {
 public:
-    explicit StorageEngine(const std::filesystem::path &path, LinuxFile::OpenMode mode);
+    explicit StorageEngine(
+        const std::filesystem::path &path);
+
+    static StorageEngine create(const std::filesystem::path &path);
+    static StorageEngine open(const std::filesystem::path &path);
+
+    bool tableExists(const std::string &name) const override;
+    HeaderPage getTableHeader(const std::string &name) const override;
 
     Table createTable(
         const std::string &tableName,
@@ -21,10 +30,17 @@ public:
     // const std::filesystem::path &getTablesPath() const;
 
 private:
-    LinuxFile table_dir_;
-    LinuxFile journal_dir_;
     std::filesystem::path dbPath_;
+    LinuxDirectory tablesDirectory_;
+    LinuxDirectory journalDirectory_;
+    std::filesystem::path getTablePath(const std::string &name) const
+    {
+        return dbPath_ / "tables" / (name + ".table");
+    }
 
-
-    std::filesystem::path getTablePath(const std::string &tableName) const;
+    static void throwError(const char *operation, int error, const std::filesystem::path &path)
+    {
+        throw std::system_error(error, std::generic_category(),
+                                std::string{operation} + " failed: " + path.string());
+    }
 };
