@@ -2,134 +2,89 @@
 
 #include "db_storage.h"
 
+#include <climits>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <span>
 #include <string>
 #include <type_traits>
 #include <vector>
 
-class BytesDecoder
+// Borrows its buffer: the backing storage must stay alive and must not
+// be reallocated while the reader is in use.
+class ByteReader
 {
 public:
-    explicit BytesDecoder(const RawPage &buffer);
+    explicit ByteReader(std::span<const std::byte> buffer)
+        : buffer(buffer) {}
 
-    std::size_t position() const;
+    std::size_t position() const noexcept { return pos; }
+    std::size_t size() const noexcept { return buffer.size(); }
     void seek(std::size_t newPos);
 
     template <typename T>
-    T decodeUnsigned()
+    T readUnsigned()
     {
-        static_assert(std::is_unsigned_v<T>, "T must be an unsigned integer type");
-        ensureAvailable(sizeof(T));
-
-        T value = 0;
-
-        for (std::size_t i = 0; i < sizeof(T); ++i)
-        {
-            std::uint8_t byte = std::to_integer<std::uint8_t>(buffer[pos + i]);
-            value |= static_cast<T>(byte) << (i * 8);
-        }
-
+        T value = readUnsignedAt<T>(pos);
         pos += sizeof(T);
         return value;
     }
 
+    // Offset-based operations leave the sequential position unchanged.
     template <typename T>
-    T decodeUnsignedAt(std::size_t offset)
+    T readUnsignedAt(std::size_t offset) const
     {
-        std::size_t saved = position();
-        seek(offset);
+        static_assert(CHAR_BIT == 8, "This format requires 8-bit bytes");
+        static_assert(
+            std::is_integral_v<T> && std::is_unsigned_v<T> &&
+                !std::is_same_v<std::remove_cv_t<T>, bool>,
+            "T must be an unsigned integer type other than bool");
 
-        T value = decodeUnsigned<T>();
-
-        seek(saved);
-        return value;
-    }
-
-    std::string decodeString();
-    void decodeBytes(void *out, std::size_t size);
-    std::vector<std::byte> decodeBytes(std::size_t size);
-    std::vector<std::byte> decodeBytesAt(std::size_t offset, std::size_t size);
-
-private:
-    const RawPage &buffer;
-    std::size_t pos = 0;
-
-    void ensureAvailable(std::size_t size) const;
-};
-
-
-class PageDecoder
-{
-public:
-    explicit PageDecoder(const RawPage &buffer);
-
-    std::size_t position() const;
-    void seek(std::size_t newPos);
-
-    template <typename T>
-    T decodeUnsigned()
-    {
-        static_assert(std::is_unsigned_v<T>, "T must be an unsigned integer type");
-        ensureAvailable(sizeof(T));
-
+        ensureRange(offset, sizeof(T));
         T value = 0;
-
         for (std::size_t i = 0; i < sizeof(T); ++i)
         {
-            std::uint8_t byte = std::to_integer<std::uint8_t>(buffer[pos + i]);
+            const auto byte = std::to_integer<std::uint8_t>(buffer[offset + i]);
             value |= static_cast<T>(byte) << (i * 8);
         }
-
-        pos += sizeof(T);
         return value;
     }
 
-    template <typename T>
-    T decodeUnsignedAt(std::size_t offset)
-    {
-        std::size_t saved = position();
-        seek(offset);
-
-        T value = decodeUnsigned<T>();
-
-        seek(saved);
-        return value;
-    }
-
-    std::string decodeString();
-    void decodeBytes(void *out, std::size_t size);
-    std::vector<std::byte> decodeBytes(std::size_t size);
-    std::vector<std::byte> decodeBytesAt(std::size_t offset, std::size_t size);
+    // A little-endian uint32_t byte length followed by the string bytes.
+    std::string readString();
+    void readBytes(void *out, std::size_t count);
+    std::vector<std::byte> readBytes(std::size_t count);
+    std::vector<std::byte> readBytesAt(
+        std::size_t offset, std::size_t count) const;
 
 private:
-    const RawPage &buffer;
+    std::span<const std::byte> buffer;
     std::size_t pos = 0;
 
-    void ensureAvailable(std::size_t size) const;
+    void ensureRange(std::size_t offset, std::size_t count) const;
 };
 
 class PageHeaderDecoder
 {
 public:
-    explicit PageHeaderDecoder(PageDecoder &decoder);
+    explicit PageHeaderDecoder(ByteReader &decoder);
 
     PageHeader decode();
 
 private:
-    PageDecoder &decoder;
+    ByteReader &decoder;
 };
 
 class HeaderPageDecoder
 {
 public:
-    explicit HeaderPageDecoder(PageDecoder &decoder);
+    explicit HeaderPageDecoder(ByteReader &decoder);
 
     Page decode();
 
 private:
-    PageDecoder &decoder;
+    ByteReader &decoder;
     PageHeaderDecoder pageHeaderDecoder;
 
     Column decodeColumn();
@@ -143,12 +98,12 @@ class ValueDeserializer
 {
 public:
     static Value decodeFixed(
-        PageDecoder &decoder,
+        ByteReader &decoder,
         std::size_t absoluteOffset,
         DataType type);
 
     static Value decodeVariable(
-        PageDecoder &decoder,
+        ByteReader &decoder,
         std::size_t absoluteOffset,
         std::uint32_t length,
         DataType type);
@@ -158,14 +113,14 @@ class RowDecoder
 {
 public:
     RowDecoder(
-        PageDecoder &decoder,
+        ByteReader &decoder,
         const HeaderPage &headerPage,
         std::size_t rowStart);
 
     Row decodeRow();
 
 private:
-    PageDecoder &decoder;
+    ByteReader &decoder;
     const HeaderPage &headerPage;
     std::size_t rowStart;
 
@@ -193,25 +148,25 @@ class SlotDecoder
 public:
     static constexpr std::size_t SlotSize = 6;
 
-    explicit SlotDecoder(PageDecoder &decoder);
+    explicit SlotDecoder(ByteReader &decoder);
 
     Slot decodeSlot(std::uint16_t slotIndex) const;
     std::vector<Slot> decodeSlots(std::uint16_t slotCount) const;
     std::size_t slotOffset(std::uint16_t slotIndex) const;
 
 private:
-    PageDecoder &decoder;
+    ByteReader &decoder;
 };
 
 class DataPageDecoder
 {
 public:
-    DataPageDecoder(PageDecoder &decoder, const HeaderPage &headerPage);
+    DataPageDecoder(ByteReader &decoder, const HeaderPage &headerPage);
 
     Page decode();
 
 private:
-    PageDecoder &decoder;
+    ByteReader &decoder;
     PageHeaderDecoder headerDecoder;
     SlotDecoder slotDecoder;
     const HeaderPage &headerPage;

@@ -77,8 +77,8 @@ void PageGuard::markDirty()
     bufferManager_->markDirty(pageId_);
 }
 
-BufferManager::BufferManager(std::filesystem::path path)
-    : pageFile_(path)
+BufferManager::BufferManager(std::filesystem::path path, LinuxFile::OpenMode mode)
+    : pageFile_(path, mode)
 {
 }
 
@@ -239,7 +239,9 @@ void BufferManager::flushAll()
         }
     }
 
-    pageFile_.flush(); // If this throws, dirty flags remain set.
+    // All native writes completed before dirty flags are cleared. This is
+    // writeback, not a durable statement commit; recovery coordination is separate.
+    pageFile_.flush();
 
     for (auto &[pageId, frame] : pages)
     {

@@ -88,8 +88,7 @@ namespace
         const PageHeader &pageHeader,
         const HeaderPage &headerPage)
     {
-        RawPage rawPage{};
-        PageWriter writer(rawPage);
+        ByteWriter writer(PAGE_SIZE);
 
         PageHeaderWriter pageHeaderWriter(writer);
         pageHeaderWriter.write(pageHeader);

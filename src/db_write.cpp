@@ -16,75 +16,51 @@ void ByteWriter::seek(std::size_t newPos)
     pos = newPos;
 }
 
-template <typename T>
-void ByteWriter::writeUnsigned(T value)
-{
-    writeUnsignedAt(pos, value);
-    pos += sizeof(T);
-}
-
-template <typename T>
-void ByteWriter::writeUnsignedAt(std::size_t offset, T value)
-{
-    static_assert(CHAR_BIT == 8,
-                    "This format requires 8-bit bytes");
-
-    static_assert(
-        std::is_integral_v<T> &&
-        std::is_unsigned_v<T> &&
-        !std::is_same_v<std::remove_cv_t<T>, bool>,
-        "T must be an unsigned integer type other than bool"
-    );
-
-    ensureRange(offset, sizeof(T));
-
-    // Write directly at the offset without changing pos.
-    for (std::size_t i = 0; i < sizeof(T); ++i)
-    {
-        buffer[offset + i] =
-            static_cast<std::byte>((value >> (i * 8)) & 0xFFu);
-    }
-}
-
-void ByteWriter::writeBytes(const void* data, std::size_t count)
+void ByteWriter::writeBytes(const void *data, std::size_t count)
 {
     writeBytesAt(pos, data, count);
     pos += count;
 }
-void ByteWriter::writeBytesAt(std::size_t offset,
-                    const void* data,
-                    std::size_t count)
+
+void ByteWriter::writeBytesAt(
+    std::size_t offset, const void *data, std::size_t count)
 {
     ensureRange(offset, count);
-
     if (count == 0)
+    {
         return;
-
+    }
     if (data == nullptr)
+    {
         throw std::invalid_argument("ByteWriter: null source");
+    }
 
     std::memmove(buffer.data() + offset, data, count);
 }
 
-void ByteWriter::writeString(const std::string& value)
+void ByteWriter::writeString(const std::string &value)
 {
-    // Raw characters only: no length prefix or null terminator.
-    writeUnsigned<std::uint32_t>(value.length());
+    if (value.size() > std::numeric_limits<std::uint32_t>::max())
+    {
+        throw std::length_error("ByteWriter: string exceeds uint32_t length");
+    }
+
+    // Validate both ranges before writing even the length prefix.
+    ensureRange(pos, sizeof(std::uint32_t));
+    ensureRange(pos + sizeof(std::uint32_t), value.size());
+    writeUnsigned<std::uint32_t>(static_cast<std::uint32_t>(value.size()));
     writeBytes(value.data(), value.size());
 }
 
-
 void ByteWriter::ensureRange(std::size_t offset, std::size_t count) const
+{
+    // Subtraction avoids overflow from offset + count.
+    if (offset > buffer.size() || count > buffer.size() - offset)
     {
-        // Avoid overflow that could occur with offset + count.
-        if (offset > buffer.size() ||
-            count > buffer.size() - offset)
-        {
-            throw std::out_of_range(
-                "ByteWriter: buffer bounds exceeded"
-            );
-        }
+        throw std::out_of_range("ByteWriter: buffer bounds exceeded");
     }
+}
+
 //     const std::filesystem::path &path,
 //     std::uint32_t pageId,
 //     const RawPage &page)
@@ -124,7 +100,7 @@ void ByteWriter::ensureRange(std::size_t offset, std::size_t count) const
 RawPage encodeHeaderPage(const PageHeader &pageHeader, const HeaderPage &headerPage)
 {
     RawPage rawPage{};
-    PageWriter writer(rawPage);
+    ByteWriter writer(PAGE_SIZE);
 
     PageHeaderWriter pageHeaderWriter(writer);
     pageHeaderWriter.write(pageHeader);
@@ -134,6 +110,7 @@ RawPage encodeHeaderPage(const PageHeader &pageHeader, const HeaderPage &headerP
     HeaderPageWriter headerPageWriter(writer);
     headerPageWriter.write(headerPage);
 
+    std::copy(writer.bytes().begin(), writer.bytes().end(), rawPage.begin());
     return rawPage;
 }
 
@@ -143,11 +120,12 @@ RawPage encodeDataPage(
     const std::vector<Row> &rows)
 {
     RawPage rawPage{};
-    PageWriter writer(rawPage);
+    ByteWriter writer(PAGE_SIZE);
 
     DataPageWriter dataPageWriter(writer, tableHeader);
     dataPageWriter.write(pageHeader, rows);
 
+    std::copy(writer.bytes().begin(), writer.bytes().end(), rawPage.begin());
     return rawPage;
 }
 
@@ -157,7 +135,7 @@ RawPage encodeDataPage(
     const DataPage &dataPage)
 {
     RawPage rawPage{};
-    PageWriter writer(rawPage);
+    ByteWriter writer(PAGE_SIZE);
 
     PageHeader storedHeader = pageHeader;
     if (dataPage.slots.size() > std::numeric_limits<std::uint16_t>::max())
@@ -210,6 +188,7 @@ RawPage encodeDataPage(
         occupiedSlots[entry.slotIndex] = true;
     }
 
+    std::copy(writer.bytes().begin(), writer.bytes().end(), rawPage.begin());
     return rawPage;
 }
 
@@ -219,11 +198,12 @@ RawPage encodeDataPage(
     const std::vector<Row> &rows)
 {
     RawPage rawPage{};
-    PageWriter writer(rawPage);
+    ByteWriter writer(PAGE_SIZE);
 
     DataPageWriter dataPageWriter(writer, tableHeader);
     dataPageWriter.write(pageId, rows);
 
+    std::copy(writer.bytes().begin(), writer.bytes().end(), rawPage.begin());
     return rawPage;
 }
 
@@ -245,60 +225,6 @@ std::size_t encodedSlotSize()
 std::size_t encodedRowSize(const HeaderPage &tableHeader, const Row &row)
 {
     return RowWriter::computeSerializedRowSize(tableHeader, row.values);
-}
-
-PageWriter::PageWriter(RawPage &buffer)
-    : buffer(buffer) {}
-
-std::size_t PageWriter::position() const
-{
-    return pos;
-}
-
-void PageWriter::seek(std::size_t newPos)
-{
-    if (newPos > PAGE_SIZE)
-    {
-        throw std::runtime_error("seek past page boundary");
-    }
-
-    pos = newPos;
-}
-
-void PageWriter::writeBytes(const void *data, std::size_t size)
-{
-    ensureCapacity(size);
-
-    const auto *bytes = static_cast<const std::byte *>(data);
-    std::copy(bytes, bytes + size, buffer.begin() + pos);
-    pos += size;
-}
-
-void PageWriter::writeBytesAt(std::size_t offset, const void *data, std::size_t size)
-{
-    std::size_t saved = pos;
-    seek(offset);
-    writeBytes(data, size);
-    seek(saved);
-}
-
-void PageWriter::writeString(const std::string &value)
-{
-    if (value.size() > std::numeric_limits<std::uint32_t>::max())
-    {
-        throw std::runtime_error("String too large to write");
-    }
-
-    writeUnsigned<std::uint32_t>(static_cast<std::uint32_t>(value.size()));
-    writeBytes(value.data(), value.size());
-}
-
-void PageWriter::ensureCapacity(std::size_t size) const
-{
-    if (pos + size > PAGE_SIZE)
-    {
-        throw std::runtime_error("write past page boundary");
-    }
 }
 
 std::vector<std::byte> ValueSerializer::serializeValue(
@@ -396,7 +322,7 @@ std::vector<std::byte> ValueSerializer::serializeValue(
     }
 }
 
-RowWriter::RowWriter(PageWriter &writer, const HeaderPage &headerPage)
+RowWriter::RowWriter(ByteWriter &writer, const HeaderPage &headerPage)
     : writer(writer), headerPage(headerPage) {}
 
 void RowWriter::writeRow(const std::vector<Value> &values)
@@ -685,7 +611,7 @@ bool BitmapWriter::get(std::size_t bitIndex) const
             static_cast<std::uint8_t>(1u << (bitIndex % 8))) != 0;
 }
 
-SlotWriter::SlotWriter(PageWriter &writer)
+SlotWriter::SlotWriter(ByteWriter &writer)
     : writer(writer) {}
 
 void SlotWriter::writeSlot(std::uint16_t slotIndex, const Slot &slot)
@@ -722,7 +648,7 @@ std::size_t SlotWriter::slotOffset(std::uint16_t slotIndex) const
     return PAGE_SIZE - ((static_cast<std::size_t>(slotIndex) + 1) * SlotSize);
 }
 
-PageHeaderWriter::PageHeaderWriter(PageWriter &writer)
+PageHeaderWriter::PageHeaderWriter(ByteWriter &writer)
     : writer(writer) {}
 
 void PageHeaderWriter::write(const PageHeader &header)
@@ -771,7 +697,7 @@ void PageHeaderWriter::setNextPageId(std::uint32_t nextPageId)
     writer.writeUnsignedAt<std::uint32_t>(PageHeaderLayout::NextPageId, nextPageId);
 }
 
-HeaderPageWriter::HeaderPageWriter(PageWriter &writer)
+HeaderPageWriter::HeaderPageWriter(ByteWriter &writer)
     : writer(writer) {}
 
 void HeaderPageWriter::write(const HeaderPage &header)
@@ -833,7 +759,7 @@ void HeaderPageWriter::writeColumnStorage(const ColumnStorage &storage)
     throw std::runtime_error("Unknown column storage type");
 }
 
-DataPageWriter::DataPageWriter(PageWriter &writer, const HeaderPage &tableHeader)
+DataPageWriter::DataPageWriter(ByteWriter &writer, const HeaderPage &tableHeader)
     : writer(writer),
       headerWriter(writer),
       slotWriter(writer),
@@ -972,7 +898,7 @@ void HeaderPageWriter::writeConstraint(
 
 void ExpressionSerializer::serialize(
     const BoundExpr &expression,
-    PageWriter &writer)
+    ByteWriter &writer)
 {
     writer.writeUnsigned<std::uint8_t>(
         static_cast<std::uint8_t>(expression.kind()));

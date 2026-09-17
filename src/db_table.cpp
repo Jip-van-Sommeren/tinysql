@@ -81,14 +81,14 @@ Table Table::create(
     const std::vector<Column> &columns,
     const std::vector<Constraint> &constraints)
 {
-    Table table{std::move(tablePath)};
+    Table table{std::move(tablePath), LinuxFile::OpenMode::CreateNew};
     table.initializeNewTable(tableName, magic, columns, constraints);
     return table;
 }
 
 Table Table::open(std::filesystem::path tablePath)
 {
-    Table table{std::move(tablePath)};
+    Table table{std::move(tablePath), LinuxFile::OpenMode::OpenExisting};
     table.validateHeaderPage();
     return table;
 }
@@ -154,8 +154,8 @@ std::uint64_t Table::deleteRows(const BoundDelete &del)
     return deletedCount;
 }
 
-Table::Table(std::filesystem::path tablePath)
-    : bufferManager(std::move(tablePath))
+Table::Table(std::filesystem::path tablePath, LinuxFile::OpenMode mode)
+    : bufferManager(std::move(tablePath), mode)
 {
 }
 

@@ -1,184 +1,90 @@
 #include "db_read.h"
 #include "db_decimal.h"
+#include "db_page_file.h"
 
 #include <algorithm>
 #include <bit>
-#include <fstream>
+#include <cstring>
 #include <stdexcept>
 #include <utility>
 #include <variant>
 
-BytesDecoder::BytesDecoder(const RawPage &buffer)
-    : buffer(buffer) {}
-
-std::size_t BytesDecoder::position() const
+void ByteReader::seek(std::size_t newPos)
 {
-    return pos;
-}
-
-void BytesDecoder::seek(std::size_t newPos)
-{
-    if (newPos > PAGE_SIZE)
-    {
-        throw std::runtime_error("seek past page boundary");
-    }
-
+    ensureRange(newPos, 0);
     pos = newPos;
 }
 
-std::string BytesDecoder::decodeString()
+std::string ByteReader::readString()
 {
-    std::uint32_t length = decodeUnsigned<std::uint32_t>();
-    ensureAvailable(length);
+    const auto length = readUnsignedAt<std::uint32_t>(pos);
+    const std::size_t start = pos + sizeof(std::uint32_t);
+    ensureRange(start, length);
 
     std::string result;
-    result.reserve(length);
-
-    for (std::uint32_t i = 0; i < length; ++i)
+    if (length != 0)
     {
-        char c = static_cast<char>(
-            std::to_integer<std::uint8_t>(buffer[pos + i]));
-
-        result.push_back(c);
+        result.assign(
+            reinterpret_cast<const char *>(buffer.data() + start), length);
     }
 
-    pos += length;
+    pos = start + length;
     return result;
 }
 
-void BytesDecoder::decodeBytes(void *out, std::size_t size)
+void ByteReader::readBytes(void *out, std::size_t count)
 {
-    ensureAvailable(size);
-
-    auto *dest = static_cast<std::byte *>(out);
-
-    std::copy(
-        buffer.begin() + pos,
-        buffer.begin() + pos + size,
-        dest);
-
-    pos += size;
-}
-
-std::vector<std::byte> BytesDecoder::decodeBytes(std::size_t size)
-{
-    std::vector<std::byte> bytes(size);
-    decodeBytes(bytes.data(), size);
-    return bytes;
-}
-
-std::vector<std::byte> BytesDecoder::decodeBytesAt(std::size_t offset, std::size_t size)
-{
-    std::size_t saved = position();
-    seek(offset);
-
-    std::vector<std::byte> bytes(size);
-    decodeBytes(bytes.data(), size);
-
-    seek(saved);
-    return bytes;
-}
-
-void BytesDecoder::ensureAvailable(std::size_t size) const
-{
-    if (pos + size > PAGE_SIZE)
+    ensureRange(pos, count);
+    if (count == 0)
     {
-        throw std::runtime_error("read past page boundary");
+        return;
     }
-}
-
-
-
-
-PageDecoder::PageDecoder(const RawPage &buffer)
-    : buffer(buffer) {}
-
-std::size_t PageDecoder::position() const
-{
-    return pos;
-}
-
-void PageDecoder::seek(std::size_t newPos)
-{
-    if (newPos > PAGE_SIZE)
+    if (out == nullptr)
     {
-        throw std::runtime_error("seek past page boundary");
+        throw std::invalid_argument("ByteReader: null destination");
     }
 
-    pos = newPos;
+    std::memmove(out, buffer.data() + pos, count);
+    pos += count;
 }
 
-std::string PageDecoder::decodeString()
+std::vector<std::byte> ByteReader::readBytes(std::size_t count)
 {
-    std::uint32_t length = decodeUnsigned<std::uint32_t>();
-    ensureAvailable(length);
-
-    std::string result;
-    result.reserve(length);
-
-    for (std::uint32_t i = 0; i < length; ++i)
-    {
-        char c = static_cast<char>(
-            std::to_integer<std::uint8_t>(buffer[pos + i]));
-
-        result.push_back(c);
-    }
-
-    pos += length;
+    auto result = readBytesAt(pos, count);
+    pos += count;
     return result;
 }
 
-void PageDecoder::decodeBytes(void *out, std::size_t size)
+std::vector<std::byte> ByteReader::readBytesAt(
+    std::size_t offset, std::size_t count) const
 {
-    ensureAvailable(size);
-
-    auto *dest = static_cast<std::byte *>(out);
-
-    std::copy(
-        buffer.begin() + pos,
-        buffer.begin() + pos + size,
-        dest);
-
-    pos += size;
-}
-
-std::vector<std::byte> PageDecoder::decodeBytes(std::size_t size)
-{
-    std::vector<std::byte> bytes(size);
-    decodeBytes(bytes.data(), size);
-    return bytes;
-}
-
-std::vector<std::byte> PageDecoder::decodeBytesAt(std::size_t offset, std::size_t size)
-{
-    std::size_t saved = position();
-    seek(offset);
-
-    std::vector<std::byte> bytes(size);
-    decodeBytes(bytes.data(), size);
-
-    seek(saved);
-    return bytes;
-}
-
-void PageDecoder::ensureAvailable(std::size_t size) const
-{
-    if (pos + size > PAGE_SIZE)
+    ensureRange(offset, count);
+    std::vector<std::byte> result(count);
+    if (count != 0)
     {
-        throw std::runtime_error("read past page boundary");
+        std::memcpy(result.data(), buffer.data() + offset, count);
+    }
+    return result;
+}
+
+void ByteReader::ensureRange(std::size_t offset, std::size_t count) const
+{
+    if (offset > buffer.size() || count > buffer.size() - offset)
+    {
+        throw std::out_of_range("ByteReader: buffer bounds exceeded");
     }
 }
 
-PageHeaderDecoder::PageHeaderDecoder(PageDecoder &decoder)
+PageHeaderDecoder::PageHeaderDecoder(ByteReader &decoder)
     : decoder(decoder) {}
 
 PageHeader PageHeaderDecoder::decode()
 {
     PageHeader header;
-    header.pageId = decoder.decodeUnsignedAt<std::uint32_t>(PageHeaderLayout::PageId);
+    header.pageId = decoder.readUnsignedAt<std::uint32_t>(PageHeaderLayout::PageId);
 
     std::uint8_t rawPageType =
-        decoder.decodeUnsignedAt<std::uint8_t>(PageHeaderLayout::PageType);
+        decoder.readUnsignedAt<std::uint8_t>(PageHeaderLayout::PageType);
 
     if (!isValidPageType(rawPageType))
     {
@@ -186,16 +92,16 @@ PageHeader PageHeaderDecoder::decode()
     }
 
     header.pageType = static_cast<PageType>(rawPageType);
-    header.slotCount = decoder.decodeUnsignedAt<std::uint16_t>(PageHeaderLayout::SlotCount);
-    header.freeSpaceStart = decoder.decodeUnsignedAt<std::uint16_t>(PageHeaderLayout::FreeSpaceStart);
-    header.freeSpaceEnd = decoder.decodeUnsignedAt<std::uint16_t>(PageHeaderLayout::FreeSpaceEnd);
-    header.nextPageId = decoder.decodeUnsignedAt<std::uint32_t>(PageHeaderLayout::NextPageId);
+    header.slotCount = decoder.readUnsignedAt<std::uint16_t>(PageHeaderLayout::SlotCount);
+    header.freeSpaceStart = decoder.readUnsignedAt<std::uint16_t>(PageHeaderLayout::FreeSpaceStart);
+    header.freeSpaceEnd = decoder.readUnsignedAt<std::uint16_t>(PageHeaderLayout::FreeSpaceEnd);
+    header.nextPageId = decoder.readUnsignedAt<std::uint32_t>(PageHeaderLayout::NextPageId);
 
     decoder.seek(PageHeaderLayout::Size);
     return header;
 }
 
-HeaderPageDecoder::HeaderPageDecoder(PageDecoder &decoder)
+HeaderPageDecoder::HeaderPageDecoder(ByteReader &decoder)
     : decoder(decoder), pageHeaderDecoder(decoder) {}
 
 Page HeaderPageDecoder::decode()
@@ -208,12 +114,12 @@ Page HeaderPageDecoder::decode()
     }
 
     HeaderPage headerPage;
-    headerPage.magic = decoder.decodeString();
-    headerPage.version = decoder.decodeUnsigned<std::uint16_t>();
-    headerPage.pageSize = decoder.decodeUnsigned<std::uint32_t>();
-    headerPage.tableName = decoder.decodeString();
+    headerPage.magic = decoder.readString();
+    headerPage.version = decoder.readUnsigned<std::uint16_t>();
+    headerPage.pageSize = decoder.readUnsigned<std::uint32_t>();
+    headerPage.tableName = decoder.readString();
 
-    std::uint32_t columnCount = decoder.decodeUnsigned<std::uint32_t>();
+    std::uint32_t columnCount = decoder.readUnsigned<std::uint32_t>();
     headerPage.columns.reserve(columnCount);
 
     for (std::uint32_t i = 0; i < columnCount; ++i)
@@ -221,7 +127,7 @@ Page HeaderPageDecoder::decode()
         headerPage.columns.push_back(decodeColumn());
     }
 
-    std::uint32_t constraintCount = decoder.decodeUnsigned<std::uint32_t>();
+    std::uint32_t constraintCount = decoder.readUnsigned<std::uint32_t>();
     headerPage.constraints.reserve(constraintCount);
 
     for (std::uint32_t i = 0; i < constraintCount; ++i)
@@ -229,10 +135,10 @@ Page HeaderPageDecoder::decode()
         headerPage.constraints.push_back(decodeConstraint());
     }
 
-    headerPage.totalRowCount = decoder.decodeUnsigned<std::uint64_t>();
-    headerPage.firstDataPageId = decoder.decodeUnsigned<std::uint32_t>();
-    headerPage.lastDataPageId = decoder.decodeUnsigned<std::uint32_t>();
-    headerPage.nextUnusedPageId = decoder.decodeUnsigned<std::uint32_t>();
+    headerPage.totalRowCount = decoder.readUnsigned<std::uint64_t>();
+    headerPage.firstDataPageId = decoder.readUnsigned<std::uint32_t>();
+    headerPage.lastDataPageId = decoder.readUnsigned<std::uint32_t>();
+    headerPage.nextUnusedPageId = decoder.readUnsigned<std::uint32_t>();
 
     return Page{
         .header = pageHeader,
@@ -242,10 +148,10 @@ Page HeaderPageDecoder::decode()
 Column HeaderPageDecoder::decodeColumn()
 {
     Column column;
-    column.name = decoder.decodeString();
-    column.type = static_cast<DataType>(decoder.decodeUnsigned<std::uint8_t>());
-    column.nullable = decoder.decodeUnsigned<std::uint8_t>() != 0;
-    column.columnIndex = decoder.decodeUnsigned<std::uint32_t>();
+    column.name = decoder.readString();
+    column.type = static_cast<DataType>(decoder.readUnsigned<std::uint8_t>());
+    column.nullable = decoder.readUnsigned<std::uint8_t>() != 0;
+    column.columnIndex = decoder.readUnsigned<std::uint32_t>();
     column.storage = decodeColumnStorage();
 
     return column;
@@ -254,19 +160,19 @@ Column HeaderPageDecoder::decodeColumn()
 ColumnStorage HeaderPageDecoder::decodeColumnStorage()
 {
     auto kind = static_cast<ColumnStorageKind>(
-        decoder.decodeUnsigned<std::uint8_t>());
+        decoder.readUnsigned<std::uint8_t>());
 
     if (kind == ColumnStorageKind::Fixed)
     {
         return FixedColumnStorage{
-            .offset = decoder.decodeUnsigned<std::uint32_t>(),
-            .size = decoder.decodeUnsigned<std::uint32_t>()};
+            .offset = decoder.readUnsigned<std::uint32_t>(),
+            .size = decoder.readUnsigned<std::uint32_t>()};
     }
 
     if (kind == ColumnStorageKind::Variable)
     {
         return VarColumnStorage{
-            .varIndex = decoder.decodeUnsigned<std::uint32_t>()};
+            .varIndex = decoder.readUnsigned<std::uint32_t>()};
     }
 
     throw std::runtime_error("Unknown column storage type");
@@ -274,13 +180,13 @@ ColumnStorage HeaderPageDecoder::decodeColumnStorage()
 
 std::vector<ColumnId> HeaderPageDecoder::decodeColumnIds()
 {
-    std::uint32_t count = decoder.decodeUnsigned<std::uint32_t>();
+    std::uint32_t count = decoder.readUnsigned<std::uint32_t>();
     std::vector<ColumnId> columnIds;
     columnIds.reserve(count);
 
     for (std::uint32_t i = 0; i < count; ++i)
     {
-        columnIds.push_back(decoder.decodeUnsigned<std::uint32_t>());
+        columnIds.push_back(decoder.readUnsigned<std::uint32_t>());
     }
 
     return columnIds;
@@ -289,8 +195,8 @@ std::vector<ColumnId> HeaderPageDecoder::decodeColumnIds()
 Constraint HeaderPageDecoder::decodeConstraint()
 {
     ConstraintType type = static_cast<ConstraintType>(
-        decoder.decodeUnsigned<std::uint8_t>());
-    std::string name = decoder.decodeString();
+        decoder.readUnsigned<std::uint8_t>());
+    std::string name = decoder.readString();
 
     switch (type)
     {
@@ -302,7 +208,7 @@ Constraint HeaderPageDecoder::decodeConstraint()
     case ConstraintType::ForeignKey:
     {
         std::vector<ColumnId> localColumnIds = decodeColumnIds();
-        std::string referencedTableName = decoder.decodeString();
+        std::string referencedTableName = decoder.readString();
         std::vector<ColumnId> referencedColumnIds = decodeColumnIds();
 
         return BoundForeignKeyConstraintExpr{
@@ -320,17 +226,17 @@ Constraint HeaderPageDecoder::decodeConstraint()
     case ConstraintType::NotNull:
         return BoundNotNullConstraintExpr{
             std::move(name),
-            decoder.decodeUnsigned<std::uint32_t>()};
+            decoder.readUnsigned<std::uint32_t>()};
 
     case ConstraintType::Null:
         return BoundNullConstraintExpr{
             std::move(name),
-            decoder.decodeUnsigned<std::uint32_t>()};
+            decoder.readUnsigned<std::uint32_t>()};
 
     case ConstraintType::Default:
     {
         std::unique_ptr<BoundExpr> value = decodeExpression();
-        ColumnId columnId = decoder.decodeUnsigned<std::uint32_t>();
+        ColumnId columnId = decoder.readUnsigned<std::uint32_t>();
 
         return BoundDefaultConstraintExpr{
             std::move(name),
@@ -351,7 +257,7 @@ Constraint HeaderPageDecoder::decodeConstraint()
 std::unique_ptr<BoundExpr> HeaderPageDecoder::decodeExpression()
 {
     BoundExprKind kind = static_cast<BoundExprKind>(
-        decoder.decodeUnsigned<std::uint8_t>());
+        decoder.readUnsigned<std::uint8_t>());
 
     switch (kind)
     {
@@ -361,16 +267,16 @@ std::unique_ptr<BoundExpr> HeaderPageDecoder::decodeExpression()
 
     case BoundExprKind::ColumnReference:
     {
-        ColumnId columnId = decoder.decodeUnsigned<std::uint32_t>();
+        ColumnId columnId = decoder.readUnsigned<std::uint32_t>();
         DataType type = static_cast<DataType>(
-            decoder.decodeUnsigned<std::uint8_t>());
+            decoder.readUnsigned<std::uint8_t>());
         return std::make_unique<BoundColumnExpr>(columnId, type);
     }
 
     case BoundExprKind::Literal:
     {
         DataType type = static_cast<DataType>(
-            decoder.decodeUnsigned<std::uint8_t>());
+            decoder.readUnsigned<std::uint8_t>());
 
         switch (type)
         {
@@ -382,26 +288,26 @@ std::unique_ptr<BoundExpr> HeaderPageDecoder::decodeExpression()
         case DataType::Int:
             return std::make_unique<BoundLiteralExpr>(
                 Value{std::bit_cast<std::int32_t>(
-                    decoder.decodeUnsigned<std::uint32_t>())},
+                    decoder.readUnsigned<std::uint32_t>())},
                 type);
 
         case DataType::BigInt:
             return std::make_unique<BoundLiteralExpr>(
                 Value{std::bit_cast<std::int64_t>(
-                    decoder.decodeUnsigned<std::uint64_t>())},
+                    decoder.readUnsigned<std::uint64_t>())},
                 type);
 
         case DataType::Double:
             return std::make_unique<BoundLiteralExpr>(
                 Value{std::bit_cast<std::float64_t>(
-                    decoder.decodeUnsigned<std::uint64_t>())},
+                    decoder.readUnsigned<std::uint64_t>())},
                 type);
 
         case DataType::Decimal:
         {
             const std::int64_t coefficient = std::bit_cast<std::int64_t>(
-                decoder.decodeUnsigned<std::uint64_t>());
-            const std::uint32_t scale = decoder.decodeUnsigned<std::uint32_t>();
+                decoder.readUnsigned<std::uint64_t>());
+            const std::uint32_t scale = decoder.readUnsigned<std::uint32_t>();
             if (scale > MAX_DECIMAL_SCALE)
             {
                 throw std::runtime_error(
@@ -416,7 +322,7 @@ std::unique_ptr<BoundExpr> HeaderPageDecoder::decodeExpression()
 
         case DataType::Boolean:
         {
-            const std::uint8_t raw = decoder.decodeUnsigned<std::uint8_t>();
+            const std::uint8_t raw = decoder.readUnsigned<std::uint8_t>();
             if (raw > 1)
             {
                 throw std::runtime_error(
@@ -427,7 +333,7 @@ std::unique_ptr<BoundExpr> HeaderPageDecoder::decodeExpression()
 
         case DataType::Text:
             return std::make_unique<BoundLiteralExpr>(
-                Value{decoder.decodeString()},
+                Value{decoder.readString()},
                 type);
 
         default:
@@ -438,9 +344,9 @@ std::unique_ptr<BoundExpr> HeaderPageDecoder::decodeExpression()
     case BoundExprKind::Binary:
     {
         BinaryOperator op = static_cast<BinaryOperator>(
-            decoder.decodeUnsigned<std::uint8_t>());
+            decoder.readUnsigned<std::uint8_t>());
         DataType resultType = static_cast<DataType>(
-            decoder.decodeUnsigned<std::uint8_t>());
+            decoder.readUnsigned<std::uint8_t>());
         std::unique_ptr<BoundExpr> left = decodeExpression();
         std::unique_ptr<BoundExpr> right = decodeExpression();
 
@@ -454,9 +360,9 @@ std::unique_ptr<BoundExpr> HeaderPageDecoder::decodeExpression()
     case BoundExprKind::Unary:
     {
         UnaryOperator op = static_cast<UnaryOperator>(
-            decoder.decodeUnsigned<std::uint8_t>());
+            decoder.readUnsigned<std::uint8_t>());
         DataType resultType = static_cast<DataType>(
-            decoder.decodeUnsigned<std::uint8_t>());
+            decoder.readUnsigned<std::uint8_t>());
 
         return std::make_unique<BoundUnaryExpr>(
             op,
@@ -467,7 +373,7 @@ std::unique_ptr<BoundExpr> HeaderPageDecoder::decodeExpression()
     case BoundExprKind::IsNull:
     {
         std::unique_ptr<BoundExpr> operand = decodeExpression();
-        bool negated = decoder.decodeUnsigned<std::uint8_t>() != 0;
+        bool negated = decoder.readUnsigned<std::uint8_t>() != 0;
         return std::make_unique<BoundIsNullExpr>(
             std::move(operand),
             negated);
@@ -478,7 +384,7 @@ std::unique_ptr<BoundExpr> HeaderPageDecoder::decodeExpression()
 }
 
 Value ValueDeserializer::decodeFixed(
-    PageDecoder &decoder,
+    ByteReader &decoder,
     std::size_t absoluteOffset,
     DataType type)
 {
@@ -487,7 +393,7 @@ Value ValueDeserializer::decodeFixed(
     case DataType::Int:
     {
         std::uint32_t raw =
-            decoder.decodeUnsignedAt<std::uint32_t>(absoluteOffset);
+            decoder.readUnsignedAt<std::uint32_t>(absoluteOffset);
 
         return std::bit_cast<std::int32_t>(raw);
     }
@@ -495,23 +401,23 @@ Value ValueDeserializer::decodeFixed(
     case DataType::BigInt:
     {
         const std::uint64_t raw =
-            decoder.decodeUnsignedAt<std::uint64_t>(absoluteOffset);
+            decoder.readUnsignedAt<std::uint64_t>(absoluteOffset);
         return std::bit_cast<std::int64_t>(raw);
     }
 
     case DataType::Double:
     {
         const std::uint64_t raw =
-            decoder.decodeUnsignedAt<std::uint64_t>(absoluteOffset);
+            decoder.readUnsignedAt<std::uint64_t>(absoluteOffset);
         return std::bit_cast<std::float64_t>(raw);
     }
 
     case DataType::Decimal:
     {
         const std::uint64_t rawCoefficient =
-            decoder.decodeUnsignedAt<std::uint64_t>(absoluteOffset);
+            decoder.readUnsignedAt<std::uint64_t>(absoluteOffset);
         const std::uint32_t scale =
-            decoder.decodeUnsignedAt<std::uint32_t>(
+            decoder.readUnsignedAt<std::uint32_t>(
                 absoluteOffset + sizeof(std::int64_t));
         if (scale > MAX_DECIMAL_SCALE)
         {
@@ -525,7 +431,7 @@ Value ValueDeserializer::decodeFixed(
     case DataType::Boolean:
     {
         const std::uint8_t raw =
-            decoder.decodeUnsignedAt<std::uint8_t>(absoluteOffset);
+            decoder.readUnsignedAt<std::uint8_t>(absoluteOffset);
         if (raw > 1)
         {
             throw std::runtime_error("Invalid stored BOOLEAN value");
@@ -539,7 +445,7 @@ Value ValueDeserializer::decodeFixed(
 }
 
 Value ValueDeserializer::decodeVariable(
-    PageDecoder &decoder,
+    ByteReader &decoder,
     std::size_t absoluteOffset,
     std::uint32_t length,
     DataType type)
@@ -549,7 +455,7 @@ Value ValueDeserializer::decodeVariable(
     case DataType::Text:
     {
         std::vector<std::byte> bytes =
-            decoder.decodeBytesAt(absoluteOffset, length);
+            decoder.readBytesAt(absoluteOffset, length);
 
         const char *chars =
             reinterpret_cast<const char *>(bytes.data());
@@ -563,7 +469,7 @@ Value ValueDeserializer::decodeVariable(
 }
 
 RowDecoder::RowDecoder(
-    PageDecoder &decoder,
+    ByteReader &decoder,
     const HeaderPage &headerPage,
     std::size_t rowStart)
     : decoder(decoder),
@@ -651,7 +557,7 @@ bool RowDecoder::isNull(std::size_t columnIndex)
     std::size_t bitIndex = columnIndex % 8;
 
     std::uint8_t byte =
-        decoder.decodeUnsignedAt<std::uint8_t>(byteOffset);
+        decoder.readUnsignedAt<std::uint8_t>(byteOffset);
 
     return (byte & static_cast<std::uint8_t>(1u << bitIndex)) != 0;
 }
@@ -677,10 +583,10 @@ Value RowDecoder::decodeVariableValue(
         rowStart + varDirStartOffset + var.varIndex * VarEntrySize;
 
     std::uint32_t relativeOffset =
-        decoder.decodeUnsignedAt<std::uint32_t>(varEntryOffset);
+        decoder.readUnsignedAt<std::uint32_t>(varEntryOffset);
 
     std::uint32_t length =
-        decoder.decodeUnsignedAt<std::uint32_t>(varEntryOffset + 4);
+        decoder.readUnsignedAt<std::uint32_t>(varEntryOffset + 4);
 
     std::size_t absoluteDataOffset =
         rowStart + relativeOffset;
@@ -692,7 +598,7 @@ Value RowDecoder::decodeVariableValue(
         column.type);
 }
 
-SlotDecoder::SlotDecoder(PageDecoder &decoder)
+SlotDecoder::SlotDecoder(ByteReader &decoder)
     : decoder(decoder) {}
 
 Slot SlotDecoder::decodeSlot(std::uint16_t slotIndex) const
@@ -700,9 +606,9 @@ Slot SlotDecoder::decodeSlot(std::uint16_t slotIndex) const
     std::size_t base = slotOffset(slotIndex);
 
     return Slot{
-        .offset = decoder.decodeUnsignedAt<std::uint16_t>(base),
-        .size = decoder.decodeUnsignedAt<std::uint16_t>(base + 2),
-        .flags = decoder.decodeUnsignedAt<std::uint16_t>(base + 4)};
+        .offset = decoder.readUnsignedAt<std::uint16_t>(base),
+        .size = decoder.readUnsignedAt<std::uint16_t>(base + 2),
+        .flags = decoder.readUnsignedAt<std::uint16_t>(base + 4)};
 }
 
 std::vector<Slot> SlotDecoder::decodeSlots(std::uint16_t slotCount) const
@@ -723,7 +629,7 @@ std::size_t SlotDecoder::slotOffset(std::uint16_t slotIndex) const
     return PAGE_SIZE - ((static_cast<std::size_t>(slotIndex) + 1) * SlotSize);
 }
 
-DataPageDecoder::DataPageDecoder(PageDecoder &decoder, const HeaderPage &headerPage)
+DataPageDecoder::DataPageDecoder(ByteReader &decoder, const HeaderPage &headerPage)
     : decoder(decoder),
       headerDecoder(decoder),
       slotDecoder(decoder),
@@ -777,25 +683,8 @@ RawPage readPageFromFile(
     const std::filesystem::path &tablePath,
     std::uint32_t pageId)
 {
-    RawPage page{};
-    std::ifstream file{tablePath, std::ios::binary};
-
-    if (!file)
-    {
-        throw std::runtime_error("Failed to open file: " + tablePath.string());
-    }
-
-    file.seekg(static_cast<std::streamoff>(pageId) * PAGE_SIZE);
-    file.read(
-        reinterpret_cast<char *>(page.data()),
-        static_cast<std::streamsize>(page.size()));
-
-    if (!file)
-    {
-        throw std::runtime_error("Failed to read page " + std::to_string(pageId));
-    }
-
-    return page;
+    PageFile file{tablePath, LinuxFile::OpenMode::ReadOnly};
+    return file.readPage(pageId);
 }
 
 
@@ -811,21 +700,21 @@ bool isValidPageType(std::uint8_t value)
 
 PageHeader decodePageHeader(const RawPage &page)
 {
-    PageDecoder decoder(page);
+    ByteReader decoder(page.bytes);
     PageHeaderDecoder headerDecoder(decoder);
     return headerDecoder.decode();
 }
 
 Page decodeHeaderPage(const RawPage &page)
 {
-    PageDecoder decoder(page);
+    ByteReader decoder(page.bytes);
     HeaderPageDecoder headerPageDecoder(decoder);
     return headerPageDecoder.decode();
 }
 
 Page decodeDataPage(const RawPage &page, const HeaderPage &headerPage)
 {
-    PageDecoder decoder(page);
+    ByteReader decoder(page.bytes);
     DataPageDecoder dataPageDecoder(decoder, headerPage);
     return dataPageDecoder.decode();
 }

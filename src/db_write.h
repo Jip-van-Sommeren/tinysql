@@ -2,6 +2,7 @@
 
 #include "db_storage.h"
 
+#include <climits>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -9,84 +10,58 @@
 #include <type_traits>
 #include <vector>
 
-
+// Owns a fixed-size, zero-initialized buffer; writes never resize it.
 class ByteWriter
 {
 public:
     explicit ByteWriter(std::size_t size)
-        : buffer(size)
-    {
-    }
+        : buffer(size) {}
 
     std::size_t position() const noexcept { return pos; }
     std::size_t size() const noexcept { return buffer.size(); }
 
-    const std::vector<std::byte>& bytes() const noexcept
+    const std::vector<std::byte> &bytes() const noexcept
     {
         return buffer;
     }
 
     void seek(std::size_t newPos);
-    template <typename T>
-    void writeUnsigned(T value);
 
     template <typename T>
-    void writeUnsignedAt(std::size_t offset, T value);
+    void writeUnsigned(T value)
+    {
+        writeUnsignedAt(pos, value);
+        pos += sizeof(T);
+    }
 
-    void writeBytes(const void* data, std::size_t count);
+    // Offset-based operations leave the sequential position unchanged.
+    template <typename T>
+    void writeUnsignedAt(std::size_t offset, T value)
+    {
+        static_assert(CHAR_BIT == 8, "This format requires 8-bit bytes");
+        static_assert(
+            std::is_integral_v<T> && std::is_unsigned_v<T> &&
+                !std::is_same_v<std::remove_cv_t<T>, bool>,
+            "T must be an unsigned integer type other than bool");
 
-    void writeBytesAt(std::size_t offset,
-                      const void* data,
-                      std::size_t count);
-    void writeString(const std::string& value);
+        ensureRange(offset, sizeof(T));
+        for (std::size_t i = 0; i < sizeof(T); ++i)
+        {
+            buffer[offset + i] =
+                static_cast<std::byte>((value >> (i * 8)) & 0xFFu);
+        }
+    }
+
+    void writeBytes(const void *data, std::size_t count);
+    void writeBytesAt(std::size_t offset, const void *data, std::size_t count);
+    // A little-endian uint32_t byte length followed by the string bytes.
+    void writeString(const std::string &value);
 
 private:
     std::vector<std::byte> buffer;
     std::size_t pos = 0;
 
     void ensureRange(std::size_t offset, std::size_t count) const;
-};
-
-
-
-class PageWriter
-{
-public:
-    explicit PageWriter(RawPage &buffer);
-
-    std::size_t position() const;
-    void seek(std::size_t newPos);
-
-    template <typename T>
-    void writeUnsigned(T value)
-    {
-        static_assert(std::is_unsigned_v<T>, "T must be an unsigned integer type");
-        ensureCapacity(sizeof(T));
-
-        for (std::size_t shift = 0; shift < sizeof(T) * 8; shift += 8)
-        {
-            buffer[pos++] = static_cast<std::byte>((value >> shift) & 0xFF);
-        }
-    }
-
-    template <typename T>
-    void writeUnsignedAt(std::size_t offset, T value)
-    {
-        std::size_t saved = pos;
-        seek(offset);
-        writeUnsigned<T>(value);
-        seek(saved);
-    }
-
-    void writeBytes(const void *data, std::size_t size);
-    void writeBytesAt(std::size_t offset, const void *data, std::size_t size);
-    void writeString(const std::string &value);
-
-private:
-    RawPage &buffer;
-    std::size_t pos = 0;
-
-    void ensureCapacity(std::size_t size) const;
 };
 
 class ValueSerializer
@@ -100,7 +75,7 @@ public:
 class RowWriter
 {
 public:
-    RowWriter(PageWriter &writer, const HeaderPage &headerPage);
+    RowWriter(ByteWriter &writer, const HeaderPage &headerPage);
 
     void writeRow(const std::vector<Value> &values);
     static std::size_t computeSerializedRowSize(
@@ -108,7 +83,7 @@ public:
         const std::vector<Value> &values);
 
 private:
-    PageWriter &writer;
+    ByteWriter &writer;
     const HeaderPage &headerPage;
 
     std::size_t rowStart = 0;
@@ -154,7 +129,7 @@ class SlotWriter
 public:
     static constexpr std::size_t SlotSize = 6;
 
-    explicit SlotWriter(PageWriter &writer);
+    explicit SlotWriter(ByteWriter &writer);
 
     void writeSlot(std::uint16_t slotIndex, const Slot &slot);
     void writeSlot(
@@ -166,13 +141,13 @@ public:
     std::size_t slotOffset(std::uint16_t slotIndex) const;
 
 private:
-    PageWriter &writer;
+    ByteWriter &writer;
 };
 
 class PageHeaderWriter
 {
 public:
-    explicit PageHeaderWriter(PageWriter &writer);
+    explicit PageHeaderWriter(ByteWriter &writer);
 
     void write(const PageHeader &header);
     void initializeDataPage(std::uint32_t pageId);
@@ -182,18 +157,18 @@ public:
     void setNextPageId(std::uint32_t nextPageId);
 
 private:
-    PageWriter &writer;
+    ByteWriter &writer;
 };
 
 class HeaderPageWriter
 {
 public:
-    explicit HeaderPageWriter(PageWriter &writer);
+    explicit HeaderPageWriter(ByteWriter &writer);
 
     void write(const HeaderPage &header);
 
 private:
-    PageWriter &writer;
+    ByteWriter &writer;
 
     void writeColumn(const Column &column);
     void writeConstraint(const Constraint &constraint);
@@ -203,13 +178,13 @@ private:
 class DataPageWriter
 {
 public:
-    DataPageWriter(PageWriter &writer, const HeaderPage &tableHeader);
+    DataPageWriter(ByteWriter &writer, const HeaderPage &tableHeader);
 
     void write(std::uint32_t pageId, const std::vector<Row> &rows);
     void write(const PageHeader &pageHeader, const std::vector<Row> &rows);
 
 private:
-    PageWriter &writer;
+    ByteWriter &writer;
     PageHeaderWriter headerWriter;
     SlotWriter slotWriter;
     const HeaderPage &tableHeader;
@@ -220,7 +195,7 @@ class ExpressionSerializer
 public:
     static void serialize(
         const BoundExpr &expression,
-        PageWriter &writer);
+        ByteWriter &writer);
 };
 
 RawPage encodeHeaderPage(const PageHeader &pageHeader, const HeaderPage &headerPage);

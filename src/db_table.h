@@ -57,7 +57,7 @@ public:
 private:
     friend class TableCursor;
 
-    explicit Table(std::filesystem::path tablePath);
+    explicit Table(std::filesystem::path tablePath, LinuxFile::OpenMode mode);
 
     BufferManager bufferManager;
 

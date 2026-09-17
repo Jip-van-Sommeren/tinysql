@@ -32,6 +32,8 @@ add_library(db_core
     src/db_database.cpp
     src/db_decimal.cpp
     src/db_expression_evaluator.cpp
+    src/db_linux_file.cpp
+    src/db_journal_file.cpp
     src/db_page_factory.cpp
     src/db_query_executor.cpp
     src/db_query_validator.cpp
@@ -58,6 +60,25 @@ target_link_libraries(db_sql_parser_demo PRIVATE db_sql)
 include(CTest)
 if(BUILD_TESTING)
     add_test(NAME db_sql_parser_demo COMMAND db_sql_parser_demo)
+
+    add_executable(db_byte_io_test tests/db_byte_io_test.cpp)
+    db_configure_target(db_byte_io_test PRIVATE)
+    target_link_libraries(db_byte_io_test PRIVATE db_core)
+    add_test(NAME db_byte_io_test COMMAND db_byte_io_test)
+
+    add_executable(db_linux_file_test tests/db_linux_file_test.cpp)
+    db_configure_target(db_linux_file_test PRIVATE)
+    target_link_libraries(db_linux_file_test PRIVATE db_core)
+    target_link_options(db_linux_file_test PRIVATE
+        -Wl,--wrap=open -Wl,--wrap=pread -Wl,--wrap=pwrite
+        -Wl,--wrap=fstat -Wl,--wrap=ftruncate -Wl,--wrap=fsync -Wl,--wrap=close
+    )
+    add_test(NAME db_linux_file_test COMMAND db_linux_file_test)
+
+    add_executable(db_journal_file_test tests/db_journal_file_test.cpp)
+    db_configure_target(db_journal_file_test PRIVATE)
+    target_link_libraries(db_journal_file_test PRIVATE db_core)
+    add_test(NAME db_journal_file_test COMMAND db_journal_file_test)
 
     add_executable(db_decimal_test tests/db_decimal_test.cpp)
     db_configure_target(db_decimal_test PRIVATE)

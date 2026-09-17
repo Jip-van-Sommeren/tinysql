@@ -58,7 +58,9 @@ class BufferManager
 public:
     using PageReader = std::function<Page(const RawPage &)>;
 
-    explicit BufferManager(std::filesystem::path path);
+    explicit BufferManager(
+        std::filesystem::path path,
+        LinuxFile::OpenMode mode = LinuxFile::OpenMode::OpenExisting);
     BufferManager(const BufferManager &) = delete;
     BufferManager &operator=(const BufferManager &) = delete;
     BufferManager(BufferManager &&) = default;
