@@ -23,8 +23,14 @@ LinuxFile::LinuxFile(const std::filesystem::path &path, OpenMode mode)
     case OpenMode::CreateNew:
         flags |= O_RDWR | O_CREAT | O_EXCL;
         break;
+    case OpenMode::CreateNewDirectory:
+        flags |= O_RDWR | O_CREAT | O_EXCL | O_DIRECTORY;
+        break;
     case OpenMode::ReadOnly:
         flags |= O_RDONLY;
+        break;
+    case OpenMode::Directory:
+        flags |= O_RDONLY | O_DIRECTORY
         break;
     default:
         throw std::invalid_argument("Invalid LinuxFile open mode");

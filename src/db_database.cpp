@@ -14,7 +14,7 @@
 
 Database::Database(std::filesystem::path dbPath, std::string name)
     : dbName(std::move(name)),
-      storageEngine(std::move(dbPath))
+      storageEngine(std::move(dbPath), LinuxFile::OpenMode::CreateNewDirectory)
 {
 }
 

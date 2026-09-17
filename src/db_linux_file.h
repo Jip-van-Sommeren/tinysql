@@ -15,7 +15,9 @@ public:
     {
         OpenExisting,
         CreateNew,
-        ReadOnly
+        ReadOnly,
+        Directory,
+        CreateNewDirectory
     };
 
     explicit LinuxFile(

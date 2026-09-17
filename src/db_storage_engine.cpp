@@ -6,11 +6,11 @@
 #include <utility>
 #include <vector>
 
-StorageEngine::StorageEngine(std::filesystem::path dbPath)
-    : dbPath(std::move(dbPath)),
-      tablesPath(this->dbPath / "tables")
+StorageEngine::StorageEngine(const std::filesystem::path &path, LinuxFile::OpenMode mode)
+    : table_dir_(path / "tables", mode),
+      journal_dir_(path / "journal", mode),
+      dbPath_(std::move(path))
 {
-    std::filesystem::create_directories(tablesPath);
 }
 
 Table StorageEngine::createTable(
@@ -19,7 +19,7 @@ Table StorageEngine::createTable(
     const std::vector<Column> &columns,
     const std::vector<Constraint> &constraints)
 {
-    std::filesystem::path tablePath = getTablePath(tableName);
+    std::filesystem::path tablePath = dbPath_ / "tables" / (tableName + ".table");
 
     if (std::filesystem::exists(tablePath))
     {
@@ -46,13 +46,13 @@ Table StorageEngine::openTable(const std::string &tableName)
     return Table::open(std::move(tablePath));
 }
 
-const std::filesystem::path &StorageEngine::getTablesPath() const
-{
-    return tablesPath;
-}
+// const std::filesystem::path &StorageEngine::getTablesPath() const
+// {
+//     return tablesPath;
+// }
 
 std::filesystem::path StorageEngine::getTablePath(
     const std::string &tableName) const
 {
-    return tablesPath / (tableName + ".table");
+    return dbPath / "tables" / (tableName + ".table");
 }

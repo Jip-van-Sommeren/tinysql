@@ -9,7 +9,7 @@
 class StorageEngine
 {
 public:
-    explicit StorageEngine(std::filesystem::path dbPath);
+    explicit StorageEngine(const std::filesystem::path &path, LinuxFile::OpenMode mode);
 
     Table createTable(
         const std::string &tableName,
@@ -18,11 +18,13 @@ public:
         const std::vector<Constraint> &constraints);
     Table openTable(const std::string &tableName);
 
-    const std::filesystem::path &getTablesPath() const;
+    // const std::filesystem::path &getTablesPath() const;
 
 private:
-    std::filesystem::path dbPath;
-    std::filesystem::path tablesPath;
+    LinuxFile table_dir_;
+    LinuxFile journal_dir_;
+    std::filesystem::path dbPath_;
+
 
     std::filesystem::path getTablePath(const std::string &tableName) const;
 };
