@@ -95,6 +95,7 @@ Table Table::open(std::filesystem::path tablePath)
 
 void Table::insertRows(const BoundInsert &insert)
 {
+
     bufferManager.insertAllRows(insert.rows);
     bufferManager.flushAll();
 }
@@ -106,15 +107,16 @@ TableCursor Table::scan() &
 
 std::uint64_t Table::deleteRows(const BoundDelete &del)
 {
+
     PageGuard header = bufferManager.getHeaderPage();
-    HeaderPage &headerPage = header.as<HeaderPage>();
+    HeaderPage &headerPage = header.write<HeaderPage>();
     std::uint64_t deletedCount = 0;
 
     PageId pageId = headerPage.firstDataPageId;
     while (pageId != 0)
     {
         PageGuard data = bufferManager.getDataPage(pageId);
-        DataPage &dataPage = data.as<DataPage>();
+        DataPage &dataPage = data.write<DataPage>();
 
         const std::size_t previousRowCount = dataPage.rows.size();
         std::erase_if(

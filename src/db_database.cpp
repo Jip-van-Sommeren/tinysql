@@ -118,8 +118,20 @@ QueryResult Database::executeSql(const std::string &sql)
 
 QueryResult Database::executeInsert(const BoundInsert &insert)
 {
-    Table table = storageEngine.openTable(insert.tableName);
-    table.insertRows(insert);
+    storageEngine.beginStatement();
+    try
+    {
+        Table table = storageEngine.openTable(insert.tableName);
+
+        table.insertRows(insert);
+    }
+    catch (...)
+    {
+        storageEngine.rollbackStatement();
+        throw;
+    }
+
+    storageEngine.commitStatement();
 
     return QueryResult{
         .columns = {},
@@ -137,8 +149,21 @@ QueryResult Database::executeSelect(const BoundSelect &select)
 
 QueryResult Database::executeDelete(const BoundDelete &del)
 {
-    Table table = storageEngine.openTable(del.tableName);
-    std::uint64_t deletedCount = table.deleteRows(del);
+    storageEngine.beginStatement();
+    std::uint64_t deletedCount;
+    try
+    {
+        Table table = storageEngine.openTable(del.tableName);
+
+        deletedCount = table.deleteRows(del);
+    }
+    catch (...)
+    {
+        storageEngine.rollbackStatement();
+        throw;
+    }
+
+    storageEngine.commitStatement();
 
     return QueryResult{
         .columns = {},
@@ -155,6 +180,7 @@ QueryResult Database::executeCreateTable(
         dbName,
         createTable.columns,
         createTable.constraints);
+    storageEngine.syncTablesDirectory();
 
     return QueryResult{
         .columns = {},

@@ -59,9 +59,15 @@ void PageGuard::release() noexcept
     }
 }
 
-Page &PageGuard::page()
+Page &PageGuard::writePage()
 {
     assert(page_ != nullptr);
+    assert(bufferManager_ != nullptr);
+
+    bufferManager_->prepareForWrite(pageId_);
+
+    bufferManager_->markDirty(pageId_);
+
     return *page_;
 }
 
@@ -77,9 +83,31 @@ void PageGuard::markDirty()
     bufferManager_->markDirty(pageId_);
 }
 
-BufferManager::BufferManager(std::filesystem::path path, LinuxFile::OpenMode mode)
-    : pageFile_(path, mode)
+BufferManager::BufferManager(std::filesystem::path path, LinuxFile::OpenMode mode, StatementRecovery &statementRecovery, std::filesystem::path relTablePath)
+    : pageFile_(path, mode), statementRecovery_(statementRecovery), relativeTablePath_(relTablePath)
 {
+}
+
+void BufferManager::prepareForWrite(PageId pageId)
+{
+    if (!statementRecovery_.isActive())
+    {
+        throw std::logic_error(
+            "Cannot modify a page without an active statement");
+    }
+
+    if (statementRecovery_.hasCapturedPage(relativeTablePath_, pageId))
+    {
+        return; // Already protected for this statement.
+    }
+
+    RawPage originalPage = pageFile_.readPage(pageId);
+
+    statementRecovery_.capturePageOnce(PageBeforeImage{
+        .relativeFilePath = relativeTablePath_,
+        .pageId = pageId,
+        .originalPage = originalPage,
+    });
 }
 
 Page &BufferManager::fetchPage(
@@ -171,7 +199,8 @@ void BufferManager::insertAllRows(const std::vector<Row> &rows)
     }
 
     PageGuard header = getHeaderPage();
-    HeaderPage &headerPage = header.as<HeaderPage>();
+    const HeaderPage &headerPage = header.as<HeaderPage>();
+    const auto rowCount = headerPage.totalRowCount;
 
     if (headerPage.lastDataPageId == 0)
     {
@@ -198,6 +227,7 @@ void BufferManager::insertAllRows(const std::vector<Row> &rows)
                 data.page(),
                 encodedRowSize(headerPage, row)))
         {
+
             appendRowToExistingDataPage(
                 header,
                 data,
@@ -225,12 +255,15 @@ void BufferManager::flushPage(PageId pageId)
     }
 
     RawPage encodedPage = encodeCachedPage(frame.page);
+    statementRecovery_.ensureDurable();
+
     pageFile_.writePage(pageId, encodedPage);
     frame.dirty = false;
 }
 
 void BufferManager::flushAll()
 {
+    statementRecovery_.ensureDurable();
     for (const auto &[pageId, frame] : pages)
     {
         if (frame.dirty)
@@ -296,9 +329,9 @@ void BufferManager::appendRowToExistingDataPage(
     PageGuard &data,
     const Row &row)
 {
-    HeaderPage &headerPage = header.as<HeaderPage>();
-    DataPage &dataPage = data.as<DataPage>();
-    PageHeader &dataPageHeader = data.page().header;
+    HeaderPage &headerPage = header.write<HeaderPage>();
+    DataPage &dataPage = data.write<DataPage>();
+    PageHeader &dataPageHeader = data.writePage().header;
 
     const std::size_t encodedSize = encodedRowSize(headerPage, row);
     if (encodedSize > std::numeric_limits<std::uint16_t>::max())
@@ -375,13 +408,11 @@ void BufferManager::appendRowToExistingDataPage(
     }
 
     ++headerPage.totalRowCount;
-    data.markDirty();
-    header.markDirty();
 }
 
 PageId BufferManager::createDataPage(PageGuard &header)
 {
-    HeaderPage &headerPage = header.as<HeaderPage>();
+    HeaderPage &headerPage = header.write<HeaderPage>();
 
     PageId previousPageId = headerPage.lastDataPageId;
     PageId newPageId = headerPage.nextUnusedPageId;
@@ -399,8 +430,7 @@ PageId BufferManager::createDataPage(PageGuard &header)
     if (previousPageId != 0)
     {
         PageGuard previous = getDataPage(previousPageId);
-        previous.page().header.nextPageId = newPageId;
-        previous.markDirty();
+        previous.writePage().header.nextPageId = newPageId;
     }
     else
     {
@@ -415,7 +445,6 @@ PageId BufferManager::createDataPage(PageGuard &header)
 
     headerPage.lastDataPageId = newPageId;
     headerPage.nextUnusedPageId = newPageId + 1;
-    header.markDirty();
     setPage(newDataPage, newPageId);
 
     return newPageId;

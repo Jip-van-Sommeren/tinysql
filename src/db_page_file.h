@@ -17,6 +17,7 @@ public:
     // flush. This does NOT promise durable storage; use sync() for that.
     void flush() noexcept;
     void sync();
+    std::filesystem::path getPath() { return file_.getPath(); }
 
 private:
     LinuxFile file_;

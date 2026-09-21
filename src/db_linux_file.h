@@ -37,6 +37,7 @@ public:
     std::uint64_t size() const;
     void resize(std::uint64_t size);
     void sync();
+    std::filesystem::path getPath() { return path_; }
 
 private:
     std::filesystem::path path_;

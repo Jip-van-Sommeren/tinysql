@@ -19,7 +19,9 @@ StorageEngine::StorageEngine(
     const std::filesystem::path &path)
     : dbPath_(path),
       tablesDirectory_(dbPath_ / "tables"),
-      journalDirectory_(dbPath_ / "journal")
+      journalDirectory_(dbPath_ / "journal"),
+      statementRecovery_(path,
+                         LinuxFile::OpenMode::CreateNew)
 {
 }
 
@@ -68,10 +70,9 @@ bool StorageEngine::tableExists(const std::string &name) const
 {
     return std::filesystem::exists(getTablePath(name));
 }
+
 HeaderPage StorageEngine::getTableHeader(const std::string &name) const
 {
-    //     HeaderPage getTableHeader(const std::string &tableName) const override
-    //     {
     std::filesystem::path path = getTablePath(name);
 
     if (!std::filesystem::exists(path))

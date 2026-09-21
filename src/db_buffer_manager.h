@@ -2,6 +2,8 @@
 
 #include "db_storage.h"
 #include "db_page_file.h"
+#include "db_journal_file.h"
+#include "db_statement_recovery.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -26,20 +28,23 @@ public:
     PageGuard &operator=(PageGuard &&other) noexcept;
     ~PageGuard() noexcept;
 
-    Page &page();
     const Page &page() const;
     void markDirty();
-
-    template <typename T>
-    T &as()
-    {
-        return std::get<T>(page().data);
-    }
 
     template <typename T>
     const T &as() const
     {
         return std::get<T>(page().data);
+    }
+    Page &writePage();
+
+    template <typename T>
+    T &write()
+    {
+        // Check the variant type before changing recovery/dirty state.
+        (void)as<T>();
+
+        return std::get<T>(writePage().data);
     }
 
 private:
@@ -60,7 +65,8 @@ public:
 
     explicit BufferManager(
         std::filesystem::path path,
-        LinuxFile::OpenMode mode = LinuxFile::OpenMode::OpenExisting);
+        LinuxFile::OpenMode mode = LinuxFile::OpenMode::OpenExisting,
+        StatementRecovery &statementRecovery, std::filesystem::path relTablePath);
     BufferManager(const BufferManager &) = delete;
     BufferManager &operator=(const BufferManager &) = delete;
     BufferManager(BufferManager &&) = default;
@@ -78,7 +84,12 @@ private:
     friend class PageGuard;
 
     PageFile pageFile_;
+    StatementRecovery &statementRecovery_;
+    std::filesystem::path relativeTablePath_;
+
     std::unordered_map<PageId, PageFrame> pages;
+
+    void prepareForWrite(std::uint32_t pageId);
 
     Page &fetchPage(PageId pageId, const PageReader &reader);
     void pinPage(PageId pageId);

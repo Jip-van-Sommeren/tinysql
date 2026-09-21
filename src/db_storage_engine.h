@@ -2,6 +2,7 @@
 
 #include "db_table.h"
 #include "db_catalog.h"
+#include "db_journal_file.h"
 #include "db_read.h"
 
 #include <filesystem>
@@ -26,6 +27,29 @@ public:
         const std::vector<Column> &columns,
         const std::vector<Constraint> &constraints);
     Table openTable(const std::string &tableName);
+    void syncTablesDirectory()
+    {
+        tablesDirectory_.sync();
+    }
+
+    void syncJournalDirectory()
+    {
+        journalDirectory_.sync();
+    }
+    void beginStatement()
+    {
+        statementRecovery_.begin();
+    }
+
+    void commitStatement()
+    {
+        statementRecovery_.commit();
+    }
+
+    void rollbackStatement()
+    {
+        statementRecovery_.rollback();
+    }
 
     // const std::filesystem::path &getTablesPath() const;
 
@@ -33,6 +57,7 @@ private:
     std::filesystem::path dbPath_;
     LinuxDirectory tablesDirectory_;
     LinuxDirectory journalDirectory_;
+    StatementRecovery statementRecovery_;
     std::filesystem::path getTablePath(const std::string &name) const
     {
         return dbPath_ / "tables" / (name + ".table");
