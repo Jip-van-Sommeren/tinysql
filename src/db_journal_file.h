@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <optional>
 #include <vector>
+#include <variant>
 
 enum class JournalRecordType : std::uint8_t
 {
@@ -30,6 +31,8 @@ struct FileBeforeImage
     std::uint64_t originalSize; // Bytes, including all pages.
 };
 
+using JournalRecord = std::variant<FileBeforeImage, PageBeforeImage>;
+
 // Record I/O only, not yet a complete statement recovery protocol. Callers must
 // resolve old journals before starting a new statement or applying undo records.
 class JournalFile
@@ -43,12 +46,11 @@ public:
     static constexpr std::size_t MaxPathBytes = 4096;
 
     // nullopt means EOF between records; truncated records throw.
-    std::optional<PageBeforeImage> readNext();
+    std::optional<JournalRecord> readNext();
     void rewind() noexcept { readOffset_ = 0; }
 
     // Convenience snapshot from offset zero; does not change readNext's cursor.
     // Preserves file paths, record order, and duplicate page IDs.
-    std::vector<PageBeforeImage> readPages();
     void writeFileBeforeImage(const FileBeforeImage &fileBeforeImage);
 
     void writePage(const PageBeforeImage &pageBeforeImage);
@@ -60,6 +62,6 @@ private:
     std::uint64_t readOffset_ = 0;
     bool appendFailed_ = false;
 
-    std::optional<PageBeforeImage> readRecord(
+    std::optional<JournalRecord> readRecord(
         std::uint64_t &offset, std::uint64_t fileSize);
 };

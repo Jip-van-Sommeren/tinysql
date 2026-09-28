@@ -11,6 +11,7 @@ void StatementRecovery::begin()
     }
 
     journalDirectoryNeedsSync_ = true;
+    active_ = true;
 
     journalFile_.emplace(
         journalPath_,
@@ -22,7 +23,7 @@ void StatementRecovery::capturePageOnce(const PageBeforeImage &image)
     journalFile_->writePage(image);
     capturedPages_[image.relativeFilePath].insert(image.pageId);
 }
-bool StatementRecovery::isActive() {}
+bool StatementRecovery::isActive() { return active_; }
 bool StatementRecovery::hasCapturedPage(const std::filesystem::path &path, std::uint32_t pageId) const
 {
     const auto file = capturedPages_.find(path);
@@ -56,29 +57,54 @@ void StatementRecovery::rollback()
     std::unordered_map<std::filesystem::path, PageFile> openedFiles;
 
     journalFile_->rewind();
-
+    std::unordered_map<std::filesystem::path, std::uint64_t>
+        rollbackFileSizes;
     while (auto image = journalFile_->readNext())
     {
-        const auto &relativePath = image->relativeFilePath;
-        const auto pageId = image->pageId;
-        const RawPage &originalPage = image->originalPage;
+        std::visit(
+            [&](const auto &value)
+            {
+                using T = std::decay_t<decltype(value)>;
 
-        const std::filesystem::path resolvedTablePath =
-            dbRootPath_ / image->relativeFilePath;
+                if constexpr (std::is_same_v<T, PageBeforeImage>)
+                {
+                    const auto &relativePath = value.relativeFilePath;
+                    const auto pageId = value.pageId;
+                    const RawPage &originalPage = value.originalPage;
 
-        auto [it, inserted] = openedFiles.try_emplace(
-            image->relativeFilePath, // Map key.
-            resolvedTablePath,       // PageFile constructor argument.
-            LinuxFile::OpenMode::OpenExisting);
+                    const std::filesystem::path resolvedTablePath =
+                        dbRootPath_ / value.relativeFilePath;
 
-        PageFile &file = it->second;
-        file.writePage(image->pageId, image->originalPage);
+                    auto [it, inserted] = openedFiles.try_emplace(
+                        value.relativeFilePath,
+                        resolvedTablePath,
+                        LinuxFile::OpenMode::OpenExisting);
+
+                    PageFile &file = it->second;
+
+                    file.writePage(
+                        value.pageId,
+                        value.originalPage);
+                }
+                else if constexpr (std::is_same_v<T, FileBeforeImage>)
+                {
+                    auto [it, inserted] = rollbackFileSizes.try_emplace(
+                        value.relativeFilePath,
+                        value.originalSize);
+
+                    if (!inserted && it->second != value.originalSize)
+                    {
+                        throw std::runtime_error(
+                            "Conflicting original file sizes in journal");
+                    }
+                }
+            },
+            image.value());
     }
-
     try
     {
 
-        for (const auto &[relativePath, originalSize] : originalFileSizes_)
+        for (const auto &[relativePath, originalSize] : rollbackFileSizes)
         {
             auto [it, inserted] = openedFiles.try_emplace(
                 relativePath,
@@ -90,14 +116,21 @@ void StatementRecovery::rollback()
         }
         LinuxDirectory directory{journalPath_.parent_path()};
         directory.sync();
-
-        journalFile_.reset();
-        capturedPages_.clear();
     }
     catch (...)
     {
         throw;
     }
+
+    if (!std::filesystem::remove(journalPath_))
+    {
+        throw std::runtime_error("Expected journal file was missing");
+    }
+
+    journalFile_.reset();
+    capturedPages_.clear();
+    originalFileSizes_.clear();
+    failed_ = false;
 }
 
 void StatementRecovery::commit()
@@ -109,6 +142,8 @@ void StatementRecovery::commit()
 
     journalFile_.reset();
     capturedPages_.clear();
+    originalFileSizes_.clear();
+    failed_ = false;
 }
 void StatementRecovery::ensureDurable(std::uint32_t requiredEnd) {}
 

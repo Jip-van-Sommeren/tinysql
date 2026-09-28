@@ -80,7 +80,8 @@ Table Table::create(
     const std::string &tableName,
     const std::string &magic,
     const std::vector<Column> &columns,
-    const std::vector<Constraint> &constraints, StatementRecovery &statementRecovery)
+    const std::vector<Constraint> &constraints,
+    StatementRecovery &statementRecovery)
 {
     Table table{dbRoot, relTablePath, LinuxFile::OpenMode::CreateNew, statementRecovery};
     table.initializeNewTable(tableName, magic, columns, constraints);
@@ -169,18 +170,8 @@ void Table::initializeNewTable(
     const std::vector<Column> &columns,
     const std::vector<Constraint> &constraints)
 {
-    Page headerPage = makeHeaderPage(tableName, magic, columns, constraints);
-    Page firstDataPage = makeEmptyDataPage(1);
 
-    HeaderPage &header = std::get<HeaderPage>(headerPage.data);
-    header.firstDataPageId = 1;
-    header.lastDataPageId = 1;
-    header.nextUnusedPageId = 2;
-    header.totalRowCount = 0;
-
-    bufferManager.setPage(headerPage, 0);
-    bufferManager.setPage(firstDataPage, header.firstDataPageId);
-    bufferManager.flushAll();
+    bufferManager.initializeNewTable(tableName, magic, columns, constraints);
 }
 
 void Table::validateHeaderPage()

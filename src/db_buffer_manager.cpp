@@ -90,7 +90,11 @@ BufferManager::BufferManager(std::filesystem::path dbRoot, std::filesystem::path
 
 void BufferManager::prepareForWrite(PageId pageId)
 {
-    if (!statementRecovery_.isActive())
+    if (statementRecovery_.isActive())
+    {
+        statementRecovery_.captureFileOnce(relativeTablePath_);
+    }
+    else
     {
         throw std::logic_error(
             "Cannot modify a page without an active statement");
@@ -408,6 +412,20 @@ void BufferManager::appendRowToExistingDataPage(
     }
 
     ++headerPage.totalRowCount;
+}
+
+void BufferManager::initializeNewTable(const std::string &tableName,
+                                       const std::string &magic,
+                                       const std::vector<Column> &columns,
+                                       const std::vector<Constraint> &constraints)
+{
+
+    Page headerPage = makeHeaderPage(tableName, magic, columns, constraints);
+    Page firstDataPage = makeEmptyDataPage(headerPage.nextPageId());
+
+    setPage(headerPage, headerPage.pageId());
+    setPage(firstDataPage, firstDataPage.pageId());
+    flushAll();
 }
 
 PageId BufferManager::createDataPage(PageGuard &header)

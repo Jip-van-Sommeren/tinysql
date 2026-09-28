@@ -75,10 +75,14 @@ public:
     PageGuard getPage(PageId pageId, const PageReader &reader);
     PageGuard getHeaderPage();
     PageGuard getDataPage(PageId pageId);
+
+    void initializeNewTable(const std::string &tableName,
+                            const std::string &magic,
+                            const std::vector<Column> &columns,
+                            const std::vector<Constraint> &constraints);
     void insertAllRows(const std::vector<Row> &rows);
     void flushPage(PageId pageId);
     void flushAll();
-    void setPage(const Page &page, PageId pageId);
 
 private:
     friend class PageGuard;
@@ -89,7 +93,9 @@ private:
 
     std::unordered_map<PageId, PageFrame> pages;
 
-    void prepareForWrite(std::uint32_t pageId);
+    void prepareForWrite(PageId pageId);
+
+    void setPage(const Page &page, PageId pageId);
 
     Page &fetchPage(PageId pageId, const PageReader &reader);
     void pinPage(PageId pageId);

@@ -43,7 +43,7 @@ JournalFile::JournalFile(const std::filesystem::path &path, LinuxFile::OpenMode 
 {
 }
 
-std::optional<PageBeforeImage> JournalFile::readRecord(
+std::optional<JournalRecord> JournalFile::readRecord(
     std::uint64_t &offset, std::uint64_t fileSize)
 {
     if (offset == fileSize)
@@ -54,6 +54,12 @@ std::optional<PageBeforeImage> JournalFile::readRecord(
     {
         throw std::runtime_error("Truncated journal record length");
     }
+    std::array<std::byte, sizeof(std::uint8_t)> typeBytes{};
+    file_.readExactAt(offset, typeBytes);
+    ByteReader typeReader(typeBytes);
+    const JournalRecordType journalType = static_cast<JournalRecordType>(typeReader.readUnsigned<std::uint8_t>());
+    // skip type
+    offset += sizeof(std::uint8_t);
 
     std::array<std::byte, sizeof(std::uint32_t)> lengthBytes{};
     file_.readExactAt(offset, lengthBytes);
@@ -64,7 +70,21 @@ std::optional<PageBeforeImage> JournalFile::readRecord(
         throw std::runtime_error("Invalid journal path length");
     }
 
-    const std::size_t recordSize = RecordOverhead + pathLength;
+    std::size_t recordSize;
+    if (journalType == JournalRecordType::FileBeforeImage)
+    {
+        recordSize = sizeof(std::uint32_t) + sizeof(std::uint8_t) + sizeof(std::uint64_t) + pathLength;
+    }
+    else if (journalType == JournalRecordType::PageBeforeImage)
+    {
+        recordSize = RecordOverhead + pathLength;
+    }
+    else
+    {
+        throw std::runtime_error("invalid Journal Record Type");
+    }
+
+    // const std::size_t recordSize = RecordOverhead + pathLength;
     if (recordSize > fileSize - offset)
     {
         throw std::runtime_error("Truncated journal record");
@@ -76,6 +96,17 @@ std::optional<PageBeforeImage> JournalFile::readRecord(
     file_.readExactAt(offset + lengthBytes.size(),
                       std::span<std::byte>{bytes}.subspan(lengthBytes.size()));
     ByteReader reader(bytes);
+    if (journalType == JournalRecordType::FileBeforeImage)
+    {
+        FileBeforeImage record{};
+        record.relativeFilePath = reader.readString();
+        (void)encodedPath(record.relativeFilePath);
+        record.originalSize = reader.readUnsigned<std::uint64_t>();
+
+        offset += recordSize;
+        return record;
+    }
+    // Dont need to check for Other JournalRecordType again since invalid type should throw in the section above
     PageBeforeImage record{};
     record.relativeFilePath = reader.readString();
     (void)encodedPath(record.relativeFilePath);
@@ -86,27 +117,15 @@ std::optional<PageBeforeImage> JournalFile::readRecord(
     return record;
 }
 
-std::optional<PageBeforeImage> JournalFile::readNext()
+std::optional<JournalRecord> JournalFile::readNext()
 {
     return readRecord(readOffset_, file_.size());
-}
-
-std::vector<PageBeforeImage> JournalFile::readPages()
-{
-    std::vector<PageBeforeImage> pages;
-    const auto fileSize = file_.size();
-    std::uint64_t offset = 0;
-    while (auto record = readRecord(offset, fileSize))
-    {
-        pages.push_back(std::move(*record));
-    }
-    return pages;
 }
 
 void JournalFile::writeFileBeforeImage(const FileBeforeImage &fileBeforeImage)
 {
     const std::string path = encodedPath(fileBeforeImage.relativeFilePath);
-    ByteWriter writer(2 * sizeof(std::uint32_t) + path.size() + sizeof(std::uint8_t));
+    ByteWriter writer(sizeof(std::uint32_t) + path.size() + sizeof(std::uint8_t) + sizeof(std::uint64_t));
     writer.writeUnsigned<std::uint8_t>(static_cast<std::uint8_t>(JournalRecordType::FileBeforeImage));
 
     writer.writeString(path);

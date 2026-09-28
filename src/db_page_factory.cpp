@@ -141,7 +141,7 @@ Page makeHeaderPage(
         .slotCount = 0,
         .freeSpaceStart = 0,
         .freeSpaceEnd = static_cast<std::uint16_t>(PAGE_SIZE),
-        .nextPageId = 0};
+        .nextPageId = 1};
 
     HeaderPage tableHeader{
         .magic = magic,
@@ -151,9 +151,9 @@ Page makeHeaderPage(
         .columns = buildStoredColumns(columns),
         .constraints = constraints,
         .totalRowCount = 0,
-        .firstDataPageId = 0,
-        .lastDataPageId = 0,
-        .nextUnusedPageId = 1};
+        .firstDataPageId = 1,
+        .lastDataPageId = 1,
+        .nextUnusedPageId = 2};
 
     pageHeader.freeSpaceStart =
         calculateHeaderFreeSpaceStart(pageHeader, tableHeader);

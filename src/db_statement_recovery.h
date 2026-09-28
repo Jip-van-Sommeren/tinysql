@@ -35,4 +35,5 @@ private:
 
     bool journalDirectoryNeedsSync_ = false;
     bool failed_ = false;
+    bool active_ = false;
 };
