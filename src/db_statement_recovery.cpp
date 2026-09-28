@@ -20,12 +20,22 @@ void StatementRecovery::begin()
 
 void StatementRecovery::capturePageOnce(const PageBeforeImage &image)
 {
+    if (failed_)
+    {
+        throw std::runtime_error(
+            "Statement has failed; recovery is required");
+    }
     journalFile_->writePage(image);
     capturedPages_[image.relativeFilePath].insert(image.pageId);
 }
 bool StatementRecovery::isActive() { return active_; }
 bool StatementRecovery::hasCapturedPage(const std::filesystem::path &path, std::uint32_t pageId) const
 {
+    if (failed_)
+    {
+        throw std::runtime_error(
+            "Statement has failed; recovery is required");
+    }
     const auto file = capturedPages_.find(path);
 
     return file != capturedPages_.end() &&
@@ -34,11 +44,21 @@ bool StatementRecovery::hasCapturedPage(const std::filesystem::path &path, std::
 
 void StatementRecovery::captureFileOnce(const std::filesystem::path &relativePath)
 {
+    if (failed_)
+    {
+        throw std::runtime_error(
+            "Statement has failed; recovery is required");
+    }
     if (!originalFileSizes_.contains(relativePath))
     {
-        const auto originalSize = PageFile(relativePath).size();
+        const auto originalSize =
+            PageFile(dbRootPath_ / relativePath).size();
 
-        // TODO
+        if (originalSize % PAGE_SIZE != 0)
+        {
+            throw std::runtime_error("Invalid original table file size");
+        }
+
         journalFile_->writeFileBeforeImage(FileBeforeImage{
             .relativeFilePath = relativePath,
             .originalSize = originalSize,
@@ -47,18 +67,31 @@ void StatementRecovery::captureFileOnce(const std::filesystem::path &relativePat
         originalFileSizes_.emplace(relativePath, originalSize);
     }
 }
+const std::uint64_t StatementRecovery::getOriginalFileSize(const std::filesystem::path &relativePath)
+{
+    if (!originalFileSizes_.contains(relativePath))
+    {
+        throw std::logic_error(
+            "Original file size was not captured: " +
+            relativePath.string());
+    }
+
+    return originalFileSizes_.at(relativePath);
+}
 
 void StatementRecovery::rollback()
 {
+    failed_ = true;
     if (!journalFile_)
     {
         throw std::logic_error("No active journal");
     }
     std::unordered_map<std::filesystem::path, PageFile> openedFiles;
-
-    journalFile_->rewind();
     std::unordered_map<std::filesystem::path, std::uint64_t>
         rollbackFileSizes;
+
+    journalFile_->rewind();
+
     while (auto image = journalFile_->readNext())
     {
         std::visit(
@@ -101,36 +134,29 @@ void StatementRecovery::rollback()
             },
             image.value());
     }
-    try
+
+    for (const auto &[relativePath, originalSize] : rollbackFileSizes)
     {
+        auto [it, inserted] = openedFiles.try_emplace(
+            relativePath,
+            dbRootPath_ / relativePath,
+            LinuxFile::OpenMode::OpenExisting);
 
-        for (const auto &[relativePath, originalSize] : rollbackFileSizes)
-        {
-            auto [it, inserted] = openedFiles.try_emplace(
-                relativePath,
-                dbRootPath_ / relativePath,
-                LinuxFile::OpenMode::OpenExisting);
-
-            it->second.resize(originalSize);
-            it->second.sync();
-        }
-        LinuxDirectory directory{journalPath_.parent_path()};
-        directory.sync();
+        it->second.resize(originalSize);
+        it->second.sync();
     }
-    catch (...)
-    {
-        throw;
-    }
-
     if (!std::filesystem::remove(journalPath_))
     {
         throw std::runtime_error("Expected journal file was missing");
     }
+    LinuxDirectory directory{journalPath_.parent_path()};
+    directory.sync();
 
     journalFile_.reset();
     capturedPages_.clear();
     originalFileSizes_.clear();
     failed_ = false;
+    active_ = false;
 }
 
 void StatementRecovery::commit()
@@ -139,11 +165,14 @@ void StatementRecovery::commit()
     {
         throw std::runtime_error("Expected journal file was missing");
     }
+    LinuxDirectory directory{journalPath_.parent_path()};
+    directory.sync();
 
     journalFile_.reset();
     capturedPages_.clear();
     originalFileSizes_.clear();
     failed_ = false;
+    active_ = false;
 }
 void StatementRecovery::ensureDurable(std::uint32_t requiredEnd) {}
 

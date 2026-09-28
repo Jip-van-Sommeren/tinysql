@@ -175,12 +175,24 @@ QueryResult Database::executeDelete(const BoundDelete &del)
 QueryResult Database::executeCreateTable(
     const BoundCreateTable &createTable)
 {
-    storageEngine.createTable(
-        createTable.tableName,
-        dbName,
-        createTable.columns,
-        createTable.constraints);
-    storageEngine.syncTablesDirectory();
+    storageEngine.beginStatement();
+
+    try
+    {
+        storageEngine.createTable(
+            createTable.tableName,
+            dbName,
+            createTable.columns,
+            createTable.constraints);
+        storageEngine.syncTablesDirectory();
+    }
+    catch (...)
+    {
+        storageEngine.rollbackStatement();
+        throw;
+    }
+
+    storageEngine.commitStatement();
 
     return QueryResult{
         .columns = {},

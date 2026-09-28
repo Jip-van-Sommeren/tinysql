@@ -54,12 +54,13 @@ std::optional<JournalRecord> JournalFile::readRecord(
     {
         throw std::runtime_error("Truncated journal record length");
     }
+    const auto recordStart = offset;
+
     std::array<std::byte, sizeof(std::uint8_t)> typeBytes{};
     file_.readExactAt(offset, typeBytes);
     ByteReader typeReader(typeBytes);
     const JournalRecordType journalType = static_cast<JournalRecordType>(typeReader.readUnsigned<std::uint8_t>());
     // skip type
-    offset += sizeof(std::uint8_t);
 
     std::array<std::byte, sizeof(std::uint32_t)> lengthBytes{};
     file_.readExactAt(offset, lengthBytes);
@@ -103,7 +104,7 @@ std::optional<JournalRecord> JournalFile::readRecord(
         (void)encodedPath(record.relativeFilePath);
         record.originalSize = reader.readUnsigned<std::uint64_t>();
 
-        offset += recordSize;
+        offset = recordStart + recordSize;
         return record;
     }
     // Dont need to check for Other JournalRecordType again since invalid type should throw in the section above
@@ -113,7 +114,7 @@ std::optional<JournalRecord> JournalFile::readRecord(
     record.pageId = reader.readUnsigned<std::uint32_t>();
     reader.readBytes(record.originalPage.data(), record.originalPage.size());
 
-    offset += recordSize;
+    offset = recordStart + recordSize;
     return record;
 }
 

@@ -15,7 +15,6 @@ public:
     void writePage(std::uint32_t pageId, const RawPage &page);
     // Compatibility operation: native writes have no application buffer to
     // flush. This does NOT promise durable storage; use sync() for that.
-    void flush() noexcept;
     void sync();
     std::filesystem::path getPath() { return file_.getPath(); }
     std::uint64_t size() const

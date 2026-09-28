@@ -83,6 +83,10 @@ public:
     void insertAllRows(const std::vector<Row> &rows);
     void flushPage(PageId pageId);
     void flushAll();
+    void sync()
+    {
+        pageFile_.sync();
+    }
 
 private:
     friend class PageGuard;

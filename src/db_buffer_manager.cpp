@@ -105,13 +105,19 @@ void BufferManager::prepareForWrite(PageId pageId)
         return; // Already protected for this statement.
     }
 
-    RawPage originalPage = pageFile_.readPage(pageId);
+    // Original File Size already get checked with %PAGE_SIZE on insertion
 
-    statementRecovery_.capturePageOnce(PageBeforeImage{
-        .relativeFilePath = relativeTablePath_,
-        .pageId = pageId,
-        .originalPage = originalPage,
-    });
+    if (std::uint64_t{pageId} * PAGE_SIZE < statementRecovery_.getOriginalFileSize(relativeTablePath_))
+    {
+
+        RawPage originalPage = pageFile_.readPage(pageId);
+
+        statementRecovery_.capturePageOnce(PageBeforeImage{
+            .relativeFilePath = relativeTablePath_,
+            .pageId = pageId,
+            .originalPage = originalPage,
+        });
+    }
 }
 
 Page &BufferManager::fetchPage(
@@ -278,7 +284,6 @@ void BufferManager::flushAll()
 
     // All native writes completed before dirty flags are cleared. This is
     // writeback, not a durable statement commit; recovery coordination is separate.
-    pageFile_.flush();
 
     for (auto &[pageId, frame] : pages)
     {
@@ -425,7 +430,6 @@ void BufferManager::initializeNewTable(const std::string &tableName,
 
     setPage(headerPage, headerPage.pageId());
     setPage(firstDataPage, firstDataPage.pageId());
-    flushAll();
 }
 
 PageId BufferManager::createDataPage(PageGuard &header)

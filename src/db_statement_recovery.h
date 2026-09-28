@@ -15,11 +15,13 @@ public:
     void ensureDurable();
     void ensureDurable(std::uint32_t requiredEnd);
 
+    void statementFailed() { failed_ = true; }
+
     void rollback();
     bool isActive();
     void captureFileOnce(const std::filesystem::path &relativePath);
     bool hasCapturedPage(const std::filesystem::path &path, std::uint32_t pageId) const;
-
+    const std::uint64_t getOriginalFileSize(const std::filesystem::path &relativePath);
     void commit();
 
 private:

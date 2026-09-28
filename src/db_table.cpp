@@ -101,6 +101,7 @@ void Table::insertRows(const BoundInsert &insert)
 
     bufferManager.insertAllRows(insert.rows);
     bufferManager.flushAll();
+    bufferManager.sync();
 }
 
 TableCursor Table::scan() &
@@ -156,6 +157,8 @@ std::uint64_t Table::deleteRows(const BoundDelete &del)
     }
 
     bufferManager.flushAll();
+    bufferManager.sync();
+
     return deletedCount;
 }
 
@@ -170,8 +173,9 @@ void Table::initializeNewTable(
     const std::vector<Column> &columns,
     const std::vector<Constraint> &constraints)
 {
-
     bufferManager.initializeNewTable(tableName, magic, columns, constraints);
+    bufferManager.flushAll();
+    bufferManager.sync();
 }
 
 void Table::validateHeaderPage()
