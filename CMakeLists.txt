@@ -80,6 +80,11 @@ if(BUILD_TESTING)
     target_link_libraries(db_journal_file_test PRIVATE db_core)
     add_test(NAME db_journal_file_test COMMAND db_journal_file_test)
 
+    add_executable(db_journal_reader_test tests/db_journal_reader_test.cpp)
+    db_configure_target(db_journal_reader_test PRIVATE)
+    target_link_libraries(db_journal_reader_test PRIVATE db_core)
+    add_test(NAME db_journal_reader_test COMMAND db_journal_reader_test)
+
     add_executable(db_decimal_test tests/db_decimal_test.cpp)
     db_configure_target(db_decimal_test PRIVATE)
     target_link_libraries(db_decimal_test PRIVATE db_core)

@@ -46,26 +46,26 @@ JournalFile::JournalFile(const std::filesystem::path &path, LinuxFile::OpenMode 
 std::optional<JournalRecord> JournalFile::readRecord(
     std::uint64_t &offset, std::uint64_t fileSize)
 {
+    constexpr std::size_t TypeSize = sizeof(std::uint8_t);
+    constexpr std::size_t PrefixSize = TypeSize + sizeof(std::uint32_t);
+
     if (offset == fileSize)
     {
         return std::nullopt;
     }
-    if (offset > fileSize || fileSize - offset < sizeof(std::uint32_t))
+    if (offset > fileSize || fileSize - offset < PrefixSize)
     {
         throw std::runtime_error("Truncated journal record length");
     }
     const auto recordStart = offset;
 
-    std::array<std::byte, sizeof(std::uint8_t)> typeBytes{};
-    file_.readExactAt(offset, typeBytes);
-    ByteReader typeReader(typeBytes);
-    const JournalRecordType journalType = static_cast<JournalRecordType>(typeReader.readUnsigned<std::uint8_t>());
-    // skip type
-
-    std::array<std::byte, sizeof(std::uint32_t)> lengthBytes{};
-    file_.readExactAt(offset, lengthBytes);
-    ByteReader lengthReader(lengthBytes);
-    const auto pathLength = lengthReader.readUnsigned<std::uint32_t>();
+    // Every record starts with [type:u8][path length:u32].
+    std::array<std::byte, PrefixSize> prefixBytes{};
+    file_.readExactAt(recordStart, prefixBytes);
+    ByteReader prefixReader(prefixBytes);
+    const auto journalType = static_cast<JournalRecordType>(
+        prefixReader.readUnsigned<std::uint8_t>());
+    const auto pathLength = prefixReader.readUnsigned<std::uint32_t>();
     if (pathLength == 0 || pathLength > MaxPathBytes)
     {
         throw std::runtime_error("Invalid journal path length");
@@ -85,18 +85,19 @@ std::optional<JournalRecord> JournalFile::readRecord(
         throw std::runtime_error("invalid Journal Record Type");
     }
 
-    // const std::size_t recordSize = RecordOverhead + pathLength;
-    if (recordSize > fileSize - offset)
+    if (recordSize > fileSize - recordStart)
     {
         throw std::runtime_error("Truncated journal record");
     }
 
     // At most one bounded record is buffered, even for very large journals.
     std::vector<std::byte> bytes(recordSize);
-    std::copy(lengthBytes.begin(), lengthBytes.end(), bytes.begin());
-    file_.readExactAt(offset + lengthBytes.size(),
-                      std::span<std::byte>{bytes}.subspan(lengthBytes.size()));
+    std::copy(prefixBytes.begin(), prefixBytes.end(), bytes.begin());
+    file_.readExactAt(recordStart + PrefixSize,
+                      std::span<std::byte>{bytes}.subspan(PrefixSize));
     ByteReader reader(bytes);
+    // The type was decoded above; readString() starts at the path length.
+    reader.seek(TypeSize);
     if (journalType == JournalRecordType::FileBeforeImage)
     {
         FileBeforeImage record{};
