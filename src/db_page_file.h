@@ -18,6 +18,15 @@ public:
     void flush() noexcept;
     void sync();
     std::filesystem::path getPath() { return file_.getPath(); }
+    std::uint64_t size() const
+    {
+        return file_.size();
+    }
+
+    void resize(std::uint64_t sizeInBytes)
+    {
+        file_.resize(sizeInBytes);
+    }
 
 private:
     LinuxFile file_;

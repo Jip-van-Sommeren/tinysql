@@ -29,8 +29,8 @@ namespace
         }
         return value;
     }
-
-    constexpr std::size_t RecordOverhead = 2 * sizeof(std::uint32_t) + PAGE_SIZE;
+    // path_length and  pageId = 2* sizeof(std::uint32_t)
+    constexpr std::size_t RecordOverhead = 2 * sizeof(std::uint32_t) + PAGE_SIZE + sizeof(std::uint8_t);
 }
 
 std::size_t PageBeforeImage::size() const
@@ -103,6 +103,31 @@ std::vector<PageBeforeImage> JournalFile::readPages()
     return pages;
 }
 
+void JournalFile::writeFileBeforeImage(const FileBeforeImage &fileBeforeImage)
+{
+    const std::string path = encodedPath(fileBeforeImage.relativeFilePath);
+    ByteWriter writer(2 * sizeof(std::uint32_t) + path.size() + sizeof(std::uint8_t));
+    writer.writeUnsigned<std::uint8_t>(static_cast<std::uint8_t>(JournalRecordType::FileBeforeImage));
+
+    writer.writeString(path);
+    writer.writeUnsigned<std::uint64_t>(fileBeforeImage.originalSize);
+    if (writer.size() > std::numeric_limits<std::uint64_t>::max() - appendOffset_)
+    {
+        throw std::out_of_range("Journal append offset overflow");
+    }
+    try
+    {
+        file_.writeAllAt(appendOffset_, writer.bytes());
+    }
+    catch (...)
+    {
+        // A partial record may have reached disk. Never append past it on this
+        // object or report it as a successfully synchronized record stream.
+        appendFailed_ = true;
+        throw;
+    }
+    appendOffset_ += writer.size();
+}
 void JournalFile::writePage(const PageBeforeImage &pageBeforeImage)
 {
     if (appendFailed_)
@@ -112,6 +137,7 @@ void JournalFile::writePage(const PageBeforeImage &pageBeforeImage)
 
     const std::string path = encodedPath(pageBeforeImage.relativeFilePath);
     ByteWriter writer(RecordOverhead + path.size());
+    writer.writeUnsigned<std::uint8_t>(static_cast<std::uint8_t>(JournalRecordType::PageBeforeImage));
     writer.writeString(path);
     writer.writeUnsigned<std::uint32_t>(pageBeforeImage.pageId);
     writer.writeBytes(pageBeforeImage.originalPage.data(), pageBeforeImage.originalPage.size());

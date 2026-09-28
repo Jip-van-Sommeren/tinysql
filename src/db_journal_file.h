@@ -9,6 +9,12 @@
 #include <optional>
 #include <vector>
 
+enum class JournalRecordType : std::uint8_t
+{
+    FileBeforeImage = 1,
+    PageBeforeImage = 2,
+};
+
 struct PageBeforeImage
 {
     std::filesystem::path relativeFilePath;
@@ -16,6 +22,12 @@ struct PageBeforeImage
     RawPage originalPage;
 
     std::size_t size() const;
+};
+
+struct FileBeforeImage
+{
+    std::filesystem::path relativeFilePath;
+    std::uint64_t originalSize; // Bytes, including all pages.
 };
 
 // Record I/O only, not yet a complete statement recovery protocol. Callers must
@@ -37,6 +49,7 @@ public:
     // Convenience snapshot from offset zero; does not change readNext's cursor.
     // Preserves file paths, record order, and duplicate page IDs.
     std::vector<PageBeforeImage> readPages();
+    void writeFileBeforeImage(const FileBeforeImage &fileBeforeImage);
 
     void writePage(const PageBeforeImage &pageBeforeImage);
     void sync();

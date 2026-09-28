@@ -17,6 +17,7 @@ public:
 
     void rollback();
     bool isActive();
+    void captureFileOnce(const std::filesystem::path &relativePath);
     bool hasCapturedPage(const std::filesystem::path &path, std::uint32_t pageId) const;
 
     void commit();
@@ -29,6 +30,9 @@ private:
         std::filesystem::path,
         std::unordered_set<std::uint32_t>>
         capturedPages_;
+    std::unordered_map<std::filesystem::path, std::uint64_t>
+        originalFileSizes_;
+
     bool journalDirectoryNeedsSync_ = false;
     bool failed_ = false;
 };

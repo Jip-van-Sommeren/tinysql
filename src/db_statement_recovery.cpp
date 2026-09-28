@@ -30,6 +30,23 @@ bool StatementRecovery::hasCapturedPage(const std::filesystem::path &path, std::
     return file != capturedPages_.end() &&
            file->second.contains(pageId);
 }
+
+void StatementRecovery::captureFileOnce(const std::filesystem::path &relativePath)
+{
+    if (!originalFileSizes_.contains(relativePath))
+    {
+        const auto originalSize = PageFile(relativePath).size();
+
+        // TODO
+        journalFile_->writeFileBeforeImage(FileBeforeImage{
+            .relativeFilePath = relativePath,
+            .originalSize = originalSize,
+        });
+
+        originalFileSizes_.emplace(relativePath, originalSize);
+    }
+}
+
 void StatementRecovery::rollback()
 {
     if (!journalFile_)
@@ -56,18 +73,31 @@ void StatementRecovery::rollback()
 
         PageFile &file = it->second;
         file.writePage(image->pageId, image->originalPage);
-
-        // Find/open the PageFile for relativePath.
-        // Restore originalPage at pageId.
     }
 
-    for (auto &[path, file] : openedFiles)
+    try
     {
-        file.sync();
-    }
 
-    journalFile_.reset();
-    capturedPages_.clear();
+        for (const auto &[relativePath, originalSize] : originalFileSizes_)
+        {
+            auto [it, inserted] = openedFiles.try_emplace(
+                relativePath,
+                dbRootPath_ / relativePath,
+                LinuxFile::OpenMode::OpenExisting);
+
+            it->second.resize(originalSize);
+            it->second.sync();
+        }
+        LinuxDirectory directory{journalPath_.parent_path()};
+        directory.sync();
+
+        journalFile_.reset();
+        capturedPages_.clear();
+    }
+    catch (...)
+    {
+        throw;
+    }
 }
 
 void StatementRecovery::commit()

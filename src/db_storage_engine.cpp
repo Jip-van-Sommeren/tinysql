@@ -92,7 +92,8 @@ Table StorageEngine::createTable(
     const std::vector<Column> &columns,
     const std::vector<Constraint> &constraints)
 {
-    std::filesystem::path tablePath = dbPath_ / "tables" / (tableName + ".table");
+    std::filesystem::path tablePath =
+        std::filesystem::path{"tables"} / (tableName + ".table");
 
     if (std::filesystem::exists(tablePath))
     {
@@ -100,21 +101,22 @@ Table StorageEngine::createTable(
     }
 
     return Table::create(
-        std::move(tablePath),
+        dbPath_,
+        tablePath,
         tableName,
         magic,
         columns,
-        constraints);
+        constraints, statementRecovery_);
 }
 
 Table StorageEngine::openTable(const std::string &tableName)
 {
-    std::filesystem::path tablePath = dbPath_ / "tables" / (tableName + ".table");
+    std::filesystem::path tablePath = std::filesystem::path{"tables"} / (tableName + ".table");
 
     if (!std::filesystem::exists(tablePath))
     {
         throw std::runtime_error("Table does not exist: " + tableName);
     }
 
-    return Table::open(std::move(tablePath));
+    return Table::open(dbPath_, tablePath, statementRecovery_);
 }

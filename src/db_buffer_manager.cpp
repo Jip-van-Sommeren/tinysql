@@ -83,8 +83,8 @@ void PageGuard::markDirty()
     bufferManager_->markDirty(pageId_);
 }
 
-BufferManager::BufferManager(std::filesystem::path path, LinuxFile::OpenMode mode, StatementRecovery &statementRecovery, std::filesystem::path relTablePath)
-    : pageFile_(path, mode), statementRecovery_(statementRecovery), relativeTablePath_(relTablePath)
+BufferManager::BufferManager(std::filesystem::path dbRoot, std::filesystem::path relTablePath, LinuxFile::OpenMode mode, StatementRecovery &statementRecovery)
+    : pageFile_(dbRoot / relTablePath, mode), statementRecovery_(statementRecovery), relativeTablePath_(relTablePath)
 {
 }
 
