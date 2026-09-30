@@ -94,7 +94,8 @@ int main()
             .columnIndex = 2,
             .storage = VarColumnStorage{}}};
     std::vector<Constraint> constraints;
-    db.createTable("test", columns, constraints);
+    db.execute(BoundCreateTable{
+        .tableName = "test", .columns = columns, .constraints = constraints});
 
     std::vector<std::string> queries{
         "INSERT INTO test (a, b, c) VALUES (1, 'Appel', 'Peer');",

@@ -77,7 +77,7 @@ namespace
         require(std::holds_alternative<FileBeforeImage>(record), "Expected file record");
         const auto &actual = std::get<FileBeforeImage>(record);
         require(actual.relativeFilePath == expected.relativeFilePath &&
-                    actual.originalSize == expected.originalSize,
+                    actual.originalSize == expected.originalSize && actual.newFile == expected.newFile,
                 "Journal file metadata changed");
     }
 
@@ -140,6 +140,14 @@ namespace
 
     void testMalformedRecords(const std::filesystem::path &directory)
     {
+        {
+            JournalFile journal(directory / "new-file");
+            const FileBeforeImage metadata{"tables/new.table", 0, true};
+            require(journal.writeFileBeforeImage(metadata) == journal.size(),
+                    "Metadata append did not return its end offset");
+            requireRecord(journal.readNext().value(), metadata);
+            require(!journal.readNext(), "New-file metadata did not end at EOF");
+        }
         const auto path = directory / "truncated";
         {
             LinuxFile raw(path, Mode::CreateNew);

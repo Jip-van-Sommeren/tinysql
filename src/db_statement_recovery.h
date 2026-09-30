@@ -7,8 +7,7 @@
 class StatementRecovery
 {
 public:
-    explicit StatementRecovery(const std::filesystem::path &path,
-                               LinuxFile::OpenMode mode = LinuxFile::OpenMode::CreateNew);
+    explicit StatementRecovery(const std::filesystem::path &path);
 
     void begin();
     void capturePageOnce(const PageBeforeImage &image);
@@ -18,10 +17,11 @@ public:
     void statementFailed() { failed_ = true; }
 
     void rollback();
-    bool isActive();
-    void captureFileOnce(const std::filesystem::path &relativePath, const bool newFile);
+    bool isActive() const { return active_; }
+    void captureFileOnce(const std::filesystem::path &relativePath, bool newFile = false);
+    bool isNewFile(const std::filesystem::path &relativePath) const;
     bool hasCapturedPage(const std::filesystem::path &path, std::uint32_t pageId) const;
-    const std::uint64_t getOriginalFileSize(const std::filesystem::path &relativePath);
+    std::uint64_t getOriginalFileSize(const std::filesystem::path &relativePath) const;
     void commit();
 
 private:
@@ -32,13 +32,15 @@ private:
         std::filesystem::path,
         std::unordered_set<std::uint32_t>>
         capturedPages_;
-    std::unordered_map<std::filesystem::path, std::uint64_t>
-        originalFileSizes_;
+    std::unordered_map<std::filesystem::path, FileBeforeImage> originalFiles_;
 
     bool journalDirectoryNeedsSync_ = false;
     bool failed_ = false;
     bool active_ = false;
 
-    std::uint64_t appendOffset_;
-    std::uint64_t syncOffset_;
+    std::uint64_t appendOffset_ = 0;
+    std::uint64_t syncOffset_ = 0;
+
+    void requireWritableStatement() const;
+    void finish();
 };

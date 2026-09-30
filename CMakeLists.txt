@@ -115,4 +115,12 @@ if(BUILD_TESTING)
     db_configure_target(db_database_storage_test PRIVATE)
     target_link_libraries(db_database_storage_test PRIVATE db_core)
     add_test(NAME db_database_storage_test COMMAND db_database_storage_test)
+
+    add_executable(db_statement_recovery_test tests/db_statement_recovery_test.cpp)
+    db_configure_target(db_statement_recovery_test PRIVATE)
+    target_link_libraries(db_statement_recovery_test PRIVATE db_core)
+    target_link_options(db_statement_recovery_test PRIVATE
+        -Wl,--wrap=open -Wl,--wrap=pwrite -Wl,--wrap=fsync
+    )
+    add_test(NAME db_statement_recovery_test COMMAND db_statement_recovery_test)
 endif()

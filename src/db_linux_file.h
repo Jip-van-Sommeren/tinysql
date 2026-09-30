@@ -39,8 +39,8 @@ public:
     void sync();
     std::filesystem::path getPath() { return path_; }
 
-    void LinuxFile::deleteFile();
-    void LinuxFile::deleteFile(const int parentFd, const std::string &fileName);
+    void deleteFile();
+    void deleteFile(int parentFd, const std::string &fileName);
 
 private:
     std::filesystem::path path_;

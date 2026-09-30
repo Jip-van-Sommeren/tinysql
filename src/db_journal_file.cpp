@@ -104,7 +104,12 @@ std::optional<JournalRecord> JournalFile::readRecord(
         record.relativeFilePath = reader.readString();
         (void)encodedPath(record.relativeFilePath);
         record.originalSize = reader.readUnsigned<std::uint64_t>();
-        record.newFile = static_cast<bool>(reader.readUnsigned<std::uint8_t>());
+        const auto newFile = reader.readUnsigned<std::uint8_t>();
+        if (newFile > 1)
+        {
+            throw std::runtime_error("Invalid journal new-file flag");
+        }
+        record.newFile = newFile != 0;
 
         offset = recordStart + recordSize;
         return record;
@@ -125,15 +130,19 @@ std::optional<JournalRecord> JournalFile::readNext()
     return readRecord(readOffset_, file_.size());
 }
 
-void JournalFile::writeFileBeforeImage(const FileBeforeImage &fileBeforeImage)
+std::uint64_t JournalFile::writeFileBeforeImage(const FileBeforeImage &fileBeforeImage)
 {
+    if (appendFailed_)
+    {
+        throw std::runtime_error("Journal append previously failed; recovery is required");
+    }
+
     const std::string path = encodedPath(fileBeforeImage.relativeFilePath);
     ByteWriter writer(sizeof(std::uint32_t) + path.size() + sizeof(std::uint8_t) * 2 + sizeof(std::uint64_t));
     writer.writeUnsigned<std::uint8_t>(static_cast<std::uint8_t>(JournalRecordType::FileBeforeImage));
-    writer.writeUnsigned<std::uint8_t>(static_cast<std::uint8_t>(fileBeforeImage.newFile));
-
     writer.writeString(path);
     writer.writeUnsigned<std::uint64_t>(fileBeforeImage.originalSize);
+    writer.writeUnsigned<std::uint8_t>(static_cast<std::uint8_t>(fileBeforeImage.newFile));
     if (writer.size() > std::numeric_limits<std::uint64_t>::max() - appendOffset_)
     {
         throw std::out_of_range("Journal append offset overflow");
@@ -150,6 +159,7 @@ void JournalFile::writeFileBeforeImage(const FileBeforeImage &fileBeforeImage)
         throw;
     }
     appendOffset_ += writer.size();
+    return appendOffset_;
 }
 std::uint64_t JournalFile::writePage(const PageBeforeImage &pageBeforeImage)
 {

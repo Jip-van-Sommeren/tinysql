@@ -175,7 +175,6 @@ QueryResult Database::executeCreateTable(
             dbName,
             createTable.columns,
             createTable.constraints);
-        storageEngine.syncTablesDirectory();
     }
     catch (...)
     {

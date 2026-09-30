@@ -20,8 +20,7 @@ StorageEngine::StorageEngine(
     : dbPath_(path),
       tablesDirectory_(dbPath_ / "tables"),
       journalDirectory_(dbPath_ / "journal"),
-      statementRecovery_(path,
-                         LinuxFile::OpenMode::CreateNew)
+      statementRecovery_(path)
 {
 }
 

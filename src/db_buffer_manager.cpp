@@ -18,6 +18,23 @@
 #include <variant>
 #include <vector>
 
+namespace
+{
+    PageFile openPageFile(const std::filesystem::path &dbRoot,
+                          const std::filesystem::path &relativePath,
+                          LinuxFile::OpenMode mode,
+                          StatementRecovery &recovery)
+    {
+        if (mode == LinuxFile::OpenMode::CreateNew)
+        {
+            // Persist nonexistence before open(O_CREAT) can change the directory.
+            recovery.captureFileOnce(relativePath, true);
+            recovery.ensureDurable();
+        }
+        return PageFile{dbRoot / relativePath, mode};
+    }
+}
+
 PageGuard::PageGuard(
     BufferManager &bufferManager, PageId pageId, Page &page) noexcept
     : bufferManager_(&bufferManager), pageId_(pageId), page_(&page)
@@ -87,7 +104,7 @@ BufferManager::BufferManager(std::filesystem::path dbRoot,
                              std::filesystem::path relTablePath,
                              LinuxFile::OpenMode mode,
                              StatementRecovery &statementRecovery)
-    : pageFile_(dbRoot / relTablePath, mode),
+    : pageFile_(openPageFile(dbRoot, relTablePath, mode, statementRecovery)),
       statementRecovery_(statementRecovery),
       relativeTablePath_(relTablePath)
 {
@@ -98,7 +115,7 @@ void BufferManager::prepareForWrite(PageId pageId)
     if (statementRecovery_.isActive())
     {
 
-        statementRecovery_.captureFileOnce(relativeTablePath_, newFile_);
+        statementRecovery_.captureFileOnce(relativeTablePath_);
     }
     else
     {
@@ -113,7 +130,7 @@ void BufferManager::prepareForWrite(PageId pageId)
 
     // Original File Size already get checked with %PAGE_SIZE on insertion
 
-    if (std::uint64_t{pageId} * PAGE_SIZE < statementRecovery_.getOriginalFileSize(relativeTablePath_) && !newFile_)
+    if (std::uint64_t{pageId} * PAGE_SIZE < statementRecovery_.getOriginalFileSize(relativeTablePath_))
     {
 
         RawPage originalPage = pageFile_.readPage(pageId);
@@ -217,11 +234,10 @@ void BufferManager::insertAllRows(const std::vector<Row> &rows)
 
     PageGuard header = getHeaderPage();
     const HeaderPage &headerPage = header.as<HeaderPage>();
-    const auto rowCount = headerPage.totalRowCount;
 
     if (headerPage.lastDataPageId == 0)
     {
-        PageId newPageId = createDataPage(header);
+        createDataPage(header);
     }
 
     PageId currentPageId = headerPage.firstDataPageId;
@@ -431,22 +447,15 @@ void BufferManager::initializeNewTable(const std::string &tableName,
                                        const std::vector<Column> &columns,
                                        const std::vector<Constraint> &constraints)
 {
-    setNewFile(true);
+    if (!statementRecovery_.isNewFile(relativeTablePath_) || pageFile_.size() != 0)
+    {
+        throw std::logic_error("Can only initialize a new, unwritten table in the active statement");
+    }
 
     Page headerPage = makeHeaderPage(tableName, magic, columns, constraints);
     Page dataPage = makeEmptyDataPage(1);
     setPage(headerPage, headerPage.pageId());
     setPage(dataPage, headerPage.nextPageId());
-    if (statementRecovery_.isActive())
-    {
-
-        statementRecovery_.captureFileOnce(relativeTablePath_, newFile_);
-    }
-    else
-    {
-        throw std::logic_error(
-            "Cannot modify a page without an active statement");
-    }
 }
 
 PageId BufferManager::createDataPage(PageGuard &header)

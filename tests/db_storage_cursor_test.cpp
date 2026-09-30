@@ -131,6 +131,7 @@ namespace
 
         // Initialization replaces cached page zero through the public API. It
         // must reject a pinned header and succeed once its last guard releases.
+        recovery.begin();
         BufferManager pins{path, "tables/pins.table", LinuxFile::OpenMode::CreateNew, recovery};
         auto initialize = [&]
         {
@@ -195,7 +196,9 @@ namespace
         BufferManager invalidHeader{path, relativeFile, LinuxFile::OpenMode::OpenExisting, recovery};
         invalidHeader.getPage(0, [](const RawPage &) { return makeEmptyDataPage(0); });
         requireThrows([&] { invalidHeader.getHeaderPage(); }, "not a table header");
-        invalidHeader.initializeNewTable("guard_values", "test", schema.columns, schema.constraints);
+        requireThrows([&] {
+            invalidHeader.initializeNewTable("guard_values", "test", schema.columns, schema.constraints);
+        }, "new, unwritten table");
 
         BufferManager decodeFailure{path, relativeFile, LinuxFile::OpenMode::OpenExisting, recovery};
         requireThrows(
@@ -208,7 +211,10 @@ namespace
             },
             "decode failure");
         decodeFailure.getDataPage(1);
-        decodeFailure.initializeNewTable("guard_values", "test", schema.columns, schema.constraints);
+        requireThrows([&] {
+            decodeFailure.initializeNewTable("guard_values", "test", schema.columns, schema.constraints);
+        }, "new, unwritten table");
+        recovery.rollback();
     }
 
     void testCursors(Database &database, const std::filesystem::path &path)

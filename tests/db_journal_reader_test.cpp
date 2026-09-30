@@ -78,6 +78,7 @@ namespace
         auto bytes = prefix(JournalRecordType::FileBeforeImage,
                             record.relativeFilePath.generic_string());
         appendUnsigned(bytes, record.originalSize);
+        appendUnsigned(bytes, static_cast<std::uint8_t>(record.newFile));
         return bytes;
     }
 
@@ -95,7 +96,8 @@ namespace
     {
         const auto *record = std::get_if<FileBeforeImage>(&actual);
         require(record && record->relativeFilePath == expected.relativeFilePath &&
-                    record->originalSize == expected.originalSize,
+                    record->originalSize == expected.originalSize &&
+                    record->newFile == expected.newFile,
                 "File before-image changed");
     }
 
@@ -114,7 +116,7 @@ namespace
         PageBeforeImage page{"tables/one.table", 17, {}};
         for (std::size_t i = 0; i < page.originalPage.size(); ++i)
             page.originalPage.bytes[i] = static_cast<std::byte>(i % 256);
-        const FileBeforeImage otherFile{"tables/other.table", 0};
+        const FileBeforeImage otherFile{"tables/other.table", 0, true};
         PageBeforeImage otherPage{"tables/other.table", 17, {}};
         otherPage.originalPage.bytes.fill(std::byte{0xa5});
 
@@ -213,6 +215,9 @@ namespace
             check(bytes, "path length");
         }
         check(encode(FileBeforeImage{"../outside", PAGE_SIZE}), "must not contain");
+        auto invalidFlag = encode(FileBeforeImage{"tables/one.table", PAGE_SIZE});
+        invalidFlag.back() = std::byte{2};
+        check(invalidFlag, "new-file flag");
     }
 }
 

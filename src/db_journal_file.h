@@ -29,7 +29,7 @@ struct FileBeforeImage
 {
     std::filesystem::path relativeFilePath;
     std::uint64_t originalSize; // Bytes, including all pages.
-    bool newFile;
+    bool newFile = false;
 };
 
 using JournalRecord = std::variant<FileBeforeImage, PageBeforeImage>;
@@ -50,9 +50,8 @@ public:
     std::optional<JournalRecord> readNext();
     void rewind() noexcept { readOffset_ = 0; }
 
-    // Convenience snapshot from offset zero; does not change readNext's cursor.
-    // Preserves file paths, record order, and duplicate page IDs.
-    void writeFileBeforeImage(const FileBeforeImage &fileBeforeImage);
+    // Appends return the end of the complete record; neither synchronizes it.
+    std::uint64_t writeFileBeforeImage(const FileBeforeImage &fileBeforeImage);
 
     std::uint64_t writePage(const PageBeforeImage &pageBeforeImage);
     void sync();

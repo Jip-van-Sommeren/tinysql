@@ -335,6 +335,9 @@ namespace
         faults.writeBudget.reset();
         require(std::filesystem::file_size(path) == 10, "Partial-write injection did not run");
         requireThrows<std::runtime_error>([&] { journal.writePage(record); }, "previously failed");
+        requireThrows<std::runtime_error>([&] {
+            journal.writeFileBeforeImage(FileBeforeImage{"tables/new.table", 0, true});
+        }, "previously failed");
         requireThrows<std::runtime_error>([&] { journal.sync(); }, "previously failed");
         requireThrows<std::runtime_error>([&] { journal.readNext(); }, "Truncated");
         require(std::filesystem::file_size(path) == 10, "Failed journal was appended again");
