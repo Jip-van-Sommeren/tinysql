@@ -93,6 +93,7 @@ private:
     PageFile pageFile_;
     StatementRecovery &statementRecovery_;
     std::filesystem::path relativeTablePath_;
+    bool newFile_ = false;
 
     std::unordered_map<PageId, PageFrame> pages;
 
@@ -104,6 +105,8 @@ private:
     void pinPage(PageId pageId);
     void unpinPage(PageId pageId) noexcept;
     void markDirty(PageId pageId);
+
+    void setNewFile(bool val) { newFile_ = val; };
 
     RawPage encodeCachedPage(const Page &page);
 

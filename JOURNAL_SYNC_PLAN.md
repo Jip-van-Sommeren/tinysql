@@ -2,10 +2,11 @@
 
 Date: 2026-09-15
 
-Status: partially implemented; progress reviewed on 2026-09-16. The native file
-backend and journal record I/O are implemented, but statement journaling,
-protected writeback, and crash recovery are not enabled. Partially implemented
-items remain unchecked, with notes describing the completed groundwork.
+Status: partially implemented; reviewed against the working tree, including
+uncommitted changes, on 2026-09-30. Statement journaling, writeback barriers, and
+basic rollback of existing tables are implemented. Startup recovery, complete
+failure handling, and recovery of table creation are not complete. Checked items
+describe implemented pieces, not a claim of crash-safe statement atomicity.
 
 ## Goal and scope
 
@@ -22,29 +23,37 @@ back until synchronization succeeds. See
 
 Assume Linux, C++23, and one active modifying statement per database. Keep the
 database page format and generic `ByteReader`/`ByteWriter` encoding unchanged.
-Concurrent transactions, LRU implementation, new SQL features, and the complete
-journal recovery format are outside this plan. Dirty eviction must remain
-disabled until the recovery prerequisites below are satisfied.
+Concurrent transactions, LRU implementation, and new SQL features are outside
+this plan. Recovery-format prerequisites are tracked below; their detailed
+design remains to be done. Dirty eviction must remain disabled until the
+recovery prerequisites below are satisfied.
 
 ## Current implementation
 
-- `PageFile` and `JournalFile` share the descriptor-owning `LinuxFile` backend.
-  Both expose explicit `sync()` using `fsync()`; `PageFile::flush()` is a
-  documented non-durable no-op because there is no application write buffer.
-- `JournalFile` is included in `db_core`. It appends encoded before-images
-  without automatically synchronizing, reopens existing journals at their end,
-  and rejects further appends or synchronization after an append failure.
-  `readNext()` buffers one bounded record and preserves its path and page ID;
-  `readPages()` remains a convenience method that materializes all records.
-- `BufferManager::flushPage()` writes a page and immediately clears its dirty
-  flag. `flushAll()` writes all dirty pages, calls the non-durable `flush()`, and
-  then clears flags. Neither path coordinates with a journal or commits a
-  statement durably.
-- `Table` currently flushes from its mutation methods. There is no shared
-  statement coordinator protecting SQL and direct storage calls.
-- Low-level tests cover interrupted/short transfers, injected I/O failures,
-  malformed records, path rejection, and large-journal streaming. There is no
-  directory synchronization or end-to-end recovery/failure-ordering test yet.
+- `PageFile` and `JournalFile` use the descriptor-owning `LinuxFile` backend,
+  with explicit `sync()` using `fsync()`. `PageFile::flush()` has been removed.
+  `LinuxDirectory` provides directory synchronization.
+- `StorageEngine` owns `StatementRecovery`, shared by participating buffer
+  managers. SQL INSERT, DELETE, and CREATE TABLE call begin/commit/rollback;
+  direct `Database::insertRows()` now uses the same INSERT path. Direct
+  `Database::createTable()` still bypasses it.
+- `PageGuard::page()` and `as()` provide read-only access. Writable access calls
+  `BufferManager::prepareForWrite()` before modification: capture original file
+  size, then capture an existing page's raw before-image once per path/page ID.
+  Ordinary data-page allocation goes through a writable header first, so its
+  original file size is captured before growth. Newly appended pages need no
+  page before-image.
+- `flushPage()` and `flushAll()` call `ensureDurable()` before database writes.
+  This synchronizes the journal and, on the first barrier, its directory.
+  Table mutation methods write back and synchronize their table file before
+  `commit()` removes the journal and synchronizes the journal directory.
+- `JournalFile::readNext()` streams bounded file-size and page-image records;
+  `readPages()` has been removed. Rollback replays pages, restores recorded file
+  sizes, synchronizes those files, and removes the journal with directory sync.
+  It does not yet undo file creation or run automatically when opening a DB.
+- All 11 CTest tests pass. There is a regression test for rollback after a
+  mid-batch validation error, but it fails before database writeback. It does
+  not establish rollback after on-disk partial updates or crash safety.
 
 ## 1. Add explicit durable storage operations
 
@@ -62,81 +71,107 @@ disabled until the recovery prerequisites below are satisfied.
       Tests currently inject native-call failures through link-time wrappers;
       the event-recording recovery backend in section 5 is still pending.
 - [x] Define `sync()` as draining any application buffer first, then successfully
-      completing `fsync()` on the same open file. The proposed direct-I/O-call
+      completing `fsync()` on the same open file. The native positional-I/O
       backend has no C++ stream buffer, but still uses the OS cache; do not use
       `O_DIRECT`. Ordinary successful writes are not durability acknowledgements.
-- [x] Keep `flush()` only as a documented non-durable compatibility operation
-      for draining application buffers; it is a no-op for an unbuffered native
-      backend. Durability-sensitive callers must use `sync()` explicitly.
-- [ ] Add directory synchronization for journal creation and removal. A newly
+- [x] Separate cache writeback from durability: remove the no-op
+      `PageFile::flush()` and use explicit `sync()` at durability boundaries.
+      `BufferManager::flushAll()` writes pages; `BufferManager::sync()`
+      synchronizes the underlying file.
+- [x] Add directory synchronization for journal creation and removal. A newly
       created journal must have both its contents and its directory entry made
-      durable before database writes are authorized. Synchronize affected table
-      directories when committing new table files as well. File `fsync()` alone
-      does not persist directory entries; see
+      durable before database writes are authorized. `ensureDurable()` handles
+      creation; commit and rollback synchronize after removal. File `fsync()`
+      alone does not persist directory entries; see
       [Linux fsync semantics](https://man7.org/linux/man-pages/man2/fsync.2.html).
+- [x] Synchronize the tables directory on the SQL CREATE TABLE success path.
+      Undoing creation and covering the direct API remain pending below.
+- [ ] Make database-directory creation durable too: synchronize the database
+      root after creating `tables/` and `journal/`, and its parent after creating
+      the root. Merely opening a `LinuxDirectory` does not synchronize it.
 - [x] Throw on file synchronization failures. File destructors only close their
       descriptors and do not synchronize or silently commit pending work.
-- [ ] Keep commit and rollback synchronization explicit when those protocols
-      are implemented. Unsupported platforms must report that durable mode is
-      unavailable rather than treating a stream flush as equivalent.
+- [x] Keep normal commit and rollback synchronization explicit, outside
+      destructors. The remaining failure-state and participant-tracking work is
+      listed below.
 
 ## 2. Track journal coverage within a statement
 
-- [ ] Add a database-scoped `StatementRecovery` coordinator owned by the storage
-      layer and shared with participating tables/buffer managers. Reject nested
-      modifying statements initially. Both SQL execution and direct mutation
-      APIs must use the same coordinator or reject writes without one.
-- [ ] Capture each existing page's original raw bytes before its first mutable
-      access in the statement. Introduce an explicit before-modification hook at
-      mutation sites; `markDirty()` alone is too late because callers currently
-      invoke it after changing the page.
-- [ ] Identify a page by `(database-relative file path, page ID)`, not page ID
-      alone. Retain only one original image per identity per statement, including
-      page zero and page-link/header-counter changes.
-      Partial: journal records and readers preserve both fields, but statement
-      capture and per-statement deduplication do not exist yet.
+- [x] Add a storage-owned `StatementRecovery` shared with buffer managers;
+      reject nested statements on the same coordinator. Wire SQL mutations and
+      direct `Database::insertRows()` through it.
+- [ ] Cover all mutation entry points. Route direct `Database::createTable()`
+      through the statement lifecycle, and require a valid active statement
+      before lower-level creation changes the filesystem. Do not let public
+      `initializeNewTable()` overwrite an existing table without undo coverage.
+- [x] Capture existing pages before writable access through
+      `PageGuard::write()` / `writePage()`, rather than relying on a dirty flag
+      set after modification. Reject writable access without an active statement.
+- [x] Identify pages by `(database-relative file path, page ID)` and deduplicate
+      in the normal buffer-manager path, including page zero and linked-page
+      changes. Clear capture bookkeeping after successful commit/rollback.
+- [ ] Enforce active-state checks and deduplication inside the coordinator's
+      capture methods too. `capturePageOnce()` currently relies on its caller
+      checking `hasCapturedPage()`; the method itself appends unconditionally.
+- [x] Capture original file size once before normal existing-table mutations
+      and data-page allocation. Distinguish existing pages from newly appended
+      pages using that size; retain metadata until statement resolution.
+- [ ] Record original file existence as well as size. Make a nonexistence
+      record durable before creating a table file. Current `FileBeforeImage`
+      contains only a path and size, and `initializeNewTable()` captures neither.
+
+The following offsets are a sync optimization, not a substitute for the
+correctness work above. The current no-argument barrier synchronizes the whole
+journal every time and is used by the existing writeback paths.
+
 - [ ] Make `JournalFile::writePage(const PageBeforeImage&)` return a `uint64_t`
       end offset after a complete append succeeds. Store that offset against the
-      page identity. Appending must not call `sync()` automatically.
+      page identity, and provide equivalent coverage for file-metadata records.
+      Appending already avoids automatic synchronization.
 - [ ] Track the last completely appended offset and the successfully synchronized
       offset separately. Qualify these offsets with the current statement/journal
       generation so coverage from an earlier statement cannot be reused.
+      Only the append offset exists today.
 - [ ] Provide `ensureDurable(requiredEnd)`: synchronize pending journal records
       when the required offset is not yet covered. Advance the durable offset
       only after all required file/directory synchronization succeeds. Already
       covered records require no additional sync, even if unrelated new records
       have since been appended.
-- [ ] Journal original file size/existence before file growth or creation. New
-      pages have no before-image; their writes depend on durable file-metadata
-      records instead. Keep this metadata until the statement is resolved.
+      The current `uint32_t` overload is an empty stub: remove it until usable,
+      or implement it with `uint64_t` offsets. Do not call it as a barrier yet.
 
 ## 3. Gate every database write
 
-- [ ] Add one coordinator-controlled writeback path used by `flushPage()`,
-      `flushAll()`, and future eviction. Missing journal coverage must reject a
-      modified page write, not silently bypass protection. Recovery writes use a
-      separate explicit path so they do not generate new undo records.
-- [ ] For `flushAll()`, prepare the dirty-page batch, collect its journal
-      requirements, and call `ensureDurable()` once with the highest required
-      offset. Only then issue the database writes. No journal fsync belongs
-      inside the ordinary per-page append loop.
-- [ ] For a single-page flush or future eviction, check that page's coverage
-      first. If its original record is already durable, writeback needs no new
-      journal sync. Otherwise synchronize pending records before writing it.
-- [ ] Keep cache writeback state separate from statement durability. A successful
-      complete write can make a frame clean relative to the OS-visible file, but
-      does not commit the statement. Track every written table file separately
-      so commit synchronizes it even when its dirty pages have been evicted.
-- [ ] If a database write fails or is partial, retain the affected dirty state,
-      journal, and transaction bookkeeping. A later failure must still restore
-      previously written or evicted pages, not just the frames still marked dirty.
-- [ ] On journal append/sync failure, issue no dependent database writes. Mark
-      the statement failed and stop ordinary writes; do not advance offsets,
-      discard undo information, or continue appending past a partial record.
-      Explicit recovery must resolve the statement before reuse.
-      Partial: a failed append leaves the append offset unchanged and blocks
-      further appends/sync on that `JournalFile` object. Database writes are not
-      yet gated by journal state, and there is no statement failure state.
+- [x] Put a journal barrier before both `flushPage()` and `flushAll()` writes.
+      `flushAll()` performs one barrier before its batch, not one per page.
+      Recovery uses separate `PageFile` writes without generating undo records.
+- [ ] Verify each dirty page's journal coverage at the writeback boundary:
+      existing page image or original-size/nonexistence metadata, as appropriate.
+      Synchronizing a journal does not establish that a particular page is
+      covered; new-table initialization currently demonstrates this gap.
+- [ ] Once offset tracking exists, collect the batch's highest required end
+      offset and avoid redundant syncs for already-covered single-page writes.
+      Future eviction must use the same checked writeback path.
+- [x] Keep cache writeback separate from durability. `flushPage()` clears its
+      frame only after a complete write; `flushAll()` clears flags only after
+      its write loop succeeds. A write failure leaves affected dirty state and
+      does not itself discard the journal.
+- [x] Synchronize the same open table file after writeback in current Table
+      creation, insertion, and deletion paths, before Database calls commit.
+- [ ] Track participating/written files and make commit verify that all are
+      synchronized, independently of cached-frame dirty flags. Today `commit()`
+      trusts callers and removes the journal without checking table durability.
+- [x] Fail the statement on journal-barrier synchronization errors and propagate
+      them before dependent database writes. Keep the directory-sync-pending
+      flag until synchronization succeeds.
+- [ ] Apply fail-closed handling consistently to append, database-write, and
+      database-sync errors, including lower-level callers. Retain undo state and
+      forbid normal access until rollback/recovery succeeds. The Database catch
+      paths attempt rollback, but not every failure marks coordinator state.
+- [ ] Make both journal append methods reject a previously failed append.
+      `writePage()` and `sync()` check `appendFailed_`;
+      `writeFileBeforeImage()` currently does not. No append may proceed past a
+      partially written record.
 
 Required batch ordering, not a complete commit algorithm:
 
@@ -152,44 +187,75 @@ append original records A and B
 ## 4. Recovery integration prerequisites
 
 Synchronization barriers alone are not a complete crash-recovery protocol.
-Complete and test the following before enabling the protected writeback path in
-normal operation or allowing dirty-page eviction:
+The basic writeback path is already enabled. Complete and test the following
+before claiming crash recovery or enabling dirty-page eviction:
 
-- [ ] Specify a versioned journal format and durable commit/cleanup protocol.
-      Before-images remain available until all database files are synchronized
-      and the statement is durably finalized. Never clear the journal merely
-      because database page writes returned successfully.
+- [x] Implement the basic existing-table rollback sequence: stream page images,
+      restore recorded file lengths, synchronize those files, remove the journal,
+      then synchronize its directory. Clear bookkeeping only after success.
+- [ ] Harden lifecycle transitions and invalid calls. Set active state only
+      after journal creation succeeds; validate active/failed state in capture
+      and commit; reject normal reads and writes while recovery is required.
+      Currently `begin()` can leave `active_` true after creation fails, and
+      `commit()` does not reject failed/inactive state.
+- [ ] Specify a versioned journal format and recovery/cleanup protocol with
+      statement/database identity. Keep before-images available until all
+      affected files are durable and journal retirement is durable. Existing
+      records have type and length fields but no format header or checksums.
 - [ ] Make journal parsing distinguish clean EOF, incomplete trailing records,
       and corruption. Validate record boundaries, lengths, checksums, paths, and
       statement identity. Later appends must not invalidate previously durable
       recovery information, including through torn writes to a shared sector.
       Do not blindly ignore every malformed final record.
-      Partial: clean EOF, truncated records, bounded lengths, and relative paths
-      are checked. Checksums, statement identity, and torn-write protection are
-      not implemented.
+      Partial: clean EOF is distinct from errors, lengths are bounded, and
+      truncated/malformed records throw without advancing the read cursor.
+      There is no safe interrupted-append recovery policy yet; rollback can
+      fail on a partial tail after replaying earlier records.
 - [ ] Recover an existing journal before exposing tables or beginning another
       statement; opening an existing journal must never reset its append offset
       to zero and overwrite unresolved recovery information.
-      Partial: reopening preserves the append position at EOF; automatic
-      recovery and access gating are not implemented.
+      `StorageEngine::open()` currently ignores an existing journal; a new
+      statement then fails its exclusive journal creation instead of recovering.
+      Low-level journal reopening does preserve the append position at EOF.
+      Recovery must also respect exclusive database ownership so it cannot
+      replay another live writer's journal.
 - [x] Provide bounded streaming journal reads through `readNext()` rather than
       requiring the whole journal to be materialized.
       Preserve each record's file path as well as its page ID. Bound path/record
       lengths before allocation and reject invalid relative paths.
-- [ ] Connect the streaming reader to recovery, including the remaining record
-      validation above, and confine recovery writes to database files.
-- [ ] Restore original pages, file lengths, and file existence on rollback;
-      synchronize restored files and directory changes before retiring the
-      journal. Invalidate affected cached pages after guards are released.
-      Recovery itself must be restartable after another failure.
+- [x] Connect `readNext()` to rollback using `std::visit` for page and file
+      records. Reject conflicting original-size records for the same path.
+- [ ] Validate recovery records together: require file metadata for every page
+      image, page-aligned original sizes, valid page ranges, and consistent
+      duplicates. A page-only target is currently written but omitted from the
+      final file-size/sync loop. Reject such journals before unsafe replay.
+- [ ] Confine replay to intended table files, not just lexical relative paths.
+      Current decoding rejects absolute paths, `..`, NULs, and oversized paths,
+      but does not enforce the tables subtree or prevent symlink escape.
+- [ ] Undo table creation by removing files that did not exist beforehand and
+      synchronizing the tables directory before journal retirement. SQL CREATE
+      currently has a lifecycle wrapper but no file-existence undo record.
+- [ ] Invalidate or reject other live table/buffer-manager caches after rollback,
+      once guards are released. Current Database mutation paths destroy their
+      local Table before entering the rollback catch, but there is no general
+      cache/handle coordination for lower-level users.
+- [ ] Make recovery restartable after failure during replay, truncate, file
+      sync, removal, or directory sync. Preserve unresolved evidence and block
+      normal access, including reads, until recovery succeeds.
 - [ ] Treat a failure during final commit/cleanup synchronization as an uncertain
       outcome: preserve remaining evidence and require recovery before serving
       further operations. Do not report success or blindly retry the statement.
+      `commit()` currently throws on cleanup errors but does not mark recovery
+      required; journal unlink may already have succeeded when directory sync
+      fails. The Database commit calls correctly remain outside the mutation
+      catch blocks, avoiding an automatic rollback after an uncertain commit.
 
 ## 5. Verification and completion criteria
 
 - [ ] Use an injectable storage backend that records append, write, file-sync,
       directory-sync, resize, and removal events and can fail each boundary.
+      Low-level LinuxFile wrappers already cover interrupted/short transfers
+      and failures; end-to-end recovery event/failure injection is still missing.
 - [ ] Verify that multiple journal appends cause no immediate sync, one batch
       barrier covers multiple database writes, and already covered pages do not
       trigger redundant barriers.
@@ -203,19 +269,49 @@ normal operation or allowing dirty-page eviction:
       independently of cached-frame dirty flags.
 - [x] Test oversized/truncated records, path rejection, and bounded-memory
       journal record reading, including a large sparse journal.
-- [ ] Exercise those reader checks through the recovery path once connected.
-- [ ] Once recovery exists, inject failures before and after each persistence
-      boundary and reopen. Observe either the previous complete state or the
+- [x] Test both journal record types, consecutive records, reopening/appending,
+      and preserving the read position after decoding failures.
+- [x] Test Database operations with a root different from the working directory,
+      direct INSERT recovery integration, rollback after mid-batch validation
+      failure, journal cleanup, and a subsequent successful statement.
+- [ ] Test rollback after modified pages have actually reached the database
+      file, including file growth, header/link restoration, and truncation.
+      The existing validation-failure regression happens before writeback.
+- [ ] Test CREATE rollback, the direct CREATE API, begin/commit failure states,
+      reads blocked after recovery failure, and startup with a leftover journal.
+- [ ] Exercise malformed journals and cross-record validation through recovery,
+      not just through the record reader. Retry recovery after an injected
+      recovery failure and verify that undo information is not lost.
+- [ ] Inject failures before and after each persistence boundary and reopen.
+      Observe either the previous complete state or the
       committed complete state, never a mixture. Process-termination tests alone
       do not simulate power loss because the OS cache survives; also use a fake
       backend that loses unsynchronized writes and exercises torn writes.
-- [x] Run the warnings-as-errors build, existing CTest suite, and focused
-      ASan/UBSan checks. Track pre-existing failures separately. Add journal
-      sources to `db_core` only when their interfaces and implementation build
-      cleanly together.
-      Verified on 2026-09-16: GCC 14 with `-Werror`, all 9 CTest tests passing,
-      and the byte-I/O, Linux-file, journal-file, and storage-cursor tests passing
-      with ASan/UBSan (leak detection disabled). Repeat after recovery changes.
+- [x] Include journal/recovery sources in `db_core` and pass the normal build
+      and CTest suite. Verified on 2026-09-30: all 11 tests pass.
+- [x] Run focused ASan/UBSan checks. Verified on 2026-09-30: database-storage,
+      storage-cursor, select-executor, and decimal tests pass; LeakSanitizer is
+      disabled because of the sandbox's ptrace restriction.
+- [ ] Restore a clean warnings-as-errors build. The 2026-09-30 GCC 14 check fails
+      on the ignored top-level `const` return qualifier of
+      `getOriginalFileSize()` and unused parameters/variables in recovery and
+      buffer-manager code. Normal build success does not cover this check.
+
+## Recommended next steps
+
+1. Harden coordinator state and entry points: begin failure, capture/commit
+   preconditions, failed-state access blocking, both append failure guards, and
+   direct CREATE integration. Remove the empty offset-barrier overload until
+   it can provide a real guarantee.
+2. Add file-existence undo for CREATE and enforce page/file coverage at every
+   writeback boundary. Make commit's all-files-durable requirement explicit.
+3. Specify and validate the recovery format, then recover leftover journals
+   before exposing tables. Include safe handling of interrupted append/cleanup
+   and restartable recovery; complete directory-creation persistence.
+4. Add deterministic end-to-end failure tests alongside those changes,
+   especially failures after database writes and during recovery/retirement.
+5. Optimize repeated journal synchronization with 64-bit record-end offsets
+   and statement generations after the correctness path is established.
 
 Complete this synchronization milestone only when all normal database-write
 paths enforce journal coverage, batching is tested, and sync errors prevent

@@ -47,20 +47,11 @@ Database Database::open(
     }
 }
 
-void Database::createTable(
-    const std::string &tableName,
-    const std::vector<Column> &columns,
-    const std::vector<Constraint> &constraints)
-{
-    storageEngine.createTable(tableName, dbName, columns, constraints);
-}
-
 void Database::insertRows(
     const std::string &tableName,
     const std::vector<Row> &rows)
 {
-    Table table = storageEngine.openTable(tableName);
-    table.insertRows(BoundInsert{
+    (void)executeInsert(BoundInsert{
         .tableName = tableName,
         .rows = rows});
 }

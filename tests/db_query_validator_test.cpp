@@ -58,15 +58,6 @@ namespace
             return tables.at(name);
         }
 
-        BindContext createBindContext(const std::string &name) const override
-        {
-            HeaderPage schema = getTableHeader(name);
-            return BindContext{
-                .tableName = name,
-                .columns = std::move(schema.columns),
-                .constraints = std::move(schema.constraints)};
-        }
-
         void add(const BoundCreateTable &table)
         {
             Page page = makeHeaderPage(table.tableName, "test", table.columns, table.constraints);
@@ -104,7 +95,11 @@ namespace
                "amount DECIMAL DEFAULT 12, approximate DOUBLE DEFAULT 0.25, "
                "computed INT DEFAULT 3 + 4, unknown_flag BOOLEAN DEFAULT 1 = NULL);");
 
-        const BindContext context = catalog.createBindContext("defaults");
+        const HeaderPage schema = catalog.getTableHeader("defaults");
+        const BindContext context{
+            .tableName = "defaults",
+            .columns = schema.columns,
+            .constraints = schema.constraints};
         static_assert(std::is_same_v<
                       decltype(context.getDefaultConstraint(1)),
                       const BoundDefaultConstraintExpr &>);

@@ -74,7 +74,7 @@ std::optional<JournalRecord> JournalFile::readRecord(
     std::size_t recordSize;
     if (journalType == JournalRecordType::FileBeforeImage)
     {
-        recordSize = sizeof(std::uint32_t) + sizeof(std::uint8_t) + sizeof(std::uint64_t) + pathLength;
+        recordSize = sizeof(std::uint32_t) + sizeof(std::uint8_t) * 2 + sizeof(std::uint64_t) + pathLength;
     }
     else if (journalType == JournalRecordType::PageBeforeImage)
     {
@@ -104,6 +104,7 @@ std::optional<JournalRecord> JournalFile::readRecord(
         record.relativeFilePath = reader.readString();
         (void)encodedPath(record.relativeFilePath);
         record.originalSize = reader.readUnsigned<std::uint64_t>();
+        record.newFile = static_cast<bool>(reader.readUnsigned<std::uint8_t>());
 
         offset = recordStart + recordSize;
         return record;
@@ -127,8 +128,9 @@ std::optional<JournalRecord> JournalFile::readNext()
 void JournalFile::writeFileBeforeImage(const FileBeforeImage &fileBeforeImage)
 {
     const std::string path = encodedPath(fileBeforeImage.relativeFilePath);
-    ByteWriter writer(sizeof(std::uint32_t) + path.size() + sizeof(std::uint8_t) + sizeof(std::uint64_t));
+    ByteWriter writer(sizeof(std::uint32_t) + path.size() + sizeof(std::uint8_t) * 2 + sizeof(std::uint64_t));
     writer.writeUnsigned<std::uint8_t>(static_cast<std::uint8_t>(JournalRecordType::FileBeforeImage));
+    writer.writeUnsigned<std::uint8_t>(static_cast<std::uint8_t>(fileBeforeImage.newFile));
 
     writer.writeString(path);
     writer.writeUnsigned<std::uint64_t>(fileBeforeImage.originalSize);
@@ -149,7 +151,7 @@ void JournalFile::writeFileBeforeImage(const FileBeforeImage &fileBeforeImage)
     }
     appendOffset_ += writer.size();
 }
-void JournalFile::writePage(const PageBeforeImage &pageBeforeImage)
+std::uint64_t JournalFile::writePage(const PageBeforeImage &pageBeforeImage)
 {
     if (appendFailed_)
     {
@@ -179,6 +181,7 @@ void JournalFile::writePage(const PageBeforeImage &pageBeforeImage)
         throw;
     }
     appendOffset_ += writer.size();
+    return appendOffset_;
 }
 
 void JournalFile::sync()

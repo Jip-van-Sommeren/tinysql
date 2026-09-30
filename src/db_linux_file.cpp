@@ -205,6 +205,28 @@ void LinuxFile::sync()
     }
 }
 
+void LinuxFile::deleteFile()
+{
+    closeDescriptor();
+    if (::unlink(path_.c_str()) == -1)
+    {
+        const int error = errno;
+
+        throwError("unlink", error);
+    }
+}
+
+void LinuxFile::deleteFile(const int parentFd, const std::string &fileName)
+{
+    closeDescriptor();
+    if (::unlinkat(parentFd, fileName.c_str(), 0) == -1)
+    {
+        const int error = errno;
+
+        throwError("unlinkat", error);
+    }
+}
+
 void LinuxFile::throwError(const char *operation, int error) const
 {
     throw std::system_error(error, std::generic_category(),

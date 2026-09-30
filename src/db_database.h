@@ -14,10 +14,6 @@ public:
     static Database create(const std::filesystem::path &path, std::string name);
     static Database open(const std::filesystem::path &path, std::string name);
 
-    void createTable(
-        const std::string &tableName,
-        const std::vector<Column> &columns,
-        const std::vector<Constraint> &constraints);
     void insertRows(
         const std::string &tableName,
         const std::vector<Row> &rows);

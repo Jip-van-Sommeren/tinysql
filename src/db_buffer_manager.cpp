@@ -97,7 +97,8 @@ void BufferManager::prepareForWrite(PageId pageId)
 {
     if (statementRecovery_.isActive())
     {
-        statementRecovery_.captureFileOnce(relativeTablePath_);
+
+        statementRecovery_.captureFileOnce(relativeTablePath_, newFile_);
     }
     else
     {
@@ -112,7 +113,7 @@ void BufferManager::prepareForWrite(PageId pageId)
 
     // Original File Size already get checked with %PAGE_SIZE on insertion
 
-    if (std::uint64_t{pageId} * PAGE_SIZE < statementRecovery_.getOriginalFileSize(relativeTablePath_))
+    if (std::uint64_t{pageId} * PAGE_SIZE < statementRecovery_.getOriginalFileSize(relativeTablePath_) && !newFile_)
     {
 
         RawPage originalPage = pageFile_.readPage(pageId);
@@ -149,6 +150,7 @@ Page &BufferManager::fetchPage(
 
 PageGuard BufferManager::getPage(PageId pageId, const PageReader &reader)
 {
+
     Page &page = fetchPage(pageId, reader);
     pinPage(pageId);
     return PageGuard(*this, pageId, page);
@@ -219,7 +221,7 @@ void BufferManager::insertAllRows(const std::vector<Row> &rows)
 
     if (headerPage.lastDataPageId == 0)
     {
-        createDataPage(header);
+        PageId newPageId = createDataPage(header);
     }
 
     PageId currentPageId = headerPage.firstDataPageId;
@@ -429,12 +431,22 @@ void BufferManager::initializeNewTable(const std::string &tableName,
                                        const std::vector<Column> &columns,
                                        const std::vector<Constraint> &constraints)
 {
+    setNewFile(true);
 
     Page headerPage = makeHeaderPage(tableName, magic, columns, constraints);
-    Page firstDataPage = makeEmptyDataPage(headerPage.nextPageId());
-
+    Page dataPage = makeEmptyDataPage(1);
     setPage(headerPage, headerPage.pageId());
-    setPage(firstDataPage, firstDataPage.pageId());
+    setPage(dataPage, headerPage.nextPageId());
+    if (statementRecovery_.isActive())
+    {
+
+        statementRecovery_.captureFileOnce(relativeTablePath_, newFile_);
+    }
+    else
+    {
+        throw std::logic_error(
+            "Cannot modify a page without an active statement");
+    }
 }
 
 PageId BufferManager::createDataPage(PageGuard &header)

@@ -1,5 +1,6 @@
 #include "db_database.h"
 #include "db_decimal.h"
+#include "db_test_directory.h"
 
 #include <filesystem>
 #include <stdexcept>
@@ -36,11 +37,9 @@ int main()
             parseDecimalLiteral("8.0"))) == "0.125",
         "Exact decimal division failed");
 
-    const std::filesystem::path path =
-        std::filesystem::temp_directory_path() / "db_decimal_test_data";
-    std::filesystem::remove_all(path);
-
-    Database database{path, "db_decimal_test"};
+    TestDirectory directory{"db-decimal-test"};
+    const auto path = directory.path / "db";
+    Database database = Database::create(path, "db_decimal_test");
     database.executeSql(
         "CREATE TABLE amounts ("
         "id INT, amount DECIMAL, approximate DOUBLE, large BIGINT);");
@@ -98,5 +97,7 @@ int main()
     }
     require(rejectedExcessScale, "Excess decimal scale was not rejected");
 
-    std::filesystem::remove_all(path);
+    Database reopened = Database::open(path, "db_decimal_test");
+    require(reopened.selectAllRows("amounts").size() == 2,
+            "Database::open did not preserve stored rows");
 }

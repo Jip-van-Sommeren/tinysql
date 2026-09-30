@@ -40,6 +40,7 @@ add_library(db_core
     src/db_read.cpp
     src/db_row_validator.cpp
     src/db_storage_engine.cpp
+    src/db_statement_recovery.cpp
     src/db_table.cpp
     src/db_write.cpp
     src/db_page_file.cpp
@@ -109,4 +110,9 @@ if(BUILD_TESTING)
     db_configure_target(db_storage_cursor_test PRIVATE)
     target_link_libraries(db_storage_cursor_test PRIVATE db_core)
     add_test(NAME db_storage_cursor_test COMMAND db_storage_cursor_test)
+
+    add_executable(db_database_storage_test tests/db_database_storage_test.cpp)
+    db_configure_target(db_database_storage_test PRIVATE)
+    target_link_libraries(db_database_storage_test PRIVATE db_core)
+    add_test(NAME db_database_storage_test COMMAND db_database_storage_test)
 endif()

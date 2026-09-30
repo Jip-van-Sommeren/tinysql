@@ -1,7 +1,8 @@
 #include "db_statement_recovery.h"
+#include <iostream>
 
 StatementRecovery::StatementRecovery(const std::filesystem::path &path,
-                                     LinuxFile::OpenMode mode = LinuxFile::OpenMode::CreateNew) : dbRootPath_(path), journalPath_(path / "journal" / "journal.log") {}
+                                     LinuxFile::OpenMode mode) : dbRootPath_(path), journalPath_(path / "journal" / "journal.log") {}
 
 void StatementRecovery::begin()
 {
@@ -25,7 +26,7 @@ void StatementRecovery::capturePageOnce(const PageBeforeImage &image)
         throw std::runtime_error(
             "Statement has failed; recovery is required");
     }
-    journalFile_->writePage(image);
+    appendOffset_ = journalFile_->writePage(image);
     capturedPages_[image.relativeFilePath].insert(image.pageId);
 }
 bool StatementRecovery::isActive() { return active_; }
@@ -42,7 +43,7 @@ bool StatementRecovery::hasCapturedPage(const std::filesystem::path &path, std::
            file->second.contains(pageId);
 }
 
-void StatementRecovery::captureFileOnce(const std::filesystem::path &relativePath)
+void StatementRecovery::captureFileOnce(const std::filesystem::path &relativePath, const bool newFile)
 {
     if (failed_)
     {
@@ -62,7 +63,7 @@ void StatementRecovery::captureFileOnce(const std::filesystem::path &relativePat
         journalFile_->writeFileBeforeImage(FileBeforeImage{
             .relativeFilePath = relativePath,
             .originalSize = originalSize,
-        });
+            .newFile = newFile});
 
         originalFileSizes_.emplace(relativePath, originalSize);
     }
@@ -89,6 +90,7 @@ void StatementRecovery::rollback()
     std::unordered_map<std::filesystem::path, PageFile> openedFiles;
     std::unordered_map<std::filesystem::path, std::uint64_t>
         rollbackFileSizes;
+    std::unordered_set<std::filesystem::path> newFiles;
 
     journalFile_->rewind();
 
@@ -121,18 +123,36 @@ void StatementRecovery::rollback()
                 }
                 else if constexpr (std::is_same_v<T, FileBeforeImage>)
                 {
-                    auto [it, inserted] = rollbackFileSizes.try_emplace(
-                        value.relativeFilePath,
-                        value.originalSize);
-
-                    if (!inserted && it->second != value.originalSize)
+                    if (value.newFile)
                     {
-                        throw std::runtime_error(
-                            "Conflicting original file sizes in journal");
+                        auto [it, inserted] = newFiles.emplace(
+                            value.relativeFilePath);
+                        if (!inserted)
+                        {
+                            throw std::runtime_error("error emplacing new file:" + value.relativeFilePath.string());
+                        }
+                    }
+                    else
+                    {
+                        auto [it, inserted] = rollbackFileSizes.try_emplace(
+                            value.relativeFilePath,
+                            value.originalSize);
+
+                        if (!inserted && it->second != value.originalSize)
+                        {
+                            throw std::runtime_error(
+                                "Conflicting original file sizes in journal");
+                        }
                     }
                 }
             },
             image.value());
+    }
+
+    for (const auto &relativePath : newFiles)
+    {
+        LinuxFile file{dbRootPath_ / relativePath};
+        file.deleteFile();
     }
 
     for (const auto &[relativePath, originalSize] : rollbackFileSizes)
@@ -174,7 +194,15 @@ void StatementRecovery::commit()
     failed_ = false;
     active_ = false;
 }
-void StatementRecovery::ensureDurable(std::uint32_t requiredEnd) {}
+void StatementRecovery::ensureDurable(std::uint64_t requiredEnd)
+{
+    if (requiredEnd > syncOffset_)
+    {
+        ensureDurable();
+        return;
+    }
+    return;
+}
 
 void StatementRecovery::ensureDurable()
 {
@@ -204,6 +232,11 @@ void StatementRecovery::ensureDurable()
     catch (...)
     {
         failed_ = true;
+        throw;
+    }
+    syncOffset_ = journalFile_->size();
+    if (syncOffset_ != appendOffset_)
+    {
         throw;
     }
 

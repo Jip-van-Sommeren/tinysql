@@ -295,9 +295,24 @@ namespace
 
         // Full-page FNV-1a hashes captured from the pre-refactor encoders.
         // Cover padding and the slot directory, not just sequential writes.
+        // The factory now reserves data page 1. Preserve the original empty
+        // header fixture for the byte-format compatibility assertion.
+        Page legacyHeader = header;
+        legacyHeader.header.nextPageId = 0;
+        auto &legacySchema = std::get<HeaderPage>(legacyHeader.data);
+        legacySchema.firstDataPageId = 0;
+        legacySchema.lastDataPageId = 0;
+        legacySchema.nextUnusedPageId = 1;
+        require(pageHash(encodePage(legacyHeader)) == 10188868826003330422ULL,
+                "Header page format changed");
         const RawPage headerBytes = encodePage(header);
-        require(pageHash(headerBytes) == 10188868826003330422ULL, "Header page format changed");
         const Page decodedHeader = decodeHeaderPage(headerBytes);
+        require(decodedHeader.header.nextPageId == 1,
+                "New header lost its initial data-page link");
+        const auto &decodedSchema = std::get<HeaderPage>(decodedHeader.data);
+        require(decodedSchema.firstDataPageId == 1 && decodedSchema.lastDataPageId == 1 &&
+                    decodedSchema.nextUnusedPageId == 2,
+                "New header did not reserve the initial data page");
         require(encodePage(decodedHeader).bytes == headerBytes.bytes, "Header round trip failed");
         require(decodedHeader.header.freeSpaceStart == header.header.freeSpaceStart,
                 "Header free-space calculation changed");

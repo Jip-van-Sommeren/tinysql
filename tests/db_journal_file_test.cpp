@@ -62,12 +62,23 @@ namespace
         return result;
     }
 
-    void requireRecord(const PageBeforeImage &actual, const PageBeforeImage &expected)
+    void requireRecord(const JournalRecord &record, const PageBeforeImage &expected)
     {
+        require(std::holds_alternative<PageBeforeImage>(record), "Expected page record");
+        const auto &actual = std::get<PageBeforeImage>(record);
         require(actual.relativeFilePath == expected.relativeFilePath &&
                     actual.pageId == expected.pageId &&
                     actual.originalPage.bytes == expected.originalPage.bytes,
                 "Journal record changed");
+    }
+
+    void requireRecord(const JournalRecord &record, const FileBeforeImage &expected)
+    {
+        require(std::holds_alternative<FileBeforeImage>(record), "Expected file record");
+        const auto &actual = std::get<FileBeforeImage>(record);
+        require(actual.relativeFilePath == expected.relativeFilePath &&
+                    actual.originalSize == expected.originalSize,
+                "Journal file metadata changed");
     }
 
     void testRoundTrip(const std::filesystem::path &directory)
@@ -75,18 +86,16 @@ namespace
         const auto path = directory / "undo.journal";
         const auto first = makeRecord("tables/one.table", 1, std::byte{0xa1});
         const auto second = makeRecord("tables/two.table", 1, std::byte{0xb2});
+        const FileBeforeImage metadata{"tables/one.table", (1ULL << 40) + PAGE_SIZE};
         {
             JournalFile journal(path);
-            require(!journal.readNext() && journal.readPages().empty(), "Empty journal read failed");
+            require(!journal.readNext(), "Empty journal read failed");
             journal.writePage(first);
+            journal.writeFileBeforeImage(metadata);
             journal.writePage(second);
             journal.sync();
-            auto pages = journal.readPages();
-            require(pages.size() == 2, "Equal page IDs from different files collided");
-            requireRecord(pages[0], first);
-            requireRecord(pages[1], second);
             requireRecord(journal.readNext().value(), first);
-            require(journal.readPages().size() == 2, "readPages did not start from zero");
+            requireRecord(journal.readNext().value(), metadata);
             requireRecord(journal.readNext().value(), second);
             require(!journal.readNext() && !journal.readNext(), "Journal EOF is not stable");
             journal.rewind();
@@ -98,23 +107,30 @@ namespace
         {
             JournalFile reopened(path, Mode::OpenExisting);
             reopened.writePage(first); // Preserve order and duplicates, not just a map.
-            const auto records = reopened.readPages();
-            require(records.size() == 3, "Reopened journal did not append at EOF");
-            requireRecord(records[0], first);
-            requireRecord(records[1], second);
-            requireRecord(records[2], first);
+            requireRecord(reopened.readNext().value(), first);
+            requireRecord(reopened.readNext().value(), metadata);
+            requireRecord(reopened.readNext().value(), second);
+            requireRecord(reopened.readNext().value(), first);
+            require(!reopened.readNext(), "Reopened journal did not end after appended record");
             require(std::filesystem::file_size(path) == originalSize + first.size(),
                     "Encoded record size mismatch");
         }
         JournalFile reader(path, Mode::ReadOnly);
-        require(reader.readPages().size() == 3, "Read-only journal reopen failed");
+        requireRecord(reader.readNext().value(), first);
+        requireRecord(reader.readNext().value(), metadata);
+        requireRecord(reader.readNext().value(), second);
+        requireRecord(reader.readNext().value(), first);
+        require(!reader.readNext(), "Read-only journal reopen failed");
         requireThrows<std::system_error>([&] { reader.writePage(first); }, "pwrite");
 
-        // Keep compatibility with the existing [length][path][ID][RawPage] format.
+        // Check the tagged [type][length][path][ID][RawPage] format.
         LinuxFile raw(path, Mode::ReadOnly);
         std::vector<std::byte> bytes(first.size());
         raw.readExactAt(0, bytes);
         ByteReader decoder(bytes);
+        require(decoder.readUnsigned<std::uint8_t>() ==
+                    static_cast<std::uint8_t>(JournalRecordType::PageBeforeImage),
+                "Record type encoding changed");
         require(decoder.readString() == first.relativeFilePath.generic_string(), "Path encoding changed");
         require(decoder.readUnsigned<std::uint32_t>() == first.pageId, "ID encoding changed");
         RawPage page{};
@@ -137,17 +153,19 @@ namespace
         const auto oversized = directory / "oversized";
         {
             LinuxFile raw(oversized, Mode::CreateNew);
-            ByteWriter writer(4);
+            ByteWriter writer(5);
+            writer.writeUnsigned<std::uint8_t>(static_cast<std::uint8_t>(JournalRecordType::PageBeforeImage));
             writer.writeUnsigned<std::uint32_t>(std::numeric_limits<std::uint32_t>::max());
             raw.writeAllAt(0, writer.bytes());
         }
         JournalFile oversizedReader(oversized, Mode::ReadOnly);
-        requireThrows<std::runtime_error>([&] { oversizedReader.readPages(); }, "path length");
+        requireThrows<std::runtime_error>([&] { oversizedReader.readNext(); }, "path length");
 
         const auto body = directory / "short-body";
         {
             LinuxFile raw(body, Mode::CreateNew);
-            ByteWriter writer(4);
+            ByteWriter writer(5);
+            writer.writeUnsigned<std::uint8_t>(static_cast<std::uint8_t>(JournalRecordType::PageBeforeImage));
             writer.writeUnsigned<std::uint32_t>(1);
             raw.writeAllAt(0, writer.bytes());
         }
@@ -165,7 +183,8 @@ namespace
         require(std::filesystem::file_size(invalid) == 0, "Invalid record partially written");
         {
             LinuxFile raw(invalid);
-            ByteWriter writer(4 + 2 + 4 + PAGE_SIZE);
+            ByteWriter writer(1 + 4 + 2 + 4 + PAGE_SIZE);
+            writer.writeUnsigned<std::uint8_t>(static_cast<std::uint8_t>(JournalRecordType::PageBeforeImage));
             writer.writeString("..");
             writer.writeUnsigned<std::uint32_t>(0);
             raw.writeAllAt(0, writer.bytes());
@@ -203,11 +222,11 @@ namespace
         require(readPageFromFile(path, 3).bytes == expected.bytes, "Standalone reader changed behavior");
         requireThrows<std::runtime_error>([&] { pages.readPage(4); }, "EOF");
         requireThrows<std::system_error>([&] { PageFile duplicate(path, Mode::CreateNew); }, "open");
-        pages.flush(); // No-op: not a durable commit.
         pages.sync();
 
         const auto missingTable = directory / "missing.table";
-        requireThrows<std::system_error>([&] { Table::open(missingTable); }, "open");
+        StatementRecovery recovery{directory};
+        requireThrows<std::system_error>([&] { Table::open(directory, "missing.table", recovery); }, "open");
         require(!std::filesystem::exists(missingTable), "Table::open created a missing table");
     }
 }

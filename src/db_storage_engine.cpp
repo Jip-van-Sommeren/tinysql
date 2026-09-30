@@ -54,6 +54,8 @@ StorageEngine StorageEngine::create(
     LinuxDirectory root{
         path};
 
+    root.sync();
+
     return StorageEngine{
         path};
 }
@@ -92,17 +94,17 @@ Table StorageEngine::createTable(
     const std::vector<Column> &columns,
     const std::vector<Constraint> &constraints)
 {
-    std::filesystem::path tablePath =
+    const std::filesystem::path relativeTablePath =
         std::filesystem::path{"tables"} / (tableName + ".table");
 
-    if (std::filesystem::exists(tablePath))
+    if (std::filesystem::exists(getTablePath(tableName)))
     {
         throw std::runtime_error("Table already exists: " + tableName);
     }
 
     return Table::create(
         dbPath_,
-        tablePath,
+        relativeTablePath,
         tableName,
         magic,
         columns,
@@ -111,12 +113,13 @@ Table StorageEngine::createTable(
 
 Table StorageEngine::openTable(const std::string &tableName)
 {
-    std::filesystem::path tablePath = std::filesystem::path{"tables"} / (tableName + ".table");
+    const std::filesystem::path relativeTablePath =
+        std::filesystem::path{"tables"} / (tableName + ".table");
 
-    if (!std::filesystem::exists(tablePath))
+    if (!std::filesystem::exists(getTablePath(tableName)))
     {
         throw std::runtime_error("Table does not exist: " + tableName);
     }
 
-    return Table::open(dbPath_, tablePath, statementRecovery_);
+    return Table::open(dbPath_, relativeTablePath, statementRecovery_);
 }

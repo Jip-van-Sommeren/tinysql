@@ -29,6 +29,7 @@ struct FileBeforeImage
 {
     std::filesystem::path relativeFilePath;
     std::uint64_t originalSize; // Bytes, including all pages.
+    bool newFile;
 };
 
 using JournalRecord = std::variant<FileBeforeImage, PageBeforeImage>;
@@ -53,8 +54,9 @@ public:
     // Preserves file paths, record order, and duplicate page IDs.
     void writeFileBeforeImage(const FileBeforeImage &fileBeforeImage);
 
-    void writePage(const PageBeforeImage &pageBeforeImage);
+    std::uint64_t writePage(const PageBeforeImage &pageBeforeImage);
     void sync();
+    std::uint64_t size() const { return file_.size(); }
 
 private:
     LinuxFile file_;

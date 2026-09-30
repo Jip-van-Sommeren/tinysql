@@ -2,6 +2,7 @@
 #include "db_decimal.h"
 #include "db_query_executor.h"
 #include "db_table.h"
+#include "db_test_directory.h"
 
 #include <cmath>
 #include <filesystem>
@@ -235,11 +236,9 @@ int main()
 {
     static_assert(!std::is_same_v<Row, ResultRow>);
 
-    const std::filesystem::path path =
-        std::filesystem::temp_directory_path() / "db_select_executor_test_data";
-    std::filesystem::remove_all(path);
-
-    Database database{path, "db_select_executor_test"};
+    TestDirectory directory{"db-select-executor-test"};
+    const auto path = directory.path / "db";
+    Database database = Database::create(path, "db_select_executor_test");
     QueryResult create = database.executeSql(
         "CREATE TABLE products (id INT, price INT, quantity INT);");
     require(!create.returnsRows, "CREATE unexpectedly returned rows");
@@ -310,7 +309,8 @@ int main()
         },
         "Implicit alias was not rejected");
 
-    Table table = Table::open(path / "tables" / "products.table");
+    StatementRecovery recovery{path};
+    Table table = Table::open(path, "tables/products.table", recovery);
     BoundSelect grouped{
         .tableName = "products",
         .projections = {},
@@ -360,5 +360,4 @@ int main()
     require(deleted.columns.empty(), "DELETE returned an output schema");
     require(deleted.rows.empty(), "DELETE returned result rows");
 
-    std::filesystem::remove_all(path);
 }

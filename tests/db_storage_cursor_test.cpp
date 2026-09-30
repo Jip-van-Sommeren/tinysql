@@ -2,9 +2,11 @@
 #include "db_database.h"
 #include "db_page_factory.h"
 #include "db_table.h"
+#include "db_read.h"
+#include "db_write.h"
+#include "db_test_directory.h"
 
 #include <algorithm>
-#include <chrono>
 #include <filesystem>
 #include <memory>
 #include <optional>
@@ -31,7 +33,7 @@ namespace
         {
             function();
         }
-        catch (const std::runtime_error &error)
+        catch (const std::exception &error)
         {
             require(std::string{error.what()}.find(expected) != std::string::npos,
                     "Unexpected error: " + std::string{error.what()});
@@ -39,25 +41,6 @@ namespace
         }
         throw std::runtime_error("Expected error containing: " + expected);
     }
-
-    struct TestDirectory
-    {
-        std::filesystem::path path = std::filesystem::temp_directory_path() /
-            ("db_storage_cursor_test_" + std::to_string(
-                std::chrono::steady_clock::now().time_since_epoch().count()));
-
-        TestDirectory()
-        {
-            require(std::filesystem::create_directory(path),
-                    "Could not create a fresh test directory");
-        }
-
-        ~TestDirectory()
-        {
-            std::error_code error;
-            std::filesystem::remove_all(path, error);
-        }
-    };
 
     std::int32_t nextId(TableCursor &cursor)
     {
@@ -78,7 +61,7 @@ namespace
         return ids;
     }
 
-    void deleteId(Table &table, std::int32_t id)
+    void deleteId(Table &table, StatementRecovery &recovery, std::int32_t id)
     {
         BoundDelete query{
             .tableName = "cursor_values",
@@ -87,94 +70,134 @@ namespace
                 std::make_unique<BoundColumnExpr>(0, DataType::Int),
                 std::make_unique<BoundLiteralExpr>(Value{id}, DataType::Int),
                 DataType::Boolean)};
+        recovery.begin();
         require(table.deleteRows(query) == 1, "DELETE did not remove the expected row");
+        recovery.commit();
     }
 
     void testPageGuards(Database &database, const std::filesystem::path &path)
     {
         database.executeSql("CREATE TABLE guard_values (id INT);");
         database.executeSql("INSERT INTO guard_values VALUES (1);");
-        const auto file = path / "tables" / "guard_values.table";
-        BufferManager manager{file};
-        Page headerSnapshot = manager.getHeaderPage().page();
-        Page dataSnapshot = makeEmptyDataPage(1);
+        const std::filesystem::path relativeFile = "tables/guard_values.table";
+        const auto file = path / relativeFile;
+        const Page headerSnapshot = decodeHeaderPage(readPageFromFile(file, 0));
+        const HeaderPage &schema = std::get<HeaderPage>(headerSnapshot.data);
+        // Seed extra physical pages before opening the cache, instead of using
+        // the now-private setPage() as a fixture-building API.
+        {
+            PageFile pages{file};
+            for (PageId id = 2; id < 128; ++id)
+            {
+                const Page page = makeEmptyDataPage(id);
+                pages.writePage(id, encodeDataPage(page.header, schema, std::get<DataPage>(page.data)));
+            }
+            pages.sync();
+        }
+        StatementRecovery recovery{path};
+        BufferManager manager{path, relativeFile, LinuxFile::OpenMode::OpenExisting, recovery};
+        {
+            auto guard = manager.getDataPage(1);
+            requireThrows([&] { guard.write<DataPage>(); }, "active statement");
+        }
+        recovery.begin();
         {
             auto first = manager.getDataPage(1);
             {
                 const auto second = manager.getDataPage(1);
                 require(&first.page() == &second.page(),
                         "Guards do not reference the same cached page");
-                first.as<DataPage>().rows.at(0).row.values.at(0) = std::int32_t{42};
-                first.markDirty();
+                first.write<DataPage>().rows.at(0).row.values.at(0) = std::int32_t{42};
                 require(std::get<std::int32_t>(second.as<DataPage>().rows.at(0).row.values.at(0)) == 42,
                         "Guard writes were not visible through another guard");
-                dataSnapshot = first.page();
-                requireThrows([&] { manager.setPage(dataSnapshot, 1); }, "pinned");
             }
-            requireThrows([&] { manager.setPage(dataSnapshot, 1); }, "pinned");
 
             // Grow the map while keeping a page pinned: rehash must not move it.
             const Page *address = &first.page();
             for (PageId id = 2; id < 128; ++id)
             {
-                manager.setPage(makeEmptyDataPage(id), id);
+                manager.getDataPage(id);
             }
             const auto again = manager.getDataPage(1);
             require(&again.page() == address, "Cache growth invalidated a guard");
             manager.flushPage(1);
+            manager.sync();
         }
-        manager.setPage(dataSnapshot, 1);
-        manager.setPage(headerSnapshot, 0);
+        recovery.commit();
 
-        BufferManager reopened{file};
+        BufferManager reopened{path, relativeFile, LinuxFile::OpenMode::OpenExisting, recovery};
         require(std::get<std::int32_t>(reopened.getDataPage(1).as<DataPage>().rows.at(0).row.values.at(0)) == 42,
                 "Dirty page changes did not survive reopening");
 
+        // Initialization replaces cached page zero through the public API. It
+        // must reject a pinned header and succeed once its last guard releases.
+        BufferManager pins{path, "tables/pins.table", LinuxFile::OpenMode::CreateNew, recovery};
+        auto initialize = [&]
         {
-            std::optional<PageGuard> source{manager.getDataPage(2)};
+            pins.initializeNewTable("pins", "test", schema.columns, schema.constraints);
+        };
+        initialize();
+        {
+            const auto first = pins.getHeaderPage();
+            {
+                const auto second = pins.getHeaderPage();
+                requireThrows(initialize, "pinned");
+            }
+            requireThrows(initialize, "pinned");
+        }
+        initialize();
+        {
+            std::optional<PageGuard> source{pins.getHeaderPage()};
             std::optional<PageGuard> moved{std::move(*source)};
             source.reset();
-            requireThrows([&] { manager.setPage(makeEmptyDataPage(2), 2); }, "pinned");
+            requireThrows(initialize, "pinned");
             moved.reset();
-            manager.setPage(makeEmptyDataPage(2), 2);
+            initialize();
         }
         {
-            auto source = manager.getDataPage(2);
-            auto target = manager.getDataPage(3);
+            auto source = pins.getHeaderPage();
+            auto target = pins.getDataPage(1);
             target = std::move(source);
-            manager.setPage(makeEmptyDataPage(3), 3);
-            requireThrows([&] { manager.setPage(makeEmptyDataPage(2), 2); }, "pinned");
+            requireThrows(initialize, "pinned");
             auto &self = target;
             target = std::move(self);
-            require(target.page().pageId() == 2, "Self-move lost the page guard");
+            require(target.page().pageId() == 0, "Self-move lost the page guard");
         }
-        manager.setPage(makeEmptyDataPage(2), 2);
+        initialize();
+        BufferManager otherPins{path, "tables/other-pins.table", LinuxFile::OpenMode::CreateNew, recovery};
+        auto initializeOther = [&]
         {
-            auto source = manager.getDataPage(1);
-            auto target = reopened.getDataPage(1);
+            otherPins.initializeNewTable("other-pins", "test", schema.columns, schema.constraints);
+        };
+        initializeOther();
+        {
+            auto source = pins.getHeaderPage();
+            auto target = otherPins.getHeaderPage();
             target = std::move(source);
-            reopened.setPage(dataSnapshot, 1);
-            requireThrows([&] { manager.setPage(dataSnapshot, 1); }, "pinned");
+            initializeOther();
+            requireThrows(initialize, "pinned");
         }
-        manager.setPage(dataSnapshot, 1);
+        initialize();
 
         requireThrows(
             [&]
             {
-                auto guard = manager.getDataPage(2);
+                auto guard = pins.getHeaderPage();
                 throw std::runtime_error("unwind test");
             },
             "unwind test");
-        manager.setPage(makeEmptyDataPage(2), 2);
+        initialize();
 
         // Both guards acquired by getDataPage must release on validation failure.
-        requireThrows([&] { manager.getDataPage(0); }, "not a data page");
-        manager.setPage(headerSnapshot, 0);
-        manager.setPage(makeEmptyDataPage(0), 0);
-        requireThrows([&] { manager.getHeaderPage(); }, "not a table header");
-        manager.setPage(headerSnapshot, 0);
+        requireThrows([&] { pins.getDataPage(0); }, "not a data page");
+        initialize();
 
-        BufferManager decodeFailure{file};
+        BufferManager invalidHeader{path, relativeFile, LinuxFile::OpenMode::OpenExisting, recovery};
+        invalidHeader.getPage(0, [](const RawPage &) { return makeEmptyDataPage(0); });
+        requireThrows([&] { invalidHeader.getHeaderPage(); }, "not a table header");
+        invalidHeader.initializeNewTable("guard_values", "test", schema.columns, schema.constraints);
+
+        BufferManager decodeFailure{path, relativeFile, LinuxFile::OpenMode::OpenExisting, recovery};
         requireThrows(
             [&]
             {
@@ -185,15 +208,16 @@ namespace
             },
             "decode failure");
         decodeFailure.getDataPage(1);
-        decodeFailure.setPage(dataSnapshot, 1);
+        decodeFailure.initializeNewTable("guard_values", "test", schema.columns, schema.constraints);
     }
 
     void testCursors(Database &database, const std::filesystem::path &path)
     {
         database.executeSql("CREATE TABLE cursor_values (id INT, label TEXT);");
-        const auto file = path / "tables" / "cursor_values.table";
+        const std::filesystem::path relativeFile = "tables/cursor_values.table";
+        StatementRecovery recovery{path};
         {
-            Table table = Table::open(file);
+            Table table = Table::open(path, relativeFile, recovery);
             require(scanIds(table).empty(), "An empty table returned rows");
         }
         const std::string label(1500, 'x');
@@ -204,7 +228,7 @@ namespace
         }
         database.insertRows("cursor_values", rows);
         {
-            BufferManager manager{file};
+            BufferManager manager{path, relativeFile, LinuxFile::OpenMode::OpenExisting, recovery};
             auto first = manager.getDataPage(1);
             require(first.as<DataPage>().rows.size() == 2 && first.page().nextPageId() != 0,
                     "Cursor fixture did not span multiple pages");
@@ -212,7 +236,7 @@ namespace
 
         std::optional<Row> retained;
         {
-            Table table = Table::open(file);
+            Table table = Table::open(path, relativeFile, recovery);
             require(scanIds(table) == std::vector<std::int32_t>{1, 2, 3, 4, 5, 6},
                     "Cursor did not traverse all pages in order");
             {
@@ -248,13 +272,15 @@ namespace
             // The first page now has a hole; the middle page is entirely empty.
             for (std::int32_t id : {1, 3, 4})
             {
-                deleteId(table, id);
+                deleteId(table, recovery, id);
             }
             require(scanIds(table) == std::vector<std::int32_t>{2, 5, 6},
                     "Cursor confused compact rows with slots or stopped at an empty page");
+            recovery.begin();
             table.insertRows(BoundInsert{
                 .tableName = "cursor_values",
                 .rows = {Row{{std::int32_t{99}, label}}}});
+            recovery.commit();
             auto ids = scanIds(table);
             std::sort(ids.begin(), ids.end());
             require(ids == std::vector<std::int32_t>{2, 5, 6, 99},
@@ -264,7 +290,7 @@ namespace
                     std::get<std::string>(retained->values.at(1)) == label,
                 "Destroying the table invalidated a returned row");
 
-        Table reopened = Table::open(file);
+        Table reopened = Table::open(path, relativeFile, recovery);
         auto ids = scanIds(reopened);
         std::sort(ids.begin(), ids.end());
         require(ids == std::vector<std::int32_t>{2, 5, 6, 99},
@@ -277,15 +303,18 @@ namespace
     {
         database.executeSql("CREATE TABLE lazy_values (id INT);");
         database.executeSql("INSERT INTO lazy_values VALUES (1), (2);");
-        const auto file = path / "tables" / "lazy_values.table";
+        const std::filesystem::path relativeFile = "tables/lazy_values.table";
+        StatementRecovery recovery{path};
+        recovery.begin();
         {
-            BufferManager manager{file};
+            BufferManager manager{path, relativeFile, LinuxFile::OpenMode::OpenExisting, recovery};
             auto page = manager.getDataPage(1);
-            page.page().header.nextPageId = 50; // Deliberately missing next page.
-            page.markDirty();
+            page.writePage().header.nextPageId = 50; // Deliberately missing next page.
             manager.flushPage(1);
+            manager.sync();
         }
-        Table table = Table::open(file);
+        recovery.commit();
+        Table table = Table::open(path, relativeFile, recovery);
         {
             auto cursor = table.scan();
             require(nextId(cursor) == 1, "Cursor eagerly read a later page");
@@ -299,26 +328,36 @@ namespace
     void testLargePageIds(Database &database, const std::filesystem::path &path)
     {
         database.executeSql("CREATE TABLE high_page_values (id INT);");
-        const auto file = path / "tables" / "high_page_values.table";
+        const std::filesystem::path relativeFile = "tables/high_page_values.table";
+        const auto file = path / relativeFile;
         constexpr PageId highId = 70000;
+        // Build the sparse physical-page fixture without accessing setPage().
         {
-            BufferManager manager{file};
-            manager.setPage(makeEmptyDataPage(highId), highId);
+            const auto header = decodeHeaderPage(readPageFromFile(file, 0));
+            const auto page = makeEmptyDataPage(highId);
+            PageFile pages{file};
+            pages.writePage(highId, encodeDataPage(page.header,
+                           std::get<HeaderPage>(header.data), std::get<DataPage>(page.data)));
+            pages.sync();
+        }
+        StatementRecovery recovery{path};
+        recovery.begin();
+        {
+            BufferManager manager{path, relativeFile, LinuxFile::OpenMode::OpenExisting, recovery};
             auto header = manager.getHeaderPage();
-            auto &metadata = header.as<HeaderPage>();
+            auto &metadata = header.write<HeaderPage>();
             metadata.firstDataPageId = highId;
             metadata.lastDataPageId = highId;
             metadata.nextUnusedPageId = highId + 1;
             manager.insertAllRows({Row{{std::int32_t{42}}}});
             metadata.firstDataPageId = 1;
-            header.markDirty();
             auto first = manager.getDataPage(1);
-            first.page().header.nextPageId = highId;
-            first.markDirty();
-            // Seeking to the high page creates a sparse file on supported systems.
+            first.writePage().header.nextPageId = highId;
             manager.flushAll();
+            manager.sync();
         }
-        Table table = Table::open(file);
+        recovery.commit();
+        Table table = Table::open(path, relativeFile, recovery);
         require(scanIds(table) == std::vector<std::int32_t>{42},
                 "A page ID above 65535 was truncated during scanning");
     }
@@ -331,16 +370,19 @@ int main()
     static_assert(std::is_nothrow_move_constructible_v<PageGuard>);
     static_assert(std::is_nothrow_move_assignable_v<PageGuard>);
     static_assert(std::is_nothrow_destructible_v<PageGuard>);
+    static_assert(std::is_same_v<decltype(std::declval<PageGuard &>().page()), const Page &>);
+    static_assert(std::is_same_v<decltype(std::declval<PageGuard &>().as<DataPage>()), const DataPage &>);
     static_assert(!std::is_copy_constructible_v<TableCursor>);
     static_assert(!std::is_copy_assignable_v<TableCursor>);
     static_assert(std::is_nothrow_move_constructible_v<TableCursor>);
     static_assert(std::is_nothrow_move_assignable_v<TableCursor>);
     static_assert(std::is_same_v<decltype(std::declval<Table &>().scan()), TableCursor>);
 
-    TestDirectory directory;
-    Database database{directory.path, "db_storage_cursor_test"};
-    testPageGuards(database, directory.path);
-    testCursors(database, directory.path);
-    testLazyLoading(database, directory.path);
-    testLargePageIds(database, directory.path);
+    TestDirectory directory{"db-storage-cursor-test"};
+    const auto path = directory.path / "db";
+    Database database = Database::create(path, "db_storage_cursor_test");
+    testPageGuards(database, path);
+    testCursors(database, path);
+    testLazyLoading(database, path);
+    testLargePageIds(database, path);
 }
