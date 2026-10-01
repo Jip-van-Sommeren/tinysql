@@ -85,6 +85,7 @@ public:
     void sync()
     {
         pageFile_.sync();
+        statementRecovery_.unSetNeedSync(pageFile_.getPath());
     }
 
 private:

@@ -22,6 +22,30 @@ public:
     bool isNewFile(const std::filesystem::path &relativePath) const;
     bool hasCapturedPage(const std::filesystem::path &path, std::uint32_t pageId) const;
     std::uint64_t getOriginalFileSize(const std::filesystem::path &relativePath) const;
+    std::uint64_t requiredEndForPage(const std::filesystem::path &relativePath, std::uint32_t pageId) const;
+    void unSetNeedsSync(const std::filesystem::path &relativePath)
+    {
+        if (needSyncMap_.contains(relativePath))
+        {
+            needSyncMap_[relativePath] = false;
+        }
+        else
+        {
+            throw std::logic_error("File should be in statementrecovery");
+        }
+    }
+
+    void setNeedsSync(const std::filesystem::path &relativePath)
+    {
+        if (needSyncMap_.contains(relativePath))
+        {
+            needSyncMap_[relativePath] = true;
+        }
+        else
+        {
+            throw std::logic_error("File should be in statementrecovery");
+        }
+    }
     void commit();
 
 private:
@@ -30,9 +54,10 @@ private:
     const std::filesystem::path journalPath_;
     std::unordered_map<
         std::filesystem::path,
-        std::unordered_set<std::uint32_t>>
+        std::unordered_map<std::uint32_t, std::uint64_t>>
         capturedPages_;
-    std::unordered_map<std::filesystem::path, FileBeforeImage> originalFiles_;
+    std::unordered_map<std::filesystem::path, CapturedFile> originalFiles_;
+    std::unordered_map<std::filesystem::path, bool> needSyncMap_;
 
     bool journalDirectoryNeedsSync_ = false;
     bool failed_ = false;

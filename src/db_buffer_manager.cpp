@@ -288,22 +288,44 @@ void BufferManager::flushPage(PageId pageId)
     }
 
     RawPage encodedPage = encodeCachedPage(frame.page);
-    statementRecovery_.ensureDurable();
+    const auto requiredEnd =
+        statementRecovery_.requiredEndForPage(relativeTablePath_, pageId);
+
+    statementRecovery_.ensureDurable(requiredEnd);
 
     pageFile_.writePage(pageId, encodedPage);
+    statementRecovery_.setNeedsSync(relativeTablePath_);
+
     frame.dirty = false;
 }
 
 void BufferManager::flushAll()
 {
-    statementRecovery_.ensureDurable();
+    std::uint64_t requiredEnd = 0;
+
     for (const auto &[pageId, frame] : pages)
     {
         if (frame.dirty)
         {
-            pageFile_.writePage(pageId, encodeCachedPage(frame.page));
+            requiredEnd = std::max(
+                requiredEnd,
+                statementRecovery_.requiredEndForPage(
+                    relativeTablePath_, pageId));
         }
     }
+
+    statementRecovery_.ensureDurable(requiredEnd);
+
+    for (const auto &[pageId, frame] : pages)
+    {
+        if (frame.dirty)
+        {
+            pageFile_.writePage(
+                pageId,
+                encodeCachedPage(frame.page));
+        }
+    }
+    statementRecovery_.setNeedsSync(relativeTablePath_);
 
     // All native writes completed before dirty flags are cleared. This is
     // writeback, not a durable statement commit; recovery coordination is separate.

@@ -1,5 +1,6 @@
 #include "db_statement_recovery.h"
 #include <stdexcept>
+#include <algorithm>
 
 StatementRecovery::StatementRecovery(const std::filesystem::path &path)
     : dbRootPath_(path), journalPath_(path / "journal" / "journal.log") {}
@@ -42,7 +43,8 @@ void StatementRecovery::capturePageOnce(const PageBeforeImage &image)
     try
     {
         appendOffset_ = journalFile_->writePage(image);
-        capturedPages_[image.relativeFilePath].insert(image.pageId);
+
+        capturedPages_[image.relativeFilePath].emplace(image.pageId, appendOffset_);
     }
     catch (...)
     {
@@ -73,7 +75,7 @@ void StatementRecovery::captureFileOnce(const std::filesystem::path &relativePat
     }
     if (const auto existing = originalFiles_.find(relativePath); existing != originalFiles_.end())
     {
-        if (newFile && !existing->second.newFile)
+        if (newFile && !existing->second.beforeImage.newFile)
             throw std::logic_error("Cannot recreate a file that existed before the statement");
         return;
     }
@@ -88,7 +90,7 @@ void StatementRecovery::captureFileOnce(const std::filesystem::path &relativePat
     try
     {
         appendOffset_ = journalFile_->writeFileBeforeImage(image);
-        originalFiles_.emplace(relativePath, image);
+        originalFiles_.emplace(relativePath, CapturedFile{.beforeImage = image, .requiredEnd = appendOffset_});
     }
     catch (...)
     {
@@ -101,8 +103,30 @@ bool StatementRecovery::isNewFile(const std::filesystem::path &relativePath) con
 {
     requireWritableStatement();
     const auto file = originalFiles_.find(relativePath);
-    return file != originalFiles_.end() && file->second.newFile;
+    return file != originalFiles_.end() && file->second.beforeImage.newFile;
 }
+
+std::uint64_t StatementRecovery::requiredEndForPage(const std::filesystem::path &relativePath, std::uint32_t pageId) const
+{
+    requireWritableStatement();
+
+    const auto &file = originalFiles_.at(relativePath);
+    const auto pageOffset = std::uint64_t{pageId} * PAGE_SIZE;
+
+    // Newly appended pages have no original contents to restore.
+    // For a newly created file, originalSize is zero.
+    if (pageOffset >= file.beforeImage.originalSize)
+    {
+        return file.requiredEnd;
+    }
+
+    // Existing pages require both file metadata and a page before-image.
+    // at() throws if the required capture is missing.
+    const auto pageEnd = capturedPages_.at(relativePath).at(pageId);
+
+    return std::max(file.requiredEnd, pageEnd);
+}
+
 std::uint64_t StatementRecovery::getOriginalFileSize(const std::filesystem::path &relativePath) const
 {
     requireWritableStatement();
@@ -113,7 +137,7 @@ std::uint64_t StatementRecovery::getOriginalFileSize(const std::filesystem::path
             relativePath.string());
     }
 
-    return originalFiles_.at(relativePath).originalSize;
+    return originalFiles_.at(relativePath).beforeImage.originalSize;
 }
 
 void StatementRecovery::rollback()
@@ -219,13 +243,21 @@ void StatementRecovery::commit()
         std::unordered_set<std::filesystem::path> changedDirectories;
         for (const auto &[relativePath, metadata] : originalFiles_)
         {
-            if (metadata.newFile)
+            if (metadata.beforeImage.newFile)
                 changedDirectories.insert((dbRootPath_ / relativePath).parent_path());
         }
         for (const auto &path : changedDirectories)
         {
             LinuxDirectory directory{path};
             directory.sync();
+        }
+        for (const auto &[relativePath, needsSync] : needSyncMap_)
+        {
+            if (needsSync)
+            {
+                PageFile pageFile{relativePath};
+                pageFile.sync();
+            }
         }
         if (!std::filesystem::remove(journalPath_))
             throw std::runtime_error("Expected journal file was missing");

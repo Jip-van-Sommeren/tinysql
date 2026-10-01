@@ -52,8 +52,11 @@ StorageEngine StorageEngine::create(
 
     LinuxDirectory root{
         path};
-
     root.sync();
+    LinuxDirectory rootParent{
+        std::filesystem::canonical(path).parent_path()};
+
+    rootParent.sync();
 
     return StorageEngine{
         path};

@@ -32,6 +32,12 @@ struct FileBeforeImage
     bool newFile = false;
 };
 
+struct CapturedFile
+{
+    FileBeforeImage beforeImage;
+    std::uint64_t requiredEnd;
+};
+
 using JournalRecord = std::variant<FileBeforeImage, PageBeforeImage>;
 
 // Record I/O only, not yet a complete statement recovery protocol. Callers must
