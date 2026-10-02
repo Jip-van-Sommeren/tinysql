@@ -17,6 +17,18 @@ void StatementRecovery::requireWritableStatement() const
     }
 }
 
+void StatementRecovery::initializeForRecover()
+{
+    journalFile_.emplace(
+        journalPath_,
+        LinuxFile::OpenMode::OpenExisting);
+    journalDirectoryNeedsSync_ = true;
+    active_ = true;
+    syncOffset_ = journalFile_->size();
+    appendOffset_ = journalFile_->size();
+
+}
+
 void StatementRecovery::begin()
 {
     if (journalFile_ || active_ || failed_)
@@ -277,6 +289,7 @@ void StatementRecovery::finish()
     journalFile_.reset();
     capturedPages_.clear();
     originalFiles_.clear();
+    needSyncMap_.clear();
     appendOffset_ = 0;
     syncOffset_ = 0;
     journalDirectoryNeedsSync_ = false;

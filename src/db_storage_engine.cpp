@@ -58,16 +58,21 @@ StorageEngine StorageEngine::create(
 
     rootParent.sync();
 
-    return StorageEngine{
-        path};
+    return StorageEngine{path};
 }
 
 StorageEngine StorageEngine::open(
     const std::filesystem::path &path)
 {
     // Opening either missing subdirectory throws; nothing is created.
-    return StorageEngine{
-        path};
+    if (std::filesystem::exists(path / "journal" / "journal.log"))
+    {
+        StatementRecovery statementRecovery{path};
+        statementRecovery.initializeForRecover();
+        statementRecovery.rollback();
+    }
+
+    return StorageEngine{path};
 }
 
 bool StorageEngine::tableExists(const std::string &name) const
@@ -110,7 +115,8 @@ Table StorageEngine::createTable(
         tableName,
         magic,
         columns,
-        constraints, statementRecovery_);
+        constraints, 
+        statementRecovery_);
 }
 
 Table StorageEngine::openTable(const std::string &tableName)

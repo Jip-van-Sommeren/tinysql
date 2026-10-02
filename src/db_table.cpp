@@ -98,7 +98,10 @@ Table Table::open(const std::filesystem::path &dbRoot,
 
 void Table::insertRows(const BoundInsert &insert)
 {
-
+    if (insert.rows.empty())
+    {
+        return;
+    }
     bufferManager.insertAllRows(insert.rows);
     bufferManager.flushAll();
     bufferManager.sync();

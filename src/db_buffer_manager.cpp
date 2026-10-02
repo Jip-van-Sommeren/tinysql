@@ -175,7 +175,7 @@ PageGuard BufferManager::getPage(PageId pageId, const PageReader &reader)
 
 PageGuard BufferManager::getHeaderPage()
 {
-    PageGuard header = getPage(0, decodeHeaderPage);
+    PageGuard header = getPage(PageId{0}, decodeHeaderPage);
     if (header.page().header.pageType != PageType::HeaderPage)
     {
         throw std::runtime_error("Page 0 is not a table header page");

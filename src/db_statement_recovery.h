@@ -10,6 +10,7 @@ public:
     explicit StatementRecovery(const std::filesystem::path &path);
 
     void begin();
+    void initializeForRecover();
     void capturePageOnce(const PageBeforeImage &image);
     void ensureDurable();
     void ensureDurable(std::uint64_t requiredEnd);
@@ -23,6 +24,8 @@ public:
     bool hasCapturedPage(const std::filesystem::path &path, std::uint32_t pageId) const;
     std::uint64_t getOriginalFileSize(const std::filesystem::path &relativePath) const;
     std::uint64_t requiredEndForPage(const std::filesystem::path &relativePath, std::uint32_t pageId) const;
+
+    
     void unSetNeedsSync(const std::filesystem::path &relativePath)
     {
         if (needSyncMap_.contains(relativePath))

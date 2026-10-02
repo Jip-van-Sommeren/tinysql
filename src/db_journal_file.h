@@ -16,6 +16,16 @@ enum class JournalRecordType : std::uint8_t
     PageBeforeImage = 2,
 };
 
+struct JournalRecordHeader
+{
+    JournalRecordType type;
+    std::uint64_t recordSize; // Bytes, including header and path.
+
+    std::uint32_t pathLength; // Bytes, excluding null terminator.
+    std::uint32_t statementId;   // For future use; currently always 0.
+    std::uint32_t version; // For future use; currently always 0.
+};
+
 struct PageBeforeImage
 {
     std::filesystem::path relativeFilePath;

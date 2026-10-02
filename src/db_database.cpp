@@ -20,30 +20,29 @@
 
 #include <vector>
 
-Database::Database(StorageEngine engine, std::string name)
-    : dbName(std::move(name)),
-      storageEngine(std::move(engine))
+Database::Database(StorageEngine engine, const std::string &name)
+    : storageEngine(std::move(engine)), dbName(std::move(name))
+      
 {
 }
 
 Database Database::create(
-    const std::filesystem::path &path, std::string name)
+    const std::filesystem::path &path, const std::string &name)
 {
     // Create the database root before creating its subdirectories.
 
-    return Database{StorageEngine::create(path),
-                    std::move(name)};
+    return Database{StorageEngine::create(path), name};
 }
 
 Database Database::open(
-    const std::filesystem::path &path, std::string name)
+    const std::filesystem::path &path, const std::string &name)
 {
     // Opening either missing subdirectory throws; nothing is created.
 
     {
         return Database{
             StorageEngine::open(path),
-            std::move(name)};
+            name};
     }
 }
 

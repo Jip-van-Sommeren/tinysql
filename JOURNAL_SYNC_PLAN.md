@@ -177,7 +177,7 @@ paths still use the no-argument barrier to synchronize the whole journal.
       does not itself discard the journal.
 - [x] Synchronize the same open table file after writeback in current Table
       creation, insertion, and deletion paths, before Database calls commit.
-- [ ] Track participating/written files and make commit verify that all are
+- [x] Track participating/written files and make commit verify that all are
       synchronized, independently of cached-frame dirty flags. Today `commit()`
       trusts callers and removes the journal without checking table durability.
 - [x] Fail the statement on journal-barrier synchronization errors and propagate
