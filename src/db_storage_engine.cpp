@@ -16,8 +16,9 @@
 #include <unistd.h>
 
 StorageEngine::StorageEngine(
-    const std::filesystem::path &path)
+    const std::filesystem::path &path, LinuxDirectory lockedRoot)
     : dbPath_(path),
+      dbRootDirectory_(std::move(lockedRoot)),
       tablesDirectory_(dbPath_ / "tables"),
       journalDirectory_(dbPath_ / "journal"),
       statementRecovery_(path)
@@ -28,7 +29,9 @@ StorageEngine StorageEngine::create(
     const std::filesystem::path &path)
 {
     // Create the database root before creating its subdirectories.
-
+    LinuxDirectory root{
+        path};
+    root.lockExclusive();
     if (::mkdir(path.c_str(), 0700) == -1)
     {
         const int error = errno;
@@ -50,29 +53,30 @@ StorageEngine StorageEngine::create(
         throwError("mkdir", error, path / "journal");
     }
 
-    LinuxDirectory root{
-        path};
     root.sync();
     LinuxDirectory rootParent{
         std::filesystem::canonical(path).parent_path()};
 
     rootParent.sync();
 
-    return StorageEngine{path};
+    return StorageEngine{path, std::move(root)};
 }
 
 StorageEngine StorageEngine::open(
     const std::filesystem::path &path)
 {
-    // Opening either missing subdirectory throws; nothing is created.
+    LinuxDirectory root{path};
+    root.lockExclusive();
+
+    StorageEngine engine{path, std::move(root)};
+
     if (std::filesystem::exists(path / "journal" / "journal.log"))
     {
-        StatementRecovery statementRecovery{path};
-        statementRecovery.initializeForRecover();
-        statementRecovery.rollback();
+        engine.statementRecovery_.initializeForRecover();
+        engine.statementRecovery_.rollback();
     }
 
-    return StorageEngine{path};
+    return engine;
 }
 
 bool StorageEngine::tableExists(const std::string &name) const
@@ -115,7 +119,7 @@ Table StorageEngine::createTable(
         tableName,
         magic,
         columns,
-        constraints, 
+        constraints,
         statementRecovery_);
 }
 

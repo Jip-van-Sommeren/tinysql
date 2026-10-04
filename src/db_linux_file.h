@@ -64,6 +64,8 @@ public:
     LinuxDirectory(LinuxDirectory &&other) noexcept;
     LinuxDirectory &operator=(LinuxDirectory &&other) noexcept;
 
+    void lockExclusive();
+
     // On an I/O error a prefix may already have been transferred. Neither
     // method provides rollback; successful return guarantees the full transfer.
     void sync();

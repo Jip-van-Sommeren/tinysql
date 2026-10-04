@@ -17,16 +17,73 @@ void StatementRecovery::requireWritableStatement() const
     }
 }
 
+std::uint64_t StatementRecovery::validateJournalForRecovery()
+{
+
+    if (!journalFile_)
+    {
+        throw std::logic_error("No journal open for recovery");
+    }
+
+    const auto end = journalFile_->findRecoveryEnd(journalFile_->size());
+    journalFile_->rewind();
+
+    std::unordered_map<std::filesystem::path, FileBeforeImage> rollbackFiles;
+    while (auto image = journalFile_->readNext(end))
+    {
+        std::visit(
+            [&](const auto &value)
+            {
+                using T = std::decay_t<decltype(value)>;
+
+                if constexpr (std::is_same_v<T, PageBeforeImage>)
+                {
+                    const auto metadata = rollbackFiles.find(value.relativeFilePath);
+                    if (metadata == rollbackFiles.end() || metadata->second.newFile ||
+                        std::uint64_t{value.pageId} * PAGE_SIZE >= metadata->second.originalSize)
+                    {
+                        throw std::runtime_error("Page before-image has no valid original file metadata");
+                    }
+                }
+                else if constexpr (std::is_same_v<T, FileBeforeImage>)
+                {
+                    if (value.originalSize % PAGE_SIZE != 0 ||
+                        (value.newFile && value.originalSize != 0))
+                    {
+                        throw std::runtime_error("Invalid original file metadata in journal");
+                    }
+                    auto [it, inserted] = rollbackFiles.try_emplace(value.relativeFilePath, value);
+                    if (!inserted && (it->second.originalSize != value.originalSize ||
+                                      it->second.newFile != value.newFile))
+                    {
+                        throw std::runtime_error("Conflicting original file metadata in journal");
+                    }
+                }
+            },
+            image.value());
+    }
+    journalFile_->rewind();
+    return end;
+}
+
 void StatementRecovery::initializeForRecover()
 {
     journalFile_.emplace(
         journalPath_,
         LinuxFile::OpenMode::OpenExisting);
-    journalDirectoryNeedsSync_ = true;
-    active_ = true;
-    syncOffset_ = journalFile_->size();
-    appendOffset_ = journalFile_->size();
+    recoveryEnd_ = validateJournalForRecovery();
+    const auto end = journalFile_->size();
 
+    journalFile_->sync();
+
+    LinuxDirectory directory{journalPath_.parent_path()};
+    directory.sync();
+
+    // Update these only after both syncs succeed.
+    appendOffset_ = end;
+    syncOffset_ = end;
+    journalDirectoryNeedsSync_ = false;
+    active_ = true;
 }
 
 void StatementRecovery::begin()
@@ -164,7 +221,7 @@ void StatementRecovery::rollback()
 
     journalFile_->rewind();
 
-    while (auto image = journalFile_->readNext())
+    while (auto image = journalFile_->readNext(recoveryEnd_))
     {
         std::visit(
             [&](const auto &value)
@@ -292,6 +349,7 @@ void StatementRecovery::finish()
     needSyncMap_.clear();
     appendOffset_ = 0;
     syncOffset_ = 0;
+    recoveryEnd_ = 0;
     journalDirectoryNeedsSync_ = false;
     failed_ = false;
     active_ = false;

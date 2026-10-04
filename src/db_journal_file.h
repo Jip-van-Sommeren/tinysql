@@ -21,9 +21,9 @@ struct JournalRecordHeader
     JournalRecordType type;
     std::uint64_t recordSize; // Bytes, including header and path.
 
-    std::uint32_t pathLength; // Bytes, excluding null terminator.
-    std::uint32_t statementId;   // For future use; currently always 0.
-    std::uint32_t version; // For future use; currently always 0.
+    std::uint32_t pathLength;  // Bytes, excluding null terminator.
+    std::uint32_t statementId; // For future use; currently always 0.
+    std::uint32_t version;     // For future use; currently always 0.
 };
 
 struct PageBeforeImage
@@ -64,6 +64,10 @@ public:
 
     // nullopt means EOF between records; truncated records throw.
     std::optional<JournalRecord> readNext();
+    std::optional<JournalRecord> readNext(std::uint64_t end);
+
+    std::uint64_t JournalFile::findRecoveryEnd(
+        std::uint64_t fileSize);
     void rewind() noexcept { readOffset_ = 0; }
 
     // Appends return the end of the complete record; neither synchronizes it.

@@ -8,6 +8,7 @@
 #include <string>
 #include <system_error>
 #include <sys/stat.h>
+#include <sys/file.h>
 #include <unistd.h>
 #include <utility>
 
@@ -290,6 +291,29 @@ void LinuxDirectory::ensureOpen() const
     if (fd_ == -1)
     {
         throwError("use of closed file", EBADF);
+    }
+}
+
+void LinuxDirectory::lockExclusive()
+{
+    ensureOpen();
+
+    while (::flock(fd_, LOCK_EX | LOCK_NB) == -1)
+    {
+        const int error = errno;
+
+        if (error == EINTR)
+        {
+            continue;
+        }
+
+        if (error == EWOULDBLOCK)
+        {
+            throw std::runtime_error(
+                "Database is already open: " + path_.string());
+        }
+
+        throwError("flock", error);
     }
 }
 

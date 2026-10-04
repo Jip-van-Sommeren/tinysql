@@ -24,8 +24,8 @@ public:
     bool hasCapturedPage(const std::filesystem::path &path, std::uint32_t pageId) const;
     std::uint64_t getOriginalFileSize(const std::filesystem::path &relativePath) const;
     std::uint64_t requiredEndForPage(const std::filesystem::path &relativePath, std::uint32_t pageId) const;
+    std::uint64_t validateJournalForRecovery();
 
-    
     void unSetNeedsSync(const std::filesystem::path &relativePath)
     {
         if (needSyncMap_.contains(relativePath))
@@ -68,6 +68,7 @@ private:
 
     std::uint64_t appendOffset_ = 0;
     std::uint64_t syncOffset_ = 0;
+    std::uint64_t recoveryEnd_ = 0;
 
     void requireWritableStatement() const;
     void finish();

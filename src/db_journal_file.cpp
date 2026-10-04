@@ -43,6 +43,58 @@ JournalFile::JournalFile(const std::filesystem::path &path, LinuxFile::OpenMode 
 {
 }
 
+std::uint64_t JournalFile::findRecoveryEnd(
+    std::uint64_t fileSize)
+{
+    std::uint64_t offset{0};
+    constexpr std::size_t TypeSize = sizeof(std::uint8_t);
+    constexpr std::size_t PrefixSize = TypeSize + sizeof(std::uint32_t);
+
+    while (offset < fileSize)
+    {
+
+        if (fileSize - offset < PrefixSize)
+        {
+            return offset;
+        }
+        const auto recordStart = offset;
+
+        // Every record starts with [type:u8][path length:u32].
+        std::array<std::byte, PrefixSize> prefixBytes{};
+        file_.readExactAt(recordStart, prefixBytes);
+        ByteReader prefixReader(prefixBytes);
+        const auto journalType = static_cast<JournalRecordType>(
+            prefixReader.readUnsigned<std::uint8_t>());
+        const auto pathLength = prefixReader.readUnsigned<std::uint32_t>();
+        if (pathLength == 0 || pathLength > MaxPathBytes)
+        {
+            throw std::runtime_error("Invalid journal path length");
+        }
+
+        std::size_t recordSize;
+        if (journalType == JournalRecordType::FileBeforeImage)
+        {
+            recordSize = sizeof(std::uint32_t) + sizeof(std::uint8_t) * 2 + sizeof(std::uint64_t) + pathLength;
+        }
+        else if (journalType == JournalRecordType::PageBeforeImage)
+        {
+            recordSize = RecordOverhead + pathLength;
+        }
+        else
+        {
+            throw std::runtime_error("invalid Journal Record Type");
+        }
+
+        if (recordSize > fileSize - recordStart)
+        {
+            return recordStart;
+        }
+
+        offset += recordSize;
+    }
+    return offset;
+}
+
 std::optional<JournalRecord> JournalFile::readRecord(
     std::uint64_t &offset, std::uint64_t fileSize)
 {
@@ -123,6 +175,11 @@ std::optional<JournalRecord> JournalFile::readRecord(
 
     offset = recordStart + recordSize;
     return record;
+}
+
+std::optional<JournalRecord> JournalFile::readNext(std::uint64_t end)
+{
+    return readRecord(readOffset_, end);
 }
 
 std::optional<JournalRecord> JournalFile::readNext()

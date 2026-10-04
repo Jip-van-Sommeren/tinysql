@@ -12,9 +12,6 @@
 class StorageEngine final : public Catalog
 {
 public:
-    explicit StorageEngine(
-        const std::filesystem::path &path);
-
     static StorageEngine create(const std::filesystem::path &path);
     static StorageEngine open(const std::filesystem::path &path);
 
@@ -55,9 +52,13 @@ public:
 
 private:
     std::filesystem::path dbPath_;
+    LinuxDirectory dbRootDirectory_;
     LinuxDirectory tablesDirectory_;
     LinuxDirectory journalDirectory_;
     StatementRecovery statementRecovery_;
+
+    explicit StorageEngine(
+        const std::filesystem::path &path, LinuxDirectory lockedRoot);
     std::filesystem::path getTablePath(const std::string &name) const
     {
         return dbPath_ / "tables" / (name + ".table");
