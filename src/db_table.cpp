@@ -46,6 +46,8 @@ TableCursor &TableCursor::operator=(TableCursor &&other) noexcept
 
 std::optional<Row> TableCursor::next()
 {
+    if (table_)
+        table_->bufferManager.requireReadable();
     while (pageId_ != 0)
     {
         if (!currentPage_)
@@ -98,6 +100,7 @@ Table Table::open(const std::filesystem::path &dbRoot,
 
 void Table::insertRows(const BoundInsert &insert)
 {
+    bufferManager.requireReadable();
     if (insert.rows.empty())
     {
         return;

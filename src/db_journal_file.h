@@ -9,6 +9,27 @@
 #include <optional>
 #include <vector>
 #include <variant>
+#include <uuid/uuid.h>
+
+constexpr std::uint32_t JournalHeaderBytes =
+    8 + 4 + 4 + 16 + 16 + 8 + 4; // 60 bytes
+
+constexpr std::uint64_t JournalRecordHeaderBytes =
+    1 + 8 + 4 + 4 + 4; // 21 bytes
+
+constexpr std::array<char, 8> JournalMagic{
+    'D', 'B', 'J', 'R', 'N', 'L', '\0', '\0'};
+
+struct JournalHeader
+{
+    std::array<char, 8> magic;
+    std::uint32_t version;
+    std::uint32_t headerLength; // Bytes, including magic, version, epoch, generation, checksum.
+    uuid_t dbId;
+    uuid_t statementId;
+    std::uint64_t pageSize;
+    std::uint32_t checksum;
+};
 
 enum class JournalRecordType : std::uint8_t
 {
@@ -20,10 +41,8 @@ struct JournalRecordHeader
 {
     JournalRecordType type;
     std::uint64_t recordSize; // Bytes, including header and path.
-
-    std::uint32_t pathLength;  // Bytes, excluding null terminator.
-    std::uint32_t statementId; // For future use; currently always 0.
-    std::uint32_t version;     // For future use; currently always 0.
+    std::uint32_t sequenceNumber;
+    std::uint32_t checksum;
 };
 
 struct PageBeforeImage
@@ -42,13 +61,13 @@ struct FileBeforeImage
     bool newFile = false;
 };
 
-struct CapturedFile
+struct JournalRecord
 {
-    FileBeforeImage beforeImage;
-    std::uint64_t requiredEnd;
+    JournalRecordHeader header;
+    std::variant<FileBeforeImage, PageBeforeImage> record;
 };
 
-using JournalRecord = std::variant<FileBeforeImage, PageBeforeImage>;
+// using JournalRecord = std::variant<FileBeforeImage, PageBeforeImage>;
 
 // Record I/O only, not yet a complete statement recovery protocol. Callers must
 // resolve old journals before starting a new statement or applying undo records.
@@ -66,7 +85,7 @@ public:
     std::optional<JournalRecord> readNext();
     std::optional<JournalRecord> readNext(std::uint64_t end);
 
-    std::uint64_t JournalFile::findRecoveryEnd(
+    std::uint64_t findRecoveryEnd(
         std::uint64_t fileSize);
     void rewind() noexcept { readOffset_ = 0; }
 
@@ -76,6 +95,9 @@ public:
     std::uint64_t writePage(const PageBeforeImage &pageBeforeImage);
     void sync();
     std::uint64_t size() const { return file_.size(); }
+
+    std::uint64_t writeJournalRecordHeader(const JournalRecordHeader &header);
+    std::uint64_t writeJournalHeader(const JournalHeader &header);
 
 private:
     LinuxFile file_;

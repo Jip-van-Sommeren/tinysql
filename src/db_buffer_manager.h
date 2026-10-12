@@ -82,11 +82,8 @@ public:
     void insertAllRows(const std::vector<Row> &rows);
     void flushPage(PageId pageId);
     void flushAll();
-    void sync()
-    {
-        pageFile_.sync();
-        statementRecovery_.unSetNeedsSync(pageFile_.getPath());
-    }
+    void sync();
+    void requireReadable() const;
 
 private:
     friend class PageGuard;
@@ -94,6 +91,8 @@ private:
     PageFile pageFile_;
     StatementRecovery &statementRecovery_;
     std::filesystem::path relativeTablePath_;
+    const std::uint64_t cacheEpoch_;
+    std::shared_ptr<StatementRecovery::Participant> participant_;
 
     std::unordered_map<PageId, PageFrame> pages;
 

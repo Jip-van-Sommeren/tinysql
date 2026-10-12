@@ -21,7 +21,7 @@
 #include <vector>
 
 Database::Database(StorageEngine engine, const std::string &name)
-    : storageEngine(std::move(engine)), dbName(std::move(name))
+    : dbName(name), storageEngine(std::move(engine))
       
 {
 }
@@ -69,6 +69,7 @@ std::vector<Row> Database::selectAllRows(const std::string &tableName)
 
 QueryResult Database::execute(const BoundQuery &query)
 {
+    storageEngine.requireReadable();
     return std::visit(
         [this](const auto &boundQuery) -> QueryResult
         {
@@ -96,6 +97,7 @@ QueryResult Database::execute(const BoundQuery &query)
 
 QueryResult Database::executeSql(const std::string &sql)
 {
+    storageEngine.requireReadable();
     Lexer lexer(sql);
     Parser parser(lexer.tokenize());
     std::unique_ptr<Statement> statement = parser.parseStatement();

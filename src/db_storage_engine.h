@@ -24,14 +24,15 @@ public:
         const std::vector<Column> &columns,
         const std::vector<Constraint> &constraints);
     Table openTable(const std::string &tableName);
+    void requireReadable() const { statementRecovery_.requireReadable(); }
     void syncTablesDirectory()
     {
-        tablesDirectory_.sync();
+        syncDirectory(tablesDirectory_);
     }
 
     void syncJournalDirectory()
     {
-        journalDirectory_.sync();
+        syncDirectory(journalDirectory_);
     }
     void beginStatement()
     {
@@ -51,6 +52,20 @@ public:
     // const std::filesystem::path &getTablesPath() const;
 
 private:
+    void syncDirectory(LinuxDirectory &directory)
+    {
+        requireReadable();
+        try
+        {
+            directory.sync();
+        }
+        catch (...)
+        {
+            statementRecovery_.statementFailed();
+            throw;
+        }
+    }
+
     std::filesystem::path dbPath_;
     LinuxDirectory dbRootDirectory_;
     LinuxDirectory tablesDirectory_;
@@ -58,7 +73,7 @@ private:
     StatementRecovery statementRecovery_;
 
     explicit StorageEngine(
-        const std::filesystem::path &path, LinuxDirectory lockedRoot);
+        const std::filesystem::path &path, LinuxDirectory lockedRoot, const uuid_t &dbId);
     std::filesystem::path getTablePath(const std::string &name) const
     {
         return dbPath_ / "tables" / (name + ".table");
@@ -69,4 +84,5 @@ private:
         throw std::system_error(error, std::generic_category(),
                                 std::string{operation} + " failed: " + path.string());
     }
+    static void createMetaFile(const std::filesystem::path &dbPath, const uuid_t &dbId);
 };

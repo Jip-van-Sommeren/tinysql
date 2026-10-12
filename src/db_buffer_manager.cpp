@@ -25,13 +25,23 @@ namespace
                           LinuxFile::OpenMode mode,
                           StatementRecovery &recovery)
     {
+        recovery.requireReadable();
         if (mode == LinuxFile::OpenMode::CreateNew)
         {
             // Persist nonexistence before open(O_CREAT) can change the directory.
             recovery.captureFileOnce(relativePath, true);
             recovery.ensureDurable();
         }
-        return PageFile{dbRoot / relativePath, mode};
+        try
+        {
+            return PageFile{dbRoot / relativePath, mode};
+        }
+        catch (...)
+        {
+            if (mode == LinuxFile::OpenMode::CreateNew)
+                recovery.statementFailed();
+            throw;
+        }
     }
 }
 
@@ -81,8 +91,6 @@ Page &PageGuard::writePage()
     assert(page_ != nullptr);
     assert(bufferManager_ != nullptr);
 
-    bufferManager_->prepareForWrite(pageId_);
-
     bufferManager_->markDirty(pageId_);
 
     return *page_;
@@ -91,6 +99,7 @@ Page &PageGuard::writePage()
 const Page &PageGuard::page() const
 {
     assert(page_ != nullptr);
+    bufferManager_->requireReadable();
     return *page_;
 }
 
@@ -106,40 +115,51 @@ BufferManager::BufferManager(std::filesystem::path dbRoot,
                              StatementRecovery &statementRecovery)
     : pageFile_(openPageFile(dbRoot, relTablePath, mode, statementRecovery)),
       statementRecovery_(statementRecovery),
-      relativeTablePath_(relTablePath)
+      relativeTablePath_(relTablePath),
+      cacheEpoch_(statementRecovery.cacheEpoch()),
+      participant_(std::make_shared<StatementRecovery::Participant>())
 {
+    participant_->relativePath = relativeTablePath_;
+    if (mode == LinuxFile::OpenMode::CreateNew)
+    {
+        statementRecovery_.trackParticipant(participant_);
+        participant_->needsSync = true;
+    }
+}
+
+void BufferManager::requireReadable() const
+{
+    statementRecovery_.requireReadable();
+    if (cacheEpoch_ != statementRecovery_.cacheEpoch())
+        throw std::runtime_error("Table handle was invalidated by rollback; reopen the table");
 }
 
 void BufferManager::prepareForWrite(PageId pageId)
 {
-    if (statementRecovery_.isActive())
+    requireReadable();
+    if (!statementRecovery_.isActive())
+        throw std::logic_error("Cannot modify a page without an active statement");
+    try
     {
-
         statementRecovery_.captureFileOnce(relativeTablePath_);
+        if (statementRecovery_.hasCapturedPage(relativeTablePath_, pageId))
+            return;
+
+        if (std::uint64_t{pageId} * PAGE_SIZE < statementRecovery_.getOriginalFileSize(relativeTablePath_))
+        {
+            const RawPage originalPage = pageFile_.readPage(pageId);
+            statementRecovery_.capturePageOnce(PageBeforeImage{
+                .relativeFilePath = relativeTablePath_,
+                .pageId = pageId,
+                .originalPage = originalPage,
+            });
+        }
     }
-    else
+    catch (...)
     {
-        throw std::logic_error(
-            "Cannot modify a page without an active statement");
-    }
-
-    if (statementRecovery_.hasCapturedPage(relativeTablePath_, pageId))
-    {
-        return; // Already protected for this statement.
-    }
-
-    // Original File Size already get checked with %PAGE_SIZE on insertion
-
-    if (std::uint64_t{pageId} * PAGE_SIZE < statementRecovery_.getOriginalFileSize(relativeTablePath_))
-    {
-
-        RawPage originalPage = pageFile_.readPage(pageId);
-
-        statementRecovery_.capturePageOnce(PageBeforeImage{
-            .relativeFilePath = relativeTablePath_,
-            .pageId = pageId,
-            .originalPage = originalPage,
-        });
+        // Failure to read an original page is also a capture failure.
+        statementRecovery_.statementFailed();
+        throw;
     }
 }
 
@@ -147,6 +167,7 @@ Page &BufferManager::fetchPage(
     PageId pageId,
     const PageReader &reader)
 {
+    requireReadable();
     auto existing = pages.find(pageId);
     if (existing != pages.end())
     {
@@ -222,11 +243,17 @@ void BufferManager::unpinPage(PageId pageId) noexcept
 
 void BufferManager::markDirty(PageId pageId)
 {
-    pages.at(pageId).dirty = true;
+    prepareForWrite(pageId);
+    auto &frame = pages.at(pageId);
+    frame.coverage = statementRecovery_.requiredCoverageForPage(relativeTablePath_, pageId);
+    statementRecovery_.trackParticipant(participant_);
+    participant_->dirtyPages.insert(pageId);
+    frame.dirty = true;
 }
 
 void BufferManager::insertAllRows(const std::vector<Row> &rows)
 {
+    requireReadable();
     if (rows.empty())
     {
         return;
@@ -280,6 +307,7 @@ void BufferManager::insertAllRows(const std::vector<Row> &rows)
 
 void BufferManager::flushPage(PageId pageId)
 {
+    requireReadable();
     PageFrame &frame = pages.at(pageId);
 
     if (!frame.dirty)
@@ -287,45 +315,58 @@ void BufferManager::flushPage(PageId pageId)
         return;
     }
 
-    RawPage encodedPage = encodeCachedPage(frame.page);
-    const auto requiredEnd =
-        statementRecovery_.requiredEndForPage(relativeTablePath_, pageId);
-
-    statementRecovery_.ensureDurable(requiredEnd);
-
-    pageFile_.writePage(pageId, encodedPage);
-    statementRecovery_.setNeedsSync(relativeTablePath_);
+    try
+    {
+        statementRecovery_.validateCoverage(relativeTablePath_, pageId, frame.coverage);
+        RawPage encodedPage = encodeCachedPage(frame.page);
+        statementRecovery_.ensureDurable(frame.coverage);
+        // A failing write may already have transferred a prefix.
+        participant_->needsSync = true;
+        pageFile_.writePage(pageId, encodedPage);
+    }
+    catch (...)
+    {
+        statementRecovery_.statementFailed();
+        throw;
+    }
 
     frame.dirty = false;
+    participant_->dirtyPages.erase(pageId);
 }
 
 void BufferManager::flushAll()
 {
-    std::uint64_t requiredEnd = 0;
-
-    for (const auto &[pageId, frame] : pages)
+    requireReadable();
+    JournalCoverage required{};
+    try
     {
-        if (frame.dirty)
+        for (const auto &[pageId, frame] : pages)
         {
-            requiredEnd = std::max(
-                requiredEnd,
-                statementRecovery_.requiredEndForPage(
-                    relativeTablePath_, pageId));
+            if (frame.dirty)
+            {
+                statementRecovery_.validateCoverage(relativeTablePath_, pageId, frame.coverage);
+                if (frame.coverage.end > required.end)
+                    required = frame.coverage;
+            }
+        }
+        if (required.generation == 0)
+            return;
+        statementRecovery_.ensureDurable(required);
+        for (const auto &[pageId, frame] : pages)
+        {
+            if (frame.dirty)
+            {
+                const auto encoded = encodeCachedPage(frame.page);
+                participant_->needsSync = true;
+                pageFile_.writePage(pageId, encoded);
+            }
         }
     }
-
-    statementRecovery_.ensureDurable(requiredEnd);
-
-    for (const auto &[pageId, frame] : pages)
+    catch (...)
     {
-        if (frame.dirty)
-        {
-            pageFile_.writePage(
-                pageId,
-                encodeCachedPage(frame.page));
-        }
+        statementRecovery_.statementFailed();
+        throw;
     }
-    statementRecovery_.setNeedsSync(relativeTablePath_);
 
     // All native writes completed before dirty flags are cleared. This is
     // writeback, not a durable statement commit; recovery coordination is separate.
@@ -334,22 +375,43 @@ void BufferManager::flushAll()
     {
         frame.dirty = false;
     }
+    participant_->dirtyPages.clear();
+}
+
+void BufferManager::sync()
+{
+    requireReadable();
+    try
+    {
+        pageFile_.sync();
+        participant_->needsSync = false;
+    }
+    catch (...)
+    {
+        statementRecovery_.statementFailed();
+        throw;
+    }
 }
 
 void BufferManager::setPage(const Page &page, PageId pageId)
 {
+    requireReadable();
     const auto existing = pages.find(pageId);
     if (existing != pages.end() && existing->second.pinCount != 0)
     {
         throw std::runtime_error("Cannot replace a pinned page");
     }
 
+    const auto coverage = statementRecovery_.requiredCoverageForPage(relativeTablePath_, pageId);
+    statementRecovery_.trackParticipant(participant_);
+    participant_->dirtyPages.insert(pageId);
     pages.insert_or_assign(
         pageId,
         PageFrame{
             .pageId = pageId,
             .page = page,
-            .dirty = true});
+            .dirty = true,
+            .coverage = coverage});
 }
 
 RawPage BufferManager::encodeCachedPage(const Page &page)
@@ -469,6 +531,7 @@ void BufferManager::initializeNewTable(const std::string &tableName,
                                        const std::vector<Column> &columns,
                                        const std::vector<Constraint> &constraints)
 {
+    requireReadable();
     if (!statementRecovery_.isNewFile(relativeTablePath_) || pageFile_.size() != 0)
     {
         throw std::logic_error("Can only initialize a new, unwritten table in the active statement");

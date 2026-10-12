@@ -4,6 +4,7 @@
 #include "db_test_directory.h"
 
 #include <iostream>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -60,7 +61,7 @@ namespace
     {
         TestDirectory directory{"db-storage-integration-test"};
         const auto root = directory.path / "db";
-        Database database = Database::create(root, "test");
+        std::optional<Database> database{Database::create(root, "test")};
 
         const auto unrelated = directory.path / "unrelated";
         std::filesystem::create_directories(unrelated / "tables");
@@ -71,11 +72,12 @@ namespace
         WorkingDirectory workingDirectory{unrelated};
 
         // An unrelated file with the same relative name must not block creation.
-        database.executeSql("CREATE TABLE items (id INT NOT NULL);");
+        database->executeSql("CREATE TABLE items (id INT NOT NULL);");
         const auto tablePath = root / "tables/items.table";
         const auto journalPath = root / "journal/journal.log";
         require(std::filesystem::exists(tablePath), "Table was not created in the database root");
 
+        database.reset(); // Release exclusive ownership before reopening.
         {
             StorageEngine engine = StorageEngine::open(root);
             require(engine.tableExists("items"), "Catalog did not resolve the database root");
@@ -85,7 +87,8 @@ namespace
                     "Opening a missing table created it");
         }
 
-        database.insertRows("items", {Row{{std::int32_t{1}}}});
+        database.emplace(Database::open(root, "test"));
+        database->insertRows("items", {Row{{std::int32_t{1}}}});
         require(!std::filesystem::exists(journalPath), "Successful direct INSERT left a journal");
         const auto before = readFile(tablePath);
 
@@ -93,22 +96,23 @@ namespace
         // row fails validation. The direct API must take the rollback path.
         requireError([&]
         {
-            database.insertRows("items", {
+            database->insertRows("items", {
                 Row{{std::int32_t{2}}}, Row{{std::string{"not an integer"}}}});
         }, "expects type");
         require(readFile(tablePath) == before, "Failed direct INSERT changed the table bytes");
         require(!std::filesystem::exists(journalPath), "Rollback left an active journal");
-        require(database.selectAllRows("items").size() == 1, "Failed INSERT retained a row");
+        require(database->selectAllRows("items").size() == 1, "Failed INSERT retained a row");
 
-        requireError([&] { database.insertRows("missing", {Row{{std::int32_t{3}}}}); },
+        requireError([&] { database->insertRows("missing", {Row{{std::int32_t{3}}}}); },
                      "Table does not exist");
         require(!std::filesystem::exists(journalPath), "Failed table lookup left an active journal");
 
-        database.insertRows("items", {});
+        database->insertRows("items", {});
         require(readFile(tablePath) == before && !std::filesystem::exists(journalPath),
                 "Empty direct INSERT changed data or left a journal");
-        database.insertRows("items", {Row{{std::int32_t{2}}}});
+        database->insertRows("items", {Row{{std::int32_t{2}}}});
 
+        database.reset();
         Database reopened = Database::open(root, "test");
         const auto rows = reopened.selectAllRows("items");
         require(rows.size() == 2 && std::get<std::int32_t>(rows[0].values.at(0)) == 1 &&

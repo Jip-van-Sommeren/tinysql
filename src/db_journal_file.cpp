@@ -9,7 +9,8 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
-
+#include <zlib.h>
+#include <uuid/uuid.h>
 namespace
 {
     std::string encodedPath(const std::filesystem::path &path)
@@ -29,6 +30,14 @@ namespace
         }
         return value;
     }
+
+    std::uint32_t checksum(std::span<const std::byte> bytes)
+    {
+        return static_cast<std::uint32_t>(
+            crc32_z(0,
+                    reinterpret_cast<const Bytef *>(bytes.data()),
+                    bytes.size()));
+    }
     // path_length and  pageId = 2* sizeof(std::uint32_t)
     constexpr std::size_t RecordOverhead = 2 * sizeof(std::uint32_t) + PAGE_SIZE + sizeof(std::uint8_t);
 }
@@ -47,44 +56,31 @@ std::uint64_t JournalFile::findRecoveryEnd(
     std::uint64_t fileSize)
 {
     std::uint64_t offset{0};
-    constexpr std::size_t TypeSize = sizeof(std::uint8_t);
-    constexpr std::size_t PrefixSize = TypeSize + sizeof(std::uint32_t);
 
     while (offset < fileSize)
     {
 
-        if (fileSize - offset < PrefixSize)
+        if (fileSize - offset < JournalRecordHeaderBytes)
         {
             return offset;
         }
         const auto recordStart = offset;
 
         // Every record starts with [type:u8][path length:u32].
-        std::array<std::byte, PrefixSize> prefixBytes{};
+        JournalRecordHeader header{};
+        std::array<std::byte, JournalRecordHeaderBytes> prefixBytes{};
         file_.readExactAt(recordStart, prefixBytes);
         ByteReader prefixReader(prefixBytes);
+
         const auto journalType = static_cast<JournalRecordType>(
             prefixReader.readUnsigned<std::uint8_t>());
-        const auto pathLength = prefixReader.readUnsigned<std::uint32_t>();
-        if (pathLength == 0 || pathLength > MaxPathBytes)
-        {
-            throw std::runtime_error("Invalid journal path length");
-        }
-
-        std::size_t recordSize;
-        if (journalType == JournalRecordType::FileBeforeImage)
-        {
-            recordSize = sizeof(std::uint32_t) + sizeof(std::uint8_t) * 2 + sizeof(std::uint64_t) + pathLength;
-        }
-        else if (journalType == JournalRecordType::PageBeforeImage)
-        {
-            recordSize = RecordOverhead + pathLength;
-        }
-        else
+        const auto recordSize = prefixReader.readUnsigned<std::uint64_t>();
+        // const auto sequenceNumber = prefixReader.readUnsigned<std::uint32_t>();
+        // const auto checksum = prefixReader.readUnsigned<std::uint32_t>();
+        if (journalType != JournalRecordType::FileBeforeImage && journalType != JournalRecordType::PageBeforeImage)
         {
             throw std::runtime_error("invalid Journal Record Type");
         }
-
         if (recordSize > fileSize - recordStart)
         {
             return recordStart;
@@ -98,41 +94,34 @@ std::uint64_t JournalFile::findRecoveryEnd(
 std::optional<JournalRecord> JournalFile::readRecord(
     std::uint64_t &offset, std::uint64_t fileSize)
 {
-    constexpr std::size_t TypeSize = sizeof(std::uint8_t);
-    constexpr std::size_t PrefixSize = TypeSize + sizeof(std::uint32_t);
 
     if (offset == fileSize)
     {
         return std::nullopt;
     }
-    if (offset > fileSize || fileSize - offset < PrefixSize)
+    if (offset > fileSize || fileSize - offset < JournalRecordHeaderBytes)
     {
         throw std::runtime_error("Truncated journal record length");
     }
     const auto recordStart = offset;
 
     // Every record starts with [type:u8][path length:u32].
-    std::array<std::byte, PrefixSize> prefixBytes{};
-    file_.readExactAt(recordStart, prefixBytes);
-    ByteReader prefixReader(prefixBytes);
+    std::array<std::byte, JournalRecordHeaderBytes> headerBytes{};
+    file_.readExactAt(recordStart, headerBytes);
+    ByteReader prefixReader(headerBytes);
+
     const auto journalType = static_cast<JournalRecordType>(
         prefixReader.readUnsigned<std::uint8_t>());
-    const auto pathLength = prefixReader.readUnsigned<std::uint32_t>();
-    if (pathLength == 0 || pathLength > MaxPathBytes)
-    {
-        throw std::runtime_error("Invalid journal path length");
-    }
+    const auto recordSize = prefixReader.readUnsigned<std::uint64_t>();
+    const auto sequenceNumber = prefixReader.readUnsigned<std::uint32_t>();
+    const auto checksum = prefixReader.readUnsigned<std::uint32_t>();
+    JournalRecordHeader header{
+        .type = journalType,
+        .recordSize = recordSize,
+        .sequenceNumber = sequenceNumber,
+        .checksum = checksum};
 
-    std::size_t recordSize;
-    if (journalType == JournalRecordType::FileBeforeImage)
-    {
-        recordSize = sizeof(std::uint32_t) + sizeof(std::uint8_t) * 2 + sizeof(std::uint64_t) + pathLength;
-    }
-    else if (journalType == JournalRecordType::PageBeforeImage)
-    {
-        recordSize = RecordOverhead + pathLength;
-    }
-    else
+    if (journalType != JournalRecordType::FileBeforeImage && journalType != JournalRecordType::PageBeforeImage)
     {
         throw std::runtime_error("invalid Journal Record Type");
     }
@@ -142,14 +131,11 @@ std::optional<JournalRecord> JournalFile::readRecord(
         throw std::runtime_error("Truncated journal record");
     }
 
-    // At most one bounded record is buffered, even for very large journals.
     std::vector<std::byte> bytes(recordSize);
-    std::copy(prefixBytes.begin(), prefixBytes.end(), bytes.begin());
-    file_.readExactAt(recordStart + PrefixSize,
-                      std::span<std::byte>{bytes}.subspan(PrefixSize));
+    file_.readExactAt(recordStart + JournalRecordHeaderBytes,
+                      std::span<std::byte>{bytes});
     ByteReader reader(bytes);
-    // The type was decoded above; readString() starts at the path length.
-    reader.seek(TypeSize);
+
     if (journalType == JournalRecordType::FileBeforeImage)
     {
         FileBeforeImage record{};
@@ -164,7 +150,7 @@ std::optional<JournalRecord> JournalFile::readRecord(
         record.newFile = newFile != 0;
 
         offset = recordStart + recordSize;
-        return record;
+        return JournalRecord{header, record};
     }
     // Dont need to check for Other JournalRecordType again since invalid type should throw in the section above
     PageBeforeImage record{};
@@ -174,7 +160,7 @@ std::optional<JournalRecord> JournalFile::readRecord(
     reader.readBytes(record.originalPage.data(), record.originalPage.size());
 
     offset = recordStart + recordSize;
-    return record;
+    return JournalRecord{header, record};
 }
 
 std::optional<JournalRecord> JournalFile::readNext(std::uint64_t end)
@@ -195,8 +181,8 @@ std::uint64_t JournalFile::writeFileBeforeImage(const FileBeforeImage &fileBefor
     }
 
     const std::string path = encodedPath(fileBeforeImage.relativeFilePath);
-    ByteWriter writer(sizeof(std::uint32_t) + path.size() + sizeof(std::uint8_t) * 2 + sizeof(std::uint64_t));
-    writer.writeUnsigned<std::uint8_t>(static_cast<std::uint8_t>(JournalRecordType::FileBeforeImage));
+    ByteWriter writer(path.size() + 4 + 8 + 1); // path, path length, original size, new file flag
+    // writer.writeUnsigned<std::uint8_t>(static_cast<std::uint8_t>(JournalRecordType::FileBeforeImage));
     writer.writeString(path);
     writer.writeUnsigned<std::uint64_t>(fileBeforeImage.originalSize);
     writer.writeUnsigned<std::uint8_t>(static_cast<std::uint8_t>(fileBeforeImage.newFile));
@@ -226,11 +212,82 @@ std::uint64_t JournalFile::writePage(const PageBeforeImage &pageBeforeImage)
     }
 
     const std::string path = encodedPath(pageBeforeImage.relativeFilePath);
-    ByteWriter writer(RecordOverhead + path.size());
-    writer.writeUnsigned<std::uint8_t>(static_cast<std::uint8_t>(JournalRecordType::PageBeforeImage));
+    ByteWriter writer(path.size() + 4 + 4 + PAGE_SIZE); // path, path length, pageId, original page
+    // writer.writeUnsigned<std::uint8_t>(static_cast<std::uint8_t>(JournalRecordType::PageBeforeImage));
     writer.writeString(path);
     writer.writeUnsigned<std::uint32_t>(pageBeforeImage.pageId);
     writer.writeBytes(pageBeforeImage.originalPage.data(), pageBeforeImage.originalPage.size());
+
+    if (writer.size() > std::numeric_limits<std::uint64_t>::max() - appendOffset_)
+    {
+        throw std::out_of_range("Journal append offset overflow");
+    }
+    try
+    {
+        file_.writeAllAt(appendOffset_, writer.bytes());
+    }
+    catch (...)
+    {
+        // A partial record may have reached disk. Never append past it on this
+        // object or report it as a successfully synchronized record stream.
+        appendFailed_ = true;
+        throw;
+    }
+    appendOffset_ += writer.size();
+    return appendOffset_;
+}
+
+std::uint64_t JournalFile::writeJournalHeader(const JournalHeader &header)
+{
+    if (appendFailed_)
+    {
+        throw std::runtime_error("Journal append previously failed; recovery is required");
+    }
+    ByteWriter writer(JournalHeaderBytes);
+
+    writer.writeBytes(JournalMagic.data(), JournalMagic.size());
+
+    writer.writeUnsigned<std::uint32_t>(header.version);
+    writer.writeUnsigned<std::uint64_t>(header.headerLength);
+    writer.writeBytes(header.dbId, 16);
+    writer.writeBytes(header.statementId, 16);
+    writer.writeUnsigned<std::uint64_t>(header.pageSize);
+
+    const auto content = std::span<const std::byte>{writer.bytes()}
+                             .first(writer.position());
+    writer.writeUnsigned<std::uint32_t>(checksum(content));
+
+    if (writer.size() > std::numeric_limits<std::uint64_t>::max() - appendOffset_)
+    {
+        throw std::out_of_range("Journal append offset overflow");
+    }
+    try
+    {
+        file_.writeAllAt(appendOffset_, writer.bytes());
+    }
+    catch (...)
+    {
+        // A partial record may have reached disk. Never append past it on this
+        // object or report it as a successfully synchronized record stream.
+        appendFailed_ = true;
+        throw;
+    }
+    appendOffset_ += writer.size();
+    return appendOffset_;
+}
+
+std::uint64_t JournalFile::writeJournalRecordHeader(const JournalRecordHeader &header)
+{
+    if (appendFailed_)
+    {
+        throw std::runtime_error("Journal append previously failed; recovery is required");
+    }
+    ByteWriter writer(JournalRecordHeaderBytes);
+
+    writer.writeUnsigned<std::uint8_t>(static_cast<std::uint8_t>(header.type));
+    writer.writeUnsigned<std::uint64_t>(header.recordSize);
+    writer.writeUnsigned<std::uint32_t>(header.sequenceNumber);
+    writer.writeUnsigned<std::uint32_t>(header.checksum);
 
     if (writer.size() > std::numeric_limits<std::uint64_t>::max() - appendOffset_)
     {

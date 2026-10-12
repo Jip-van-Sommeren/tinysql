@@ -167,12 +167,20 @@ struct Page
     }
 };
 
+// In-memory coverage only: an offset belongs to exactly one statement journal.
+struct JournalCoverage
+{
+    std::uint64_t generation = 0;
+    std::uint64_t end = 0;
+};
+
 struct PageFrame
 {
     std::uint32_t pageId;
     Page page;
     bool dirty = false;
     std::uint32_t pinCount = 0;
+    JournalCoverage coverage{};
 };
 
 struct FreePageHeader

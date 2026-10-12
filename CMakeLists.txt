@@ -45,6 +45,12 @@ add_library(db_core
     src/db_write.cpp
     src/db_page_file.cpp
 )
+
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(UUID REQUIRED IMPORTED_TARGET uuid)
+find_package(ZLIB REQUIRED)
+
+target_link_libraries(db_core PRIVATE PkgConfig::UUID ZLIB::ZLIB)
 db_configure_target(db_core PUBLIC)
 target_link_libraries(db_core PUBLIC db_sql)
 

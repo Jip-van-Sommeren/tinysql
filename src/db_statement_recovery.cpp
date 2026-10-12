@@ -1,16 +1,39 @@
 #include "db_statement_recovery.h"
 #include <stdexcept>
 #include <algorithm>
+#include <limits>
+#include <cstddef>
+#include <cstdint>
+#include <span>
+#include <zlib.h>
 
-StatementRecovery::StatementRecovery(const std::filesystem::path &path)
-    : dbRootPath_(path), journalPath_(path / "journal" / "journal.log") {}
+namespace
+{
+
+    std::uint32_t checksum(std::span<const std::byte> bytes)
+    {
+        return static_cast<std::uint32_t>(
+            crc32_z(0,
+                    reinterpret_cast<const Bytef *>(bytes.data()),
+                    bytes.size()));
+    }
+    // path_length and  pageId = 2* sizeof(std::uint32_t)
+}
+
+StatementRecovery::StatementRecovery(const std::filesystem::path &path, const uuid_t &dbId)
+    : dbRootPath_(path), dbId_(*dbId), journalPath_(path / "journal" / "journal.log") {}
 
 void StatementRecovery::requireWritableStatement() const
 {
+    requireReadable();
     if (!active_ || !journalFile_)
     {
         throw std::logic_error("No active statement");
     }
+}
+
+void StatementRecovery::requireReadable() const
+{
     if (failed_)
     {
         throw std::runtime_error("Statement has failed; recovery is required");
@@ -60,7 +83,7 @@ std::uint64_t StatementRecovery::validateJournalForRecovery()
                     }
                 }
             },
-            image.value());
+            image.value().record);
     }
     journalFile_->rewind();
     return end;
@@ -68,10 +91,14 @@ std::uint64_t StatementRecovery::validateJournalForRecovery()
 
 void StatementRecovery::initializeForRecover()
 {
+    if (journalFile_ || active_ || failed_)
+        throw std::logic_error("A statement is already active");
+    failed_ = true; // No normal access until replay and cleanup finish.
     journalFile_.emplace(
         journalPath_,
         LinuxFile::OpenMode::OpenExisting);
     recoveryEnd_ = validateJournalForRecovery();
+    recoveryReady_ = true;
     const auto end = journalFile_->size();
 
     journalFile_->sync();
@@ -92,28 +119,44 @@ void StatementRecovery::begin()
     {
         throw std::logic_error("A statement is already active");
     }
+    if (generation_ == std::numeric_limits<std::uint64_t>::max())
+        throw std::overflow_error("Statement generation exhausted");
 
     journalFile_.emplace(
         journalPath_,
         LinuxFile::OpenMode::CreateNew);
+    ++generation_;
+    recoveryReady_ = true;
     appendOffset_ = 0;
     syncOffset_ = 0;
     journalDirectoryNeedsSync_ = true;
     active_ = true;
+    uuid_generate_random(statementId_);
+
+    journalFile_->writeJournalHeader(
+        JournalHeader{
+            .magic = JournalMagic,
+            .version = 1,
+            .headerLength = JournalHeaderBytes,
+            .dbId = *dbId_,
+            .statementId = *statementId_,
+            .pageSize = PAGE_SIZE,
+            .checksum = 0});
+    journalFile_->sync();
 }
 
 void StatementRecovery::capturePageOnce(const PageBeforeImage &image)
 {
     requireWritableStatement();
-    if (hasCapturedPage(image.relativeFilePath, image.pageId))
-        return;
-    if (std::uint64_t{image.pageId} * PAGE_SIZE >= getOriginalFileSize(image.relativeFilePath))
-        throw std::logic_error("Page before-image is outside the original file");
     try
     {
+        if (hasCapturedPage(image.relativeFilePath, image.pageId))
+            return;
+        if (std::uint64_t{image.pageId} * PAGE_SIZE >= getOriginalFileSize(image.relativeFilePath))
+            throw std::logic_error("Page before-image is outside the original file");
         appendOffset_ = journalFile_->writePage(image);
-
-        capturedPages_[image.relativeFilePath].emplace(image.pageId, appendOffset_);
+        recoveryEnd_ = appendOffset_;
+        capturedPages_[image.relativeFilePath].emplace(image.pageId, JournalCoverage{generation_, appendOffset_});
     }
     catch (...)
     {
@@ -137,29 +180,30 @@ bool StatementRecovery::hasCapturedPage(const std::filesystem::path &path, std::
 void StatementRecovery::captureFileOnce(const std::filesystem::path &relativePath, bool newFile)
 {
     requireWritableStatement();
-    const auto resolvedPath = dbRootPath_ / relativePath;
-    if (newFile && std::filesystem::exists(std::filesystem::symlink_status(resolvedPath)))
-    {
-        throw std::runtime_error("Table already exists: " + resolvedPath.string());
-    }
-    if (const auto existing = originalFiles_.find(relativePath); existing != originalFiles_.end())
-    {
-        if (newFile && !existing->second.beforeImage.newFile)
-            throw std::logic_error("Cannot recreate a file that existed before the statement");
-        return;
-    }
-
-    // A new file does not exist yet; opening it here would violate write-ahead ordering.
-    const auto originalSize = newFile ? std::uint64_t{0} : PageFile(resolvedPath).size();
-    if (originalSize % PAGE_SIZE != 0)
-        throw std::runtime_error("Invalid original table file size");
-
-    const FileBeforeImage image{
-        .relativeFilePath = relativePath, .originalSize = originalSize, .newFile = newFile};
     try
     {
+        const auto resolvedPath = dbRootPath_ / relativePath;
+        if (newFile && std::filesystem::exists(std::filesystem::symlink_status(resolvedPath)))
+        {
+            throw std::runtime_error("Table already exists: " + resolvedPath.string());
+        }
+        if (const auto existing = originalFiles_.find(relativePath); existing != originalFiles_.end())
+        {
+            if (newFile && !existing->second.beforeImage.newFile)
+                throw std::logic_error("Cannot recreate a file that existed before the statement");
+            return;
+        }
+
+        // A new file does not exist yet; opening it here would violate write-ahead ordering.
+        const auto originalSize = newFile ? std::uint64_t{0} : PageFile(resolvedPath).size();
+        if (originalSize % PAGE_SIZE != 0)
+            throw std::runtime_error("Invalid original table file size");
+
+        const FileBeforeImage image{
+            .relativeFilePath = relativePath, .originalSize = originalSize, .newFile = newFile};
         appendOffset_ = journalFile_->writeFileBeforeImage(image);
-        originalFiles_.emplace(relativePath, CapturedFile{.beforeImage = image, .requiredEnd = appendOffset_});
+        recoveryEnd_ = appendOffset_;
+        originalFiles_.emplace(relativePath, CapturedFile{.beforeImage = image, .coverage = {generation_, appendOffset_}});
     }
     catch (...)
     {
@@ -175,7 +219,7 @@ bool StatementRecovery::isNewFile(const std::filesystem::path &relativePath) con
     return file != originalFiles_.end() && file->second.beforeImage.newFile;
 }
 
-std::uint64_t StatementRecovery::requiredEndForPage(const std::filesystem::path &relativePath, std::uint32_t pageId) const
+JournalCoverage StatementRecovery::requiredCoverageForPage(const std::filesystem::path &relativePath, std::uint32_t pageId) const
 {
     requireWritableStatement();
 
@@ -186,14 +230,38 @@ std::uint64_t StatementRecovery::requiredEndForPage(const std::filesystem::path 
     // For a newly created file, originalSize is zero.
     if (pageOffset >= file.beforeImage.originalSize)
     {
-        return file.requiredEnd;
+        return file.coverage;
     }
 
     // Existing pages require both file metadata and a page before-image.
     // at() throws if the required capture is missing.
-    const auto pageEnd = capturedPages_.at(relativePath).at(pageId);
+    const auto pageCoverage = capturedPages_.at(relativePath).at(pageId);
 
-    return std::max(file.requiredEnd, pageEnd);
+    return {generation_, std::max(file.coverage.end, pageCoverage.end)};
+}
+
+void StatementRecovery::validateCoverage(const std::filesystem::path &relativePath,
+                                         std::uint32_t pageId, JournalCoverage coverage) const
+{
+    requireWritableStatement();
+    if (coverage.generation != generation_)
+        throw std::logic_error("Stale journal coverage generation");
+    const auto required = requiredCoverageForPage(relativePath, pageId);
+    if (coverage.end != required.end)
+        throw std::logic_error("Page journal coverage does not match its before-image");
+}
+
+void StatementRecovery::trackParticipant(const std::shared_ptr<Participant> &participant)
+{
+    requireWritableStatement();
+    (void)getOriginalFileSize(participant->relativePath);
+    if (participant->generation != generation_)
+    {
+        participants_.push_back(participant);
+        participant->generation = generation_;
+        participant->dirtyPages.clear();
+        participant->needsSync = false;
+    }
 }
 
 std::uint64_t StatementRecovery::getOriginalFileSize(const std::filesystem::path &relativePath) const
@@ -215,7 +283,20 @@ void StatementRecovery::rollback()
     {
         throw std::logic_error("No active journal");
     }
+    if (retirement_ == Retirement::Commit)
+        throw std::runtime_error("Commit outcome is uncertain; reopen the database before recovery");
     failed_ = true;
+    if (!recoveryReady_)
+        throw std::runtime_error("Journal has not been validated for recovery");
+    if (retirement_ == Retirement::Rollback)
+    {
+        LinuxDirectory directory{journalPath_.parent_path()};
+        directory.sync();
+        finish();
+        return;
+    }
+    if (cacheEpoch_ == std::numeric_limits<std::uint64_t>::max())
+        throw std::overflow_error("Cache epoch exhausted");
     std::unordered_map<std::filesystem::path, PageFile> openedFiles;
     std::unordered_map<std::filesystem::path, FileBeforeImage> rollbackFiles;
 
@@ -266,7 +347,7 @@ void StatementRecovery::rollback()
                     }
                 }
             },
-            image.value());
+            image.value().record);
     }
 
     std::unordered_set<std::filesystem::path> changedDirectories;
@@ -296,6 +377,8 @@ void StatementRecovery::rollback()
     {
         throw std::runtime_error("Expected journal file was missing");
     }
+    retirement_ = Retirement::Rollback;
+    ++cacheEpoch_;
     LinuxDirectory directory{journalPath_.parent_path()};
     directory.sync();
 
@@ -307,6 +390,15 @@ void StatementRecovery::commit()
     requireWritableStatement();
     try
     {
+        // Do not reopen paths to guess at durability. Acknowledgements must
+        // come from the exact handles that issued writes, even if now closed.
+        for (const auto &participant : participants_)
+        {
+            if (!participant->dirtyPages.empty())
+                throw std::logic_error("Cannot commit with unflushed database pages");
+            if (participant->needsSync)
+                throw std::logic_error("Cannot commit with unsynchronized database writes");
+        }
         // Table mutation methods synchronize file contents before commit. Persist
         // new names too, including callers using StorageEngine directly.
         std::unordered_set<std::filesystem::path> changedDirectories;
@@ -320,16 +412,9 @@ void StatementRecovery::commit()
             LinuxDirectory directory{path};
             directory.sync();
         }
-        for (const auto &[relativePath, needsSync] : needSyncMap_)
-        {
-            if (needsSync)
-            {
-                PageFile pageFile{relativePath};
-                pageFile.sync();
-            }
-        }
         if (!std::filesystem::remove(journalPath_))
             throw std::runtime_error("Expected journal file was missing");
+        retirement_ = Retirement::Commit;
         LinuxDirectory directory{journalPath_.parent_path()};
         directory.sync();
     }
@@ -346,13 +431,24 @@ void StatementRecovery::finish()
     journalFile_.reset();
     capturedPages_.clear();
     originalFiles_.clear();
-    needSyncMap_.clear();
+    participants_.clear();
     appendOffset_ = 0;
     syncOffset_ = 0;
     recoveryEnd_ = 0;
+    recoveryReady_ = false;
     journalDirectoryNeedsSync_ = false;
     failed_ = false;
     active_ = false;
+    retirement_ = Retirement::None;
+    uuid_clear(statementId_);
+}
+
+void StatementRecovery::ensureDurable(JournalCoverage coverage)
+{
+    requireWritableStatement();
+    if (coverage.generation != generation_)
+        throw std::logic_error("Stale journal coverage generation");
+    ensureDurable(coverage.end);
 }
 void StatementRecovery::ensureDurable(std::uint64_t requiredEnd)
 {
