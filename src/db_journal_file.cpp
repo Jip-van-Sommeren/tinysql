@@ -39,17 +39,16 @@ namespace
                     bytes.size()));
     }
     // path_length and  pageId = 2* sizeof(std::uint32_t)
-    constexpr std::size_t RecordOverhead = 2 * sizeof(std::uint32_t) + PAGE_SIZE + sizeof(std::uint8_t);
+    constexpr std::size_t RecordOverhead = 2 * sizeof(std::uint32_t) + PAGE_SIZE + JournalRecordHeaderBytes; // path length + pageId + page bytes + path + record header
 }
 
 std::size_t PageBeforeImage::size() const
 {
-    return RecordOverhead + encodedPath(relativeFilePath).size();
+    return RecordOverhead + encodedPath(relativeFilePath).size(); // path length + pageId + page bytes + path + record header
 }
-
-constexpr std::size_t FileBeforeImage::size() const
+std::size_t FileBeforeImage::size() const
 {
-    return 4 + 8 + 1 + encodedPath(relativeFilePath).size();
+    return 4 + 8 + 1 + encodedPath(relativeFilePath).size() + JournalRecordHeaderBytes; // path length + original size + new file flag + path + record header
 }
 
 JournalFile::JournalFile(const std::filesystem::path &path, LinuxFile::OpenMode mode)
@@ -112,10 +111,9 @@ JournalHeader JournalFile::readJournalHeader()
 
     header.version = reader.readUnsigned<std::uint32_t>();
     header.headerLength = reader.readUnsigned<std::uint32_t>();
-    uuid_t dbId;
+
     reader.readBytes(header.dbId, sizeof(header.dbId));
 
-    uuid_t statementId;
     reader.readBytes(header.statementId, sizeof(header.statementId));
     header.pageSize = reader.readUnsigned<std::uint64_t>();
     header.checksum = reader.readUnsigned<std::uint32_t>();
@@ -219,11 +217,6 @@ std::uint64_t JournalFile::writeFileBeforeImage(const FileBeforeImage &fileBefor
     {
         throw std::runtime_error("Journal append previously failed; recovery is required");
     }
-    writeJournalRecordHeader(JournalRecordHeader{
-        .type = JournalRecordType::FileBeforeImage,
-        .recordSize = fileBeforeImage.size(),
-        .sequenceNumber = 0, // TODO: implement sequence number
-        .checksum = 0});     // placeholder; will be computed in writeJournalRecordHeader
 
     const std::string path = encodedPath(fileBeforeImage.relativeFilePath);
     ByteWriter writer(path.size() + 4 + 8 + 1); // path, path length, original size, new file flag
@@ -235,31 +228,15 @@ std::uint64_t JournalFile::writeFileBeforeImage(const FileBeforeImage &fileBefor
     {
         throw std::out_of_range("Journal append offset overflow");
     }
-    try
-    {
-        file_.writeAllAt(appendOffset_, writer.bytes());
-    }
-    catch (...)
-    {
-        // A partial record may have reached disk. Never append past it on this
-        // object or report it as a successfully synchronized record stream.
-        appendFailed_ = true;
-        throw;
-    }
-    appendOffset_ += writer.size();
-    return appendOffset_;
+    return appendRecord(JournalRecordType::FileBeforeImage, writer.bytes());
 }
+
 std::uint64_t JournalFile::writePage(const PageBeforeImage &pageBeforeImage)
 {
     if (appendFailed_)
     {
         throw std::runtime_error("Journal append previously failed; recovery is required");
     }
-    writeJournalRecordHeader(JournalRecordHeader{
-        .type = JournalRecordType::PageBeforeImage,
-        .recordSize = pageBeforeImage.size(),
-        .sequenceNumber = 0, // TODO: implement sequence number
-        .checksum = 0});
 
     const std::string path = encodedPath(pageBeforeImage.relativeFilePath);
     ByteWriter writer(path.size() + 4 + 4 + PAGE_SIZE); // path, path length, pageId, original page
@@ -267,24 +244,11 @@ std::uint64_t JournalFile::writePage(const PageBeforeImage &pageBeforeImage)
     writer.writeString(path);
     writer.writeUnsigned<std::uint32_t>(pageBeforeImage.pageId);
     writer.writeBytes(pageBeforeImage.originalPage.data(), pageBeforeImage.originalPage.size());
-
     if (writer.size() > std::numeric_limits<std::uint64_t>::max() - appendOffset_)
     {
         throw std::out_of_range("Journal append offset overflow");
     }
-    try
-    {
-        file_.writeAllAt(appendOffset_, writer.bytes());
-    }
-    catch (...)
-    {
-        // A partial record may have reached disk. Never append past it on this
-        // object or report it as a successfully synchronized record stream.
-        appendFailed_ = true;
-        throw;
-    }
-    appendOffset_ += writer.size();
-    return appendOffset_;
+    return appendRecord(JournalRecordType::PageBeforeImage, writer.bytes());
 }
 
 std::uint64_t JournalFile::writeJournalHeader(const JournalHeader &header)
@@ -298,7 +262,7 @@ std::uint64_t JournalFile::writeJournalHeader(const JournalHeader &header)
     writer.writeBytes(JournalMagic.data(), JournalMagic.size());
 
     writer.writeUnsigned<std::uint32_t>(header.version);
-    writer.writeUnsigned<std::uint64_t>(header.headerLength);
+    writer.writeUnsigned<std::uint32_t>(header.headerLength);
     writer.writeBytes(header.dbId, 16);
     writer.writeBytes(header.statementId, 16);
     writer.writeUnsigned<std::uint64_t>(header.pageSize);
@@ -326,24 +290,51 @@ std::uint64_t JournalFile::writeJournalHeader(const JournalHeader &header)
     return appendOffset_;
 }
 
-std::uint64_t JournalFile::writeJournalRecordHeader(const JournalRecordHeader &header)
+void JournalFile::sync()
 {
     if (appendFailed_)
     {
         throw std::runtime_error("Journal append previously failed; recovery is required");
     }
-    ByteWriter writer(JournalRecordHeaderBytes);
+    file_.sync();
+}
 
-    writer.writeUnsigned<std::uint8_t>(static_cast<std::uint8_t>(header.type));
-    writer.writeUnsigned<std::uint64_t>(header.recordSize);
-    writer.writeUnsigned<std::uint32_t>(header.sequenceNumber);
+std::uint64_t JournalFile::appendRecord(
+    JournalRecordType type,
+    std::span<const std::byte> payload)
+{
+    if (appendFailed_)
+    {
+        throw std::runtime_error("Journal append previously failed; recovery is required");
+    }
 
-    const auto content = std::span<const std::byte>{writer.bytes()}
-                             .first(writer.position());
-    writer.writeUnsigned<std::uint32_t>(checksum(content));
+    if (payload.size() >
+        std::numeric_limits<std::size_t>::max() - JournalRecordHeaderBytes)
+    {
+        throw std::out_of_range("Journal record size overflow");
+    }
 
-    // writer.writeUnsigned<std::uint32_t>(header.checksum);
+    if (nextWriteSequence_ > std::numeric_limits<std::uint32_t>::max())
+    {
+        throw std::overflow_error("Journal sequence exhausted");
+    }
+    const auto recordSize = JournalRecordHeaderBytes + payload.size();
+    ByteWriter writer(recordSize);
 
+    writer.writeUnsigned<std::uint8_t>(
+        static_cast<std::uint8_t>(type));
+    writer.writeUnsigned<std::uint64_t>(recordSize);
+    writer.writeUnsigned<std::uint32_t>(
+        static_cast<std::uint32_t>(nextWriteSequence_));
+
+    const auto checksumOffset = writer.position(); // Byte 13 within this buffer
+    writer.writeUnsigned<std::uint32_t>(0);
+
+    writer.writeBytes(payload.data(), payload.size());
+
+    const auto recordChecksum = checksum(writer.bytes());
+    writer.writeUnsignedAt<std::uint32_t>(
+        checksumOffset, recordChecksum);
     if (writer.size() > std::numeric_limits<std::uint64_t>::max() - appendOffset_)
     {
         throw std::out_of_range("Journal append offset overflow");
@@ -354,20 +345,10 @@ std::uint64_t JournalFile::writeJournalRecordHeader(const JournalRecordHeader &h
     }
     catch (...)
     {
-        // A partial record may have reached disk. Never append past it on this
-        // object or report it as a successfully synchronized record stream.
         appendFailed_ = true;
         throw;
     }
     appendOffset_ += writer.size();
+    ++nextWriteSequence_;
     return appendOffset_;
-}
-
-void JournalFile::sync()
-{
-    if (appendFailed_)
-    {
-        throw std::runtime_error("Journal append previously failed; recovery is required");
-    }
-    file_.sync();
 }

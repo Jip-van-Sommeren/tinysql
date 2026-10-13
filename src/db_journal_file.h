@@ -100,15 +100,19 @@ public:
     void sync();
     std::uint64_t size() const { return file_.size(); }
 
-    std::uint64_t writeJournalRecordHeader(const JournalRecordHeader &header);
     std::uint64_t writeJournalHeader(const JournalHeader &header);
 
 private:
     LinuxFile file_;
-    std::uint64_t appendOffset_ = 0;
-    std::uint64_t readOffset_ = 0;
+    std::uint64_t appendOffset_{0};
+    std::uint64_t readOffset_{0};
+    std::uint32_t nextWriteSequence_{0};
     bool appendFailed_ = false;
 
     std::optional<JournalRecord> readRecord(
         std::uint64_t &offset, std::uint64_t fileSize);
+
+    std::uint64_t appendRecord(
+        JournalRecordType type,
+        std::span<const std::byte> payload);
 };
