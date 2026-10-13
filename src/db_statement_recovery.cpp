@@ -302,6 +302,8 @@ void StatementRecovery::rollback()
 
     journalFile_->rewind();
 
+    const auto header = journalFile_->readJournalHeader(); // Skip header; it is not needed for recovery.
+
     while (auto image = journalFile_->readNext(recoveryEnd_))
     {
         std::visit(

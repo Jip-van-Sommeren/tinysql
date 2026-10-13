@@ -91,6 +91,46 @@ std::uint64_t JournalFile::findRecoveryEnd(
     return offset;
 }
 
+JournalHeader JournalFile::readJournalHeader()
+{
+    std::array<std::byte, JournalHeaderBytes> headerBytes{};
+    file_.readExactAt(0, headerBytes);
+    ByteReader reader(headerBytes);
+    JournalHeader header{};
+
+    std::array<char, 8> magic;
+    reader.readBytes(magic.data(), magic.size());
+    if (magic != JournalMagic)
+    {
+        throw std::runtime_error("Invalid journal header magic");
+    }
+
+    const auto version = reader.readUnsigned<std::uint32_t>();
+    const auto headerLength = reader.readUnsigned<std::uint32_t>();
+    uuid_t dbId;
+    reader.readBytes(dbId, sizeof(dbId));
+
+    uuid_t statementId;
+    reader.readBytes(statementId, sizeof(statementId));
+    const auto pageSize = reader.readUnsigned<std::uint64_t>();
+    const auto FileChecksum = reader.readUnsigned<std::uint32_t>();
+
+    const auto content = std::span<const std::byte>{headerBytes}.first(JournalHeaderBytes - sizeof(FileChecksum));
+    if (checksum(content) != FileChecksum)
+    {
+        throw std::runtime_error("Invalid journal header checksum");
+    }
+
+    return JournalHeader{
+        .magic = magic,
+        .version = version,
+        .headerLength = headerLength,
+        .dbId = *dbId,
+        .statementId = *statementId,
+        .pageSize = pageSize,
+        .checksum = FileChecksum};
+}
+
 std::optional<JournalRecord> JournalFile::readRecord(
     std::uint64_t &offset, std::uint64_t fileSize)
 {

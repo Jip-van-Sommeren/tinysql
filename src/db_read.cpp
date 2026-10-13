@@ -248,7 +248,6 @@ Constraint HeaderPageDecoder::decodeConstraint()
         return BoundCheckConstraintExpr{
             std::move(name),
             decodeExpression()};
-
     }
 
     throw std::runtime_error("Unknown constraint type");
@@ -686,8 +685,6 @@ RawPage readPageFromFile(
     PageFile file{tablePath, LinuxFile::OpenMode::ReadOnly};
     return file.readPage(pageId);
 }
-
-
 
 bool isValidPageType(std::uint8_t value)
 {

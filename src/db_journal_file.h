@@ -82,6 +82,8 @@ public:
     static constexpr std::size_t MaxPathBytes = 4096;
 
     // nullopt means EOF between records; truncated records throw.
+
+    JournalHeader readJournalHeader();
     std::optional<JournalRecord> readNext();
     std::optional<JournalRecord> readNext(std::uint64_t end);
 

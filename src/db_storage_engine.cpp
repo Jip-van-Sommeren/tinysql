@@ -123,19 +123,27 @@ StorageEngine StorageEngine::open(
     std::array<std::byte, META_FILE_SIZE> metaBytes{};
     dbMetaFile.readExactAt(0, metaBytes);
     ByteReader reader{metaBytes};
-    std::vector<std::byte> magic{reader.readBytes(8)};
 
     std::array<char, 8> metaMagic;
-    std::memcpy(metaMagic.data(), magic.data(), metaMagic.size());
+    reader.readBytes(metaMagic.data(), metaMagic.size());
+    if (metaMagic != MetaMagic)
+    {
+        throw std::runtime_error("Invalid database meta file");
+    }
 
-    std::vector<std::byte> dbIdBytes{reader.readBytes(16)};
     uuid_t dbId;
-    std::memcpy(dbId, dbIdBytes.data(), dbIdBytes.size());
+    reader.readBytes(dbId, sizeof(dbId)); // dbId
 
     const auto version = reader.readUnsigned<std::uint64_t>(); // version
     // reader.readUnsigned<std::uint64_t>(); // epoch
     // reader.readUnsigned<std::uint64_t>(); // generation
     const auto checksumValue = reader.readUnsigned<std::uint32_t>();
+
+    const auto content = std::span<const std::byte>{metaBytes}.first(META_FILE_SIZE - sizeof(checksumValue));
+    if (checksum(content) != checksumValue)
+    {
+        throw std::runtime_error("Invalid database meta file checksum");
+    }
 
     StorageEngine engine{path, std::move(root), dbId};
 
