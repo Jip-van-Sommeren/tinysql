@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <span>
 #include <zlib.h>
+#include <uuid/uuid.h>
 
 namespace
 {
@@ -21,7 +22,7 @@ namespace
 }
 
 StatementRecovery::StatementRecovery(const std::filesystem::path &path, const uuid_t &dbId)
-    : dbRootPath_(path), dbId_(*dbId), journalPath_(path / "journal" / "journal.log") {}
+    : dbRootPath_(path), journalPath_(path / "journal" / "journal.log") { uuid_copy(dbId_, dbId); }
 
 void StatementRecovery::requireWritableStatement() const
 {
@@ -50,6 +51,8 @@ std::uint64_t StatementRecovery::validateJournalForRecovery()
 
     const auto end = journalFile_->findRecoveryEnd(journalFile_->size());
     journalFile_->rewind();
+
+    (void)journalFile_->readJournalHeader(); // Skip header; it is not needed for recovery.
 
     std::unordered_map<std::filesystem::path, FileBeforeImage> rollbackFiles;
     while (auto image = journalFile_->readNext(end))
@@ -127,22 +130,24 @@ void StatementRecovery::begin()
         LinuxFile::OpenMode::CreateNew);
     ++generation_;
     recoveryReady_ = true;
-    appendOffset_ = 0;
-    syncOffset_ = 0;
+
     journalDirectoryNeedsSync_ = true;
     active_ = true;
     uuid_generate_random(statementId_);
 
-    journalFile_->writeJournalHeader(
-        JournalHeader{
-            .magic = JournalMagic,
-            .version = 1,
-            .headerLength = JournalHeaderBytes,
-            .dbId = *dbId_,
-            .statementId = *statementId_,
-            .pageSize = PAGE_SIZE,
-            .checksum = 0});
-    journalFile_->sync();
+    JournalHeader header{};
+    header.magic = JournalMagic;
+    header.version = 1;
+    header.headerLength = JournalHeaderBytes;
+    uuid_copy(header.dbId, dbId_);
+    uuid_copy(header.statementId, statementId_);
+    header.pageSize = PAGE_SIZE;
+    header.checksum = 0;
+
+    const auto end = journalFile_->writeJournalHeader(header);
+    appendOffset_ = end;
+    recoveryEnd_ = end;
+    ensureDurable();
 }
 
 void StatementRecovery::capturePageOnce(const PageBeforeImage &image)

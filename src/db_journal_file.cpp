@@ -47,6 +47,11 @@ std::size_t PageBeforeImage::size() const
     return RecordOverhead + encodedPath(relativeFilePath).size();
 }
 
+constexpr std::size_t FileBeforeImage::size() const
+{
+    return 4 + 8 + 1 + encodedPath(relativeFilePath).size();
+}
+
 JournalFile::JournalFile(const std::filesystem::path &path, LinuxFile::OpenMode mode)
     : file_(path, mode), appendOffset_(file_.size())
 {
@@ -55,7 +60,7 @@ JournalFile::JournalFile(const std::filesystem::path &path, LinuxFile::OpenMode 
 std::uint64_t JournalFile::findRecoveryEnd(
     std::uint64_t fileSize)
 {
-    std::uint64_t offset{0};
+    std::uint64_t offset{JournalHeaderBytes};
 
     while (offset < fileSize)
     {
@@ -93,42 +98,37 @@ std::uint64_t JournalFile::findRecoveryEnd(
 
 JournalHeader JournalFile::readJournalHeader()
 {
+
     std::array<std::byte, JournalHeaderBytes> headerBytes{};
     file_.readExactAt(0, headerBytes);
     ByteReader reader(headerBytes);
     JournalHeader header{};
 
-    std::array<char, 8> magic;
-    reader.readBytes(magic.data(), magic.size());
-    if (magic != JournalMagic)
+    reader.readBytes(header.magic.data(), header.magic.size());
+    if (header.magic != JournalMagic)
     {
         throw std::runtime_error("Invalid journal header magic");
     }
 
-    const auto version = reader.readUnsigned<std::uint32_t>();
-    const auto headerLength = reader.readUnsigned<std::uint32_t>();
+    header.version = reader.readUnsigned<std::uint32_t>();
+    header.headerLength = reader.readUnsigned<std::uint32_t>();
     uuid_t dbId;
-    reader.readBytes(dbId, sizeof(dbId));
+    reader.readBytes(header.dbId, sizeof(header.dbId));
 
     uuid_t statementId;
-    reader.readBytes(statementId, sizeof(statementId));
-    const auto pageSize = reader.readUnsigned<std::uint64_t>();
-    const auto FileChecksum = reader.readUnsigned<std::uint32_t>();
+    reader.readBytes(header.statementId, sizeof(header.statementId));
+    header.pageSize = reader.readUnsigned<std::uint64_t>();
+    header.checksum = reader.readUnsigned<std::uint32_t>();
 
-    const auto content = std::span<const std::byte>{headerBytes}.first(JournalHeaderBytes - sizeof(FileChecksum));
-    if (checksum(content) != FileChecksum)
+    const auto content = std::span<const std::byte>{headerBytes}.first(JournalHeaderBytes - sizeof(header.checksum));
+    if (checksum(content) != header.checksum)
     {
         throw std::runtime_error("Invalid journal header checksum");
     }
 
-    return JournalHeader{
-        .magic = magic,
-        .version = version,
-        .headerLength = headerLength,
-        .dbId = *dbId,
-        .statementId = *statementId,
-        .pageSize = pageSize,
-        .checksum = FileChecksum};
+    readOffset_ = JournalHeaderBytes; // readoffset should be zero at the start but incrementing it here to avoid reading the header again in readNext
+
+    return header;
 }
 
 std::optional<JournalRecord> JournalFile::readRecord(
@@ -172,7 +172,7 @@ std::optional<JournalRecord> JournalFile::readRecord(
     }
 
     std::vector<std::byte> bytes(recordSize);
-    file_.readExactAt(recordStart + JournalRecordHeaderBytes,
+    file_.readExactAt(recordStart - JournalRecordHeaderBytes,
                       std::span<std::byte>{bytes});
     ByteReader reader(bytes);
 
@@ -219,6 +219,11 @@ std::uint64_t JournalFile::writeFileBeforeImage(const FileBeforeImage &fileBefor
     {
         throw std::runtime_error("Journal append previously failed; recovery is required");
     }
+    writeJournalRecordHeader(JournalRecordHeader{
+        .type = JournalRecordType::FileBeforeImage,
+        .recordSize = fileBeforeImage.size(),
+        .sequenceNumber = 0, // TODO: implement sequence number
+        .checksum = 0});     // placeholder; will be computed in writeJournalRecordHeader
 
     const std::string path = encodedPath(fileBeforeImage.relativeFilePath);
     ByteWriter writer(path.size() + 4 + 8 + 1); // path, path length, original size, new file flag
@@ -250,6 +255,11 @@ std::uint64_t JournalFile::writePage(const PageBeforeImage &pageBeforeImage)
     {
         throw std::runtime_error("Journal append previously failed; recovery is required");
     }
+    writeJournalRecordHeader(JournalRecordHeader{
+        .type = JournalRecordType::PageBeforeImage,
+        .recordSize = pageBeforeImage.size(),
+        .sequenceNumber = 0, // TODO: implement sequence number
+        .checksum = 0});
 
     const std::string path = encodedPath(pageBeforeImage.relativeFilePath);
     ByteWriter writer(path.size() + 4 + 4 + PAGE_SIZE); // path, path length, pageId, original page
@@ -327,7 +337,12 @@ std::uint64_t JournalFile::writeJournalRecordHeader(const JournalRecordHeader &h
     writer.writeUnsigned<std::uint8_t>(static_cast<std::uint8_t>(header.type));
     writer.writeUnsigned<std::uint64_t>(header.recordSize);
     writer.writeUnsigned<std::uint32_t>(header.sequenceNumber);
-    writer.writeUnsigned<std::uint32_t>(header.checksum);
+
+    const auto content = std::span<const std::byte>{writer.bytes()}
+                             .first(writer.position());
+    writer.writeUnsigned<std::uint32_t>(checksum(content));
+
+    // writer.writeUnsigned<std::uint32_t>(header.checksum);
 
     if (writer.size() > std::numeric_limits<std::uint64_t>::max() - appendOffset_)
     {

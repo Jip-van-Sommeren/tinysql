@@ -67,7 +67,7 @@ void StorageEngine::createMetaFile(const std::filesystem::path &dbPath, const uu
     const auto content = std::span<const std::byte>{writer.bytes()}
                              .first(writer.position());
     writer.writeUnsigned<std::uint32_t>(checksum(content)); // checksum
-    dbMetaFile.writeAllAt(0, content);
+    dbMetaFile.writeAllAt(0, writer.bytes());
     dbMetaFile.sync();
 }
 

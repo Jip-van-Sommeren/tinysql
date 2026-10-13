@@ -84,7 +84,7 @@ private:
     std::uint64_t syncOffset_ = 0;
     std::uint64_t recoveryEnd_ = 0;
     uuid_t statementId_;
-    uuid_t dbId_;
+    uuid_t dbId_{};
     bool recoveryReady_ = false;
 
     void requireWritableStatement() const;

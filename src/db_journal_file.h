@@ -15,7 +15,7 @@ constexpr std::uint32_t JournalHeaderBytes =
     8 + 4 + 4 + 16 + 16 + 8 + 4; // 60 bytes
 
 constexpr std::uint64_t JournalRecordHeaderBytes =
-    1 + 8 + 4 + 4 + 4; // 21 bytes
+    1 + 8 + 4 + 4; // 21 bytes
 
 constexpr std::array<char, 8> JournalMagic{
     'D', 'B', 'J', 'R', 'N', 'L', '\0', '\0'};
@@ -59,6 +59,8 @@ struct FileBeforeImage
     std::filesystem::path relativeFilePath;
     std::uint64_t originalSize; // Bytes, including all pages.
     bool newFile = false;
+
+    std::size_t size() const;
 };
 
 struct JournalRecord
