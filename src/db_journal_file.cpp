@@ -38,13 +38,15 @@ namespace
                     reinterpret_cast<const Bytef *>(bytes.data()),
                     bytes.size()));
     }
+
+    constexpr std::size_t MinPathBytes = 1;
+
     // path_length and  pageId = 2* sizeof(std::uint32_t)
-    constexpr std::size_t RecordOverhead = 2 * sizeof(std::uint32_t) + PAGE_SIZE + JournalRecordHeaderBytes; // path length + pageId + page bytes + path + record header
 }
 
 std::size_t PageBeforeImage::size() const
 {
-    return RecordOverhead + encodedPath(relativeFilePath).size(); // path length + pageId + page bytes + path + record header
+    return 4 + 4 + encodedPath(relativeFilePath).size() + PAGE_SIZE + JournalRecordHeaderBytes; // path length + pageId + path +  page size + record header
 }
 std::size_t FileBeforeImage::size() const
 {
@@ -60,37 +62,10 @@ std::uint64_t JournalFile::findRecoveryEnd(
     std::uint64_t fileSize)
 {
     std::uint64_t offset{JournalHeaderBytes};
-
-    while (offset < fileSize)
+    (void)readJournalHeader(); // Skip header; it is not needed for recovery. but does reset nextReadSequence_ to 0 and readOffset_ to JournalHeaderBytes
+    while (readRecord(offset, fileSize))
     {
-
-        if (fileSize - offset < JournalRecordHeaderBytes)
-        {
-            return offset;
-        }
-        const auto recordStart = offset;
-
-        // Every record starts with [type:u8][path length:u32].
-        JournalRecordHeader header{};
-        std::array<std::byte, JournalRecordHeaderBytes> prefixBytes{};
-        file_.readExactAt(recordStart, prefixBytes);
-        ByteReader prefixReader(prefixBytes);
-
-        const auto journalType = static_cast<JournalRecordType>(
-            prefixReader.readUnsigned<std::uint8_t>());
-        const auto recordSize = prefixReader.readUnsigned<std::uint64_t>();
-        // const auto sequenceNumber = prefixReader.readUnsigned<std::uint32_t>();
-        // const auto checksum = prefixReader.readUnsigned<std::uint32_t>();
-        if (journalType != JournalRecordType::FileBeforeImage && journalType != JournalRecordType::PageBeforeImage)
-        {
-            throw std::runtime_error("invalid Journal Record Type");
-        }
-        if (recordSize > fileSize - recordStart)
-        {
-            return recordStart;
-        }
-
-        offset += recordSize;
+        // offset is updated by readRecord to the end of the record.
     }
     return offset;
 }
@@ -110,12 +85,24 @@ JournalHeader JournalFile::readJournalHeader()
     }
 
     header.version = reader.readUnsigned<std::uint32_t>();
+    if (header.version != 1)
+    {
+        throw std::runtime_error("Unsupported journal version");
+    }
     header.headerLength = reader.readUnsigned<std::uint32_t>();
+    if (header.headerLength != JournalHeaderBytes)
+    {
+        throw std::runtime_error("Invalid journal header length");
+    }
 
     reader.readBytes(header.dbId, sizeof(header.dbId));
 
     reader.readBytes(header.statementId, sizeof(header.statementId));
     header.pageSize = reader.readUnsigned<std::uint64_t>();
+    if (header.pageSize != PAGE_SIZE)
+    {
+        throw std::runtime_error("Unsupported journal page size");
+    }
     header.checksum = reader.readUnsigned<std::uint32_t>();
 
     const auto content = std::span<const std::byte>{headerBytes}.first(JournalHeaderBytes - sizeof(header.checksum));
@@ -125,7 +112,7 @@ JournalHeader JournalFile::readJournalHeader()
     }
 
     readOffset_ = JournalHeaderBytes; // readoffset should be zero at the start but incrementing it here to avoid reading the header again in readNext
-
+    nextReadSequence_ = 0;            // reset sequence number for reading records
     return header;
 }
 
@@ -151,18 +138,25 @@ std::optional<JournalRecord> JournalFile::readRecord(
     const auto journalType = static_cast<JournalRecordType>(
         prefixReader.readUnsigned<std::uint8_t>());
     const auto recordSize = prefixReader.readUnsigned<std::uint64_t>();
-    const auto sequenceNumber = prefixReader.readUnsigned<std::uint32_t>();
-    const auto checksum = prefixReader.readUnsigned<std::uint32_t>();
-    JournalRecordHeader header{
-        .type = journalType,
-        .recordSize = recordSize,
-        .sequenceNumber = sequenceNumber,
-        .checksum = checksum};
-
+    if (journalType == JournalRecordType::FileBeforeImage && recordSize > maxFileRecord)
+    {
+        throw std::runtime_error("Truncated journal record");
+    }
+    if (journalType == JournalRecordType::PageBeforeImage && recordSize > maxPageRecord)
+    {
+        throw std::runtime_error("Truncated journal record");
+    }
     if (journalType != JournalRecordType::FileBeforeImage && journalType != JournalRecordType::PageBeforeImage)
     {
         throw std::runtime_error("invalid Journal Record Type");
     }
+    const auto sequenceNumber = prefixReader.readUnsigned<std::uint32_t>();
+    const auto storedChecksum = prefixReader.readUnsigned<std::uint32_t>();
+    JournalRecordHeader header{
+        .type = journalType,
+        .recordSize = recordSize,
+        .sequenceNumber = sequenceNumber,
+        .checksum = storedChecksum};
 
     if (recordSize > fileSize - recordStart)
     {
@@ -170,35 +164,63 @@ std::optional<JournalRecord> JournalFile::readRecord(
     }
 
     std::vector<std::byte> bytes(recordSize);
-    file_.readExactAt(recordStart - JournalRecordHeaderBytes,
+    file_.readExactAt(recordStart,
                       std::span<std::byte>{bytes});
+
+    constexpr std::size_t checksumOffset = 1 + 8 + 4;
+
+    std::fill_n(
+        bytes.begin() + checksumOffset,
+        sizeof(std::uint32_t),
+        std::byte{0});
+
+    if (checksum(bytes) != storedChecksum)
+        throw std::runtime_error("Invalid journal record checksum");
+
+    if (sequenceNumber != nextReadSequence_)
+    {
+        throw std::runtime_error("Unexpected journal record sequence");
+    }
+
     ByteReader reader(bytes);
+    reader.seek(JournalRecordHeaderBytes);
+
+    JournalRecord result{};
+    result.header = header;
 
     if (journalType == JournalRecordType::FileBeforeImage)
     {
-        FileBeforeImage record{};
+        auto &record = result.record.emplace<FileBeforeImage>();
+
         record.relativeFilePath = reader.readString();
         (void)encodedPath(record.relativeFilePath);
         record.originalSize = reader.readUnsigned<std::uint64_t>();
+
         const auto newFile = reader.readUnsigned<std::uint8_t>();
         if (newFile > 1)
         {
             throw std::runtime_error("Invalid journal new-file flag");
         }
         record.newFile = newFile != 0;
-
-        offset = recordStart + recordSize;
-        return JournalRecord{header, record};
     }
-    // Dont need to check for Other JournalRecordType again since invalid type should throw in the section above
-    PageBeforeImage record{};
-    record.relativeFilePath = reader.readString();
-    (void)encodedPath(record.relativeFilePath);
-    record.pageId = reader.readUnsigned<std::uint32_t>();
-    reader.readBytes(record.originalPage.data(), record.originalPage.size());
+    else // Type was already validated as PageBeforeImage.
+    {
+        auto &record = result.record.emplace<PageBeforeImage>();
+
+        record.relativeFilePath = reader.readString();
+        (void)encodedPath(record.relativeFilePath);
+        record.pageId = reader.readUnsigned<std::uint32_t>();
+        reader.readBytes(record.originalPage.data(), record.originalPage.size());
+    }
+
+    if (reader.position() != reader.size())
+    {
+        throw std::runtime_error("Unexpected trailing bytes in journal record");
+    }
 
     offset = recordStart + recordSize;
-    return JournalRecord{header, record};
+    ++nextReadSequence_;
+    return result;
 }
 
 std::optional<JournalRecord> JournalFile::readNext(std::uint64_t end)

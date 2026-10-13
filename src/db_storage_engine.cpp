@@ -135,6 +135,10 @@ StorageEngine StorageEngine::open(
     reader.readBytes(dbId, sizeof(dbId)); // dbId
 
     const auto version = reader.readUnsigned<std::uint64_t>(); // version
+    if (version != 1)
+    {
+        throw std::runtime_error("Unsupported database version");
+    }
     // reader.readUnsigned<std::uint64_t>(); // epoch
     // reader.readUnsigned<std::uint64_t>(); // generation
     const auto checksumValue = reader.readUnsigned<std::uint32_t>();

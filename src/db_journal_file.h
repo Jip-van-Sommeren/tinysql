@@ -82,6 +82,11 @@ public:
         LinuxFile::OpenMode mode = LinuxFile::OpenMode::CreateNew);
 
     static constexpr std::size_t MaxPathBytes = 4096;
+    static constexpr std::size_t maxFileRecord =
+        JournalRecordHeaderBytes + 4 + MaxPathBytes + 8 + 1;
+
+    static constexpr std::size_t maxPageRecord =
+        JournalRecordHeaderBytes + 4 + MaxPathBytes + 4 + PAGE_SIZE;
 
     // nullopt means EOF between records; truncated records throw.
 
@@ -106,7 +111,8 @@ private:
     LinuxFile file_;
     std::uint64_t appendOffset_{0};
     std::uint64_t readOffset_{0};
-    std::uint32_t nextWriteSequence_{0};
+    std::uint64_t nextWriteSequence_{0};
+    std::uint64_t nextReadSequence_{0};
     bool appendFailed_ = false;
 
     std::optional<JournalRecord> readRecord(

@@ -8,18 +8,18 @@
 #include <zlib.h>
 #include <uuid/uuid.h>
 
-namespace
-{
+// namespace
+// {
 
-    std::uint32_t checksum(std::span<const std::byte> bytes)
-    {
-        return static_cast<std::uint32_t>(
-            crc32_z(0,
-                    reinterpret_cast<const Bytef *>(bytes.data()),
-                    bytes.size()));
-    }
-    // path_length and  pageId = 2* sizeof(std::uint32_t)
-}
+//     std::uint32_t checksum(std::span<const std::byte> bytes)
+//     {
+//         return static_cast<std::uint32_t>(
+//             crc32_z(0,
+//                     reinterpret_cast<const Bytef *>(bytes.data()),
+//                     bytes.size()));
+//     }
+//     // path_length and  pageId = 2* sizeof(std::uint32_t)
+// }
 
 StatementRecovery::StatementRecovery(const std::filesystem::path &path, const uuid_t &dbId)
     : dbRootPath_(path), journalPath_(path / "journal" / "journal.log") { uuid_copy(dbId_, dbId); }
@@ -52,8 +52,12 @@ std::uint64_t StatementRecovery::validateJournalForRecovery()
     const auto end = journalFile_->findRecoveryEnd(journalFile_->size());
     journalFile_->rewind();
 
-    (void)journalFile_->readJournalHeader(); // Skip header; it is not needed for recovery.
+    const auto header = journalFile_->readJournalHeader();
 
+    if (uuid_compare(header.dbId, dbId_) != 0)
+    {
+        throw std::runtime_error("Journal belongs to another database");
+    }
     std::unordered_map<std::filesystem::path, FileBeforeImage> rollbackFiles;
     while (auto image = journalFile_->readNext(end))
     {
@@ -307,7 +311,7 @@ void StatementRecovery::rollback()
 
     journalFile_->rewind();
 
-    const auto header = journalFile_->readJournalHeader(); // Skip header; it is not needed for recovery.
+    (void)journalFile_->readJournalHeader(); // Skip header; it is not needed for recovery.
 
     while (auto image = journalFile_->readNext(recoveryEnd_))
     {
