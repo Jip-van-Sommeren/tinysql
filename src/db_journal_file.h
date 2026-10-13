@@ -15,7 +15,7 @@ constexpr std::uint32_t JournalHeaderBytes =
     8 + 4 + 4 + 16 + 16 + 8 + 4; // 60 bytes
 
 constexpr std::uint64_t JournalRecordHeaderBytes =
-    1 + 8 + 4 + 4; // 21 bytes
+    1 + 8 + 4 + 4; // 17 bytes
 
 constexpr std::array<char, 8> JournalMagic{
     'D', 'B', 'J', 'R', 'N', 'L', '\0', '\0'};
@@ -24,7 +24,7 @@ struct JournalHeader
 {
     std::array<char, 8> magic;
     std::uint32_t version;
-    std::uint32_t headerLength; // Bytes, including magic, version, epoch, generation, checksum.
+    std::uint32_t headerLength; // Bytes in the complete serialized journal header.
     uuid_t dbId;
     uuid_t statementId;
     std::uint64_t pageSize;
@@ -113,6 +113,7 @@ private:
     std::uint64_t readOffset_{0};
     std::uint64_t nextWriteSequence_{0};
     std::uint64_t nextReadSequence_{0};
+    bool writeSequenceInitialized_ = false;
     bool appendFailed_ = false;
 
     std::optional<JournalRecord> readRecord(

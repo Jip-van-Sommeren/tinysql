@@ -1,3 +1,4 @@
+#include "db_test_journal.h"
 #include "db_database.h"
 #include "db_decimal.h"
 #include "db_query_executor.h"
@@ -309,7 +310,8 @@ int main()
         },
         "Implicit alias was not rejected");
 
-    StatementRecovery recovery{path};
+    const journal_test::DatabaseIdentity identity{path};
+    StatementRecovery recovery{path, identity.bytes};
     Table table = Table::open(path, "tables/products.table", recovery);
     BoundSelect grouped{
         .tableName = "products",

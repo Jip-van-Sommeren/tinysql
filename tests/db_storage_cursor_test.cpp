@@ -1,3 +1,4 @@
+#include "db_test_journal.h"
 #include "db_buffer_manager.h"
 #include "db_database.h"
 #include "db_page_factory.h"
@@ -94,7 +95,8 @@ namespace
             }
             pages.sync();
         }
-        StatementRecovery recovery{path};
+        const journal_test::DatabaseIdentity identity{path};
+        StatementRecovery recovery{path, identity.bytes};
         BufferManager manager{path, relativeFile, LinuxFile::OpenMode::OpenExisting, recovery};
         {
             auto guard = manager.getDataPage(1);
@@ -221,7 +223,8 @@ namespace
     {
         database.executeSql("CREATE TABLE cursor_values (id INT, label TEXT);");
         const std::filesystem::path relativeFile = "tables/cursor_values.table";
-        StatementRecovery recovery{path};
+        const journal_test::DatabaseIdentity identity{path};
+        StatementRecovery recovery{path, identity.bytes};
         {
             Table table = Table::open(path, relativeFile, recovery);
             require(scanIds(table).empty(), "An empty table returned rows");
@@ -310,7 +313,8 @@ namespace
         database.executeSql("CREATE TABLE lazy_values (id INT);");
         database.executeSql("INSERT INTO lazy_values VALUES (1), (2);");
         const std::filesystem::path relativeFile = "tables/lazy_values.table";
-        StatementRecovery recovery{path};
+        const journal_test::DatabaseIdentity identity{path};
+        StatementRecovery recovery{path, identity.bytes};
         recovery.begin();
         {
             BufferManager manager{path, relativeFile, LinuxFile::OpenMode::OpenExisting, recovery};
@@ -346,7 +350,8 @@ namespace
                            std::get<HeaderPage>(header.data), std::get<DataPage>(page.data)));
             pages.sync();
         }
-        StatementRecovery recovery{path};
+        const journal_test::DatabaseIdentity identity{path};
+        StatementRecovery recovery{path, identity.bytes};
         recovery.begin();
         {
             BufferManager manager{path, relativeFile, LinuxFile::OpenMode::OpenExisting, recovery};

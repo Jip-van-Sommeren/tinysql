@@ -1,3 +1,4 @@
+#include "db_test_journal.h"
 #include "db_linux_file.h"
 #include "db_journal_file.h"
 
@@ -329,18 +330,20 @@ namespace
     {
         const auto path = directory / "partial-journal";
         JournalFile journal(path);
+        journal.writeJournalHeader(journal_test::header());
+        (void)journal.readJournalHeader();
         const PageBeforeImage record{.relativeFilePath = "tables/a.table", .pageId = 1, .originalPage = {}};
         faults.writeBudget = 10;
         requireThrows<std::system_error>([&] { journal.writePage(record); }, "pwrite");
         faults.writeBudget.reset();
-        require(std::filesystem::file_size(path) == 10, "Partial-write injection did not run");
+        require(std::filesystem::file_size(path) == JournalHeaderBytes + 10, "Partial-write injection did not run");
         requireThrows<std::runtime_error>([&] { journal.writePage(record); }, "previously failed");
         requireThrows<std::runtime_error>([&] {
             journal.writeFileBeforeImage(FileBeforeImage{"tables/new.table", 0, true});
         }, "previously failed");
         requireThrows<std::runtime_error>([&] { journal.sync(); }, "previously failed");
         requireThrows<std::runtime_error>([&] { journal.readNext(); }, "Truncated");
-        require(std::filesystem::file_size(path) == 10, "Failed journal was appended again");
+        require(std::filesystem::file_size(path) == JournalHeaderBytes + 10, "Failed journal was appended again");
     }
 }
 

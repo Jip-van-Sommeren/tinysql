@@ -54,7 +54,7 @@ std::size_t FileBeforeImage::size() const
 }
 
 JournalFile::JournalFile(const std::filesystem::path &path, LinuxFile::OpenMode mode)
-    : file_(path, mode), appendOffset_(file_.size())
+    : file_(path, mode), appendOffset_(file_.size()), writeSequenceInitialized_(appendOffset_ == 0)
 {
 }
 
@@ -62,7 +62,7 @@ std::uint64_t JournalFile::findRecoveryEnd(
     std::uint64_t fileSize)
 {
     std::uint64_t offset{JournalHeaderBytes};
-    (void)readJournalHeader(); // Skip header; it is not needed for recovery. but does reset nextReadSequence_ to 0 and readOffset_ to JournalHeaderBytes
+    (void)readJournalHeader(); // Validate the header and reset record iteration.
     while (readRecord(offset, fileSize))
     {
         // offset is updated by readRecord to the end of the record.
@@ -111,8 +111,8 @@ JournalHeader JournalFile::readJournalHeader()
         throw std::runtime_error("Invalid journal header checksum");
     }
 
-    readOffset_ = JournalHeaderBytes; // readoffset should be zero at the start but incrementing it here to avoid reading the header again in readNext
-    nextReadSequence_ = 0;            // reset sequence number for reading records
+    readOffset_ = JournalHeaderBytes;
+    nextReadSequence_ = 0;
     return header;
 }
 
@@ -130,7 +130,7 @@ std::optional<JournalRecord> JournalFile::readRecord(
     }
     const auto recordStart = offset;
 
-    // Every record starts with [type:u8][path length:u32].
+    // [type:u8][record size:u64][sequence:u32][checksum:u32]
     std::array<std::byte, JournalRecordHeaderBytes> headerBytes{};
     file_.readExactAt(recordStart, headerBytes);
     ByteReader prefixReader(headerBytes);
@@ -138,13 +138,17 @@ std::optional<JournalRecord> JournalFile::readRecord(
     const auto journalType = static_cast<JournalRecordType>(
         prefixReader.readUnsigned<std::uint8_t>());
     const auto recordSize = prefixReader.readUnsigned<std::uint64_t>();
-    if (journalType == JournalRecordType::FileBeforeImage && recordSize > maxFileRecord)
+    const auto minFileRecord = JournalRecordHeaderBytes + 4 + MinPathBytes + 8 + 1;
+    const auto minPageRecord = JournalRecordHeaderBytes + 4 + MinPathBytes + 4 + PAGE_SIZE;
+    if (journalType == JournalRecordType::FileBeforeImage &&
+        (recordSize < minFileRecord || recordSize > maxFileRecord))
     {
-        throw std::runtime_error("Truncated journal record");
+        throw std::runtime_error("Invalid file journal record size");
     }
-    if (journalType == JournalRecordType::PageBeforeImage && recordSize > maxPageRecord)
+    if (journalType == JournalRecordType::PageBeforeImage &&
+        (recordSize < minPageRecord || recordSize > maxPageRecord))
     {
-        throw std::runtime_error("Truncated journal record");
+        throw std::runtime_error("Invalid page journal record size");
     }
     if (journalType != JournalRecordType::FileBeforeImage && journalType != JournalRecordType::PageBeforeImage)
     {
@@ -328,6 +332,30 @@ std::uint64_t JournalFile::appendRecord(
     if (appendFailed_)
     {
         throw std::runtime_error("Journal append previously failed; recovery is required");
+    }
+
+    if (!writeSequenceInitialized_)
+    {
+        // Resume only a fully validated record stream. Preserve any independent
+        // read cursor, including its expected sequence, even if validation fails.
+        const auto savedReadOffset = readOffset_;
+        const auto savedReadSequence = nextReadSequence_;
+        try
+        {
+            if (file_.size() != appendOffset_)
+                throw std::runtime_error("Journal size changed before append");
+            (void)findRecoveryEnd(appendOffset_);
+            nextWriteSequence_ = nextReadSequence_;
+            writeSequenceInitialized_ = true;
+        }
+        catch (...)
+        {
+            readOffset_ = savedReadOffset;
+            nextReadSequence_ = savedReadSequence;
+            throw;
+        }
+        readOffset_ = savedReadOffset;
+        nextReadSequence_ = savedReadSequence;
     }
 
     if (payload.size() >

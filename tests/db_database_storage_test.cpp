@@ -2,6 +2,7 @@
 #include "db_linux_file.h"
 #include "db_storage_engine.h"
 #include "db_test_directory.h"
+#include "db_test_journal.h"
 
 #include <iostream>
 #include <optional>
@@ -121,6 +122,109 @@ namespace
         require(std::filesystem::file_size(unrelated / "tables/items.table") == 0,
                 "Database modified the working-directory decoy file");
     }
+
+    void testMetadataValidation()
+    {
+        TestDirectory directory{"db-meta-validation"};
+        const auto root = directory.path / "db";
+        { auto engine = StorageEngine::create(root); }
+        const auto metaPath = root / "db.meta";
+        const auto original = readFile(metaPath);
+        require(original.size() == 36, "Database metadata omitted fields or checksum");
+        const journal_test::DatabaseIdentity identity{root};
+        require(!uuid_is_null(identity.bytes), "Database UUID is empty");
+        {
+            auto engine = StorageEngine::open(root);
+            engine.beginStatement();
+            JournalFile journal(root / "journal/journal.log", LinuxFile::OpenMode::ReadOnly);
+            const auto header = journal.readJournalHeader();
+            require(uuid_compare(header.dbId, identity.bytes) == 0 && !uuid_is_null(header.statementId),
+                    "Statement journal lost its database or statement identity");
+            engine.rollbackStatement();
+        }
+        const auto reject = [&](journal_test::Bytes bytes, const std::string &message)
+        {
+            LinuxFile meta(metaPath);
+            meta.resize(0);
+            meta.writeAllAt(0, bytes);
+            requireError([&] { (void)StorageEngine::open(root); }, message);
+            require(readFile(metaPath) == bytes, "Failed open changed invalid metadata");
+        };
+        auto bytes = original;
+        bytes[0] ^= std::byte{1};
+        reject(bytes, "meta file");
+        bytes = original;
+        bytes[8] ^= std::byte{1};
+        reject(bytes, "checksum");
+        bytes = original;
+        journal_test::setUnsigned(bytes, 24, std::uint64_t{2});
+        journal_test::setUnsigned(bytes, 32, journal_test::crc(std::span<const std::byte>{bytes}.first(32)));
+        reject(bytes, "version");
+        bytes = original; bytes.pop_back();
+        reject(bytes, "EOF");
+        LinuxFile meta(metaPath);
+        meta.resize(0);
+        meta.writeAllAt(0, original);
+        { auto engine = StorageEngine::open(root); }
+    }
+
+    void testRestartValidationBeforeReplay()
+    {
+        TestDirectory directory{"db-restart-validation"};
+        const auto root = directory.path / "db";
+        const auto tablePath = root / "tables/items.table";
+        const auto journalPath = root / "journal/journal.log";
+        {
+            auto database = Database::create(root, "test");
+            database.executeSql("CREATE TABLE items (id INT);");
+            database.executeSql("INSERT INTO items VALUES (1);");
+        }
+        const auto before = readFile(tablePath);
+        {
+            auto engine = StorageEngine::open(root);
+            const auto schema = engine.getTableHeader("items");
+            engine.beginStatement();
+            auto table = engine.openTable("items");
+            table.insertRows({.tableName = "items", .rows = {Row{{std::int32_t{2}}}}});
+            auto created = engine.createTable("uncommitted", "test", schema.columns, schema.constraints);
+        } // Close handles without retiring the durable undo journal.
+        const auto changed = readFile(tablePath);
+        const auto originalJournal = readFile(journalPath);
+        require(changed != before, "Restart fixture did not write modified table bytes");
+        const auto reject = [&](const journal_test::Bytes &bytes, const std::string &message)
+        {
+            LinuxFile journal(journalPath);
+            journal.resize(0);
+            journal.writeAllAt(0, bytes);
+            requireError([&] { (void)StorageEngine::open(root); }, message);
+            require(readFile(tablePath) == changed, "Invalid journal partially replayed before validation finished");
+            require(std::filesystem::exists(root / "tables/uncommitted.table"), "Invalid journal deleted a table");
+            require(readFile(journalPath) == bytes, "Failed recovery discarded or changed its evidence");
+        };
+        auto bytes = originalJournal;
+        bytes[16] ^= std::byte{1}; // A different DB UUID with a valid header CRC.
+        journal_test::setUnsigned(bytes, 56, journal_test::crc(std::span<const std::byte>{bytes}.first(56)));
+        reject(bytes, "another database");
+        bytes = originalJournal; bytes.back() ^= std::byte{1};
+        reject(bytes, "checksum");
+        bytes = originalJournal; bytes.pop_back();
+        reject(bytes, "Truncated");
+        bytes = originalJournal; bytes.push_back(std::byte{0});
+        reject(bytes, "Truncated");
+        bytes = originalJournal; bytes.resize(59);
+        reject(bytes, "EOF");
+        {
+            LinuxFile journal(journalPath);
+            journal.resize(0);
+            journal.writeAllAt(0, originalJournal);
+        }
+        auto recovered = StorageEngine::open(root);
+        require(readFile(tablePath) == before, "Restart did not restore the original table bytes");
+        require(!recovered.tableExists("uncommitted") && !std::filesystem::exists(journalPath),
+                "Restart did not remove the new table and retire the journal");
+        recovered.beginStatement();
+        recovered.commitStatement();
+    }
 }
 
 int main()
@@ -128,6 +232,8 @@ int main()
     try
     {
         testStorageIntegration();
+        testMetadataValidation();
+        testRestartValidationBeforeReplay();
     }
     catch (const std::exception &error)
     {
