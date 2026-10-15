@@ -60,14 +60,19 @@ void StatementRecovery::validateJournalForRecovery(std::uint64_t end)
     journalFile_->rewind();
 
     const auto header = journalFile_->readJournalHeader();
-    uuid_copy(statementId_, header.statementId);
+    // uuid_copy(statementId_, header.statementId);
 
     if (uuid_compare(header.dbId, dbId_) != 0)
     {
         throw std::runtime_error("Journal belongs to another database");
     }
 
-        std::unordered_map<std::filesystem::path, FileBeforeImage> rollbackFiles;
+    if (uuid_compare(header.statementId, statementId_) != 0)
+    {
+        throw std::runtime_error("Journal belongs to another database");
+    }
+
+    std::unordered_map<std::filesystem::path, FileBeforeImage> rollbackFiles;
     std::set<std::pair<std::filesystem::path, std::uint32_t>> seenPages;
     while (auto image = journalFile_->readNext(end))
     {

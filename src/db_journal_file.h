@@ -109,7 +109,11 @@ public:
 
     std::uint64_t findRecoveryEnd(
         std::uint64_t fileSize);
-    void rewind() noexcept { readOffset_ = 0; }
+    void rewind() noexcept
+    {
+        readOffset_ = JournalDataOffset;
+        nextReadSequence_ = 0;
+    }
     void rewind(std::uint64_t start) { readOffset_ = start; }
 
     // Appends return the end of the complete record; neither synchronizes it.
@@ -127,7 +131,7 @@ public:
 
 private:
     LinuxFile file_;
-    std::uint64_t appendOffset_{JournalDataOffset};
+    std::uint64_t appendOffset_{};
     std::uint64_t readOffset_{0};
     std::uint64_t nextWriteSequence_{0};
     std::uint64_t nextReadSequence_{0};

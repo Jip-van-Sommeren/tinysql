@@ -54,7 +54,7 @@ std::size_t FileBeforeImage::size() const
 }
 
 JournalFile::JournalFile(const LinuxDirectory &parent, const std::filesystem::path &path, const uuid_t &dbId, const uuid_t &statementId, LinuxFile::OpenMode mode)
-    : file_(parent, path, mode), appendOffset_(file_.size()), writeSequenceInitialized_(appendOffset_ == 0)
+    : file_(parent, path, mode), appendOffset_(mode == LinuxFile::OpenMode::CreateNew ? JournalDataOffset : file_.size()), writeSequenceInitialized_(appendOffset_ == JournalDataOffset)
 {
     uuid_copy(dbId_, dbId);
     uuid_copy(statementId_, statementId);
@@ -100,8 +100,8 @@ std::optional<JournalBoundary> JournalFile::readJournalBoundary(const std::uint8
         return std::nullopt;
     }
 
-    readOffset_ = JournalDataOffset;
-    nextReadSequence_ = 0;
+    // readOffset_ = JournalDataOffset;
+    // nextReadSequence_ = 0;
     return header;
 }
 std::uint64_t JournalFile::validateJournalHeader(uuid_t &statementId)
@@ -112,11 +112,26 @@ std::uint64_t JournalFile::validateJournalHeader(uuid_t &statementId)
     uuid_copy(statementId, statementId_);
     const auto slot0 = readJournalBoundary(0);
     const auto slot1 = readJournalBoundary(1);
-    if (slot0->generation == slot1->generation && slot0->endOffset != slot1->endOffset)
+    if (slot0 && slot1 &&
+        slot0->generation == slot1->generation &&
+        slot0->endOffset != slot1->endOffset)
     {
-        throw std::runtime_error("inequal endoffset for the same gen");
+        throw std::runtime_error(
+            "Conflicting journal boundaries");
     }
-    return std::max(slot0->generation, slot1->generation);
+
+    auto selected = slot0;
+    if (slot1 &&
+        (!selected || slot1->generation > selected->generation))
+    {
+        selected = slot1;
+    }
+
+    if (!selected)
+        throw std::runtime_error("No valid journal boundary");
+
+    uuid_copy(statementId, header.statementId);
+    return selected->endOffset;
 }
 std::uint64_t JournalFile::findRecoveryEnd(
     std::uint64_t fileSize)
