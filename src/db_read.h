@@ -1,6 +1,7 @@
 #pragma once
 
 #include "db_storage.h"
+#include "db_linux_file.h"
 
 #include <climits>
 #include <cstddef>

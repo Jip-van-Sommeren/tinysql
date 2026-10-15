@@ -60,15 +60,18 @@ void StatementRecovery::validateJournalForRecovery(std::uint64_t end)
     journalFile_->rewind();
 
     const auto header = journalFile_->readJournalHeader();
+    uuid_copy(statementId_, header.statementId);
 
     if (uuid_compare(header.dbId, dbId_) != 0)
     {
         throw std::runtime_error("Journal belongs to another database");
     }
-    std::unordered_map<std::filesystem::path, FileBeforeImage> rollbackFiles;
+
+        std::unordered_map<std::filesystem::path, FileBeforeImage> rollbackFiles;
     std::set<std::pair<std::filesystem::path, std::uint32_t>> seenPages;
     while (auto image = journalFile_->readNext(end))
     {
+        auto payload = image.value().record;
         std::visit(
             [&](const auto &value)
             {
@@ -103,9 +106,9 @@ void StatementRecovery::validateJournalForRecovery(std::uint64_t end)
                     }
                 }
             },
-            image.value().record);
+            payload);
     }
-    journalFile_->rewind();
+    journalFile_->rewind(JournalDataOffset);
     return;
 }
 
@@ -115,9 +118,14 @@ void StatementRecovery::initializeForRecover()
         throw std::logic_error("A statement is already active");
     failed_ = true; // No normal access until replay and cleanup finish.
     journalFile_.emplace(
-        journalDir_, "journal.log",
+        journalDir_, "journal.log", dbId_, statementId_,
         LinuxFile::OpenMode::OpenExisting);
-    const auto end = journalFile_->size();
+
+    const auto end = journalFile_->validateJournalHeader(statementId_);
+    if (end < JournalDataOffset || end > journalFile_->size())
+    {
+        throw std::runtime_error("invalid Journal endoffset");
+    }
     recoveryEnd_ = end;
     recoveryReady_ = true;
 
@@ -141,12 +149,11 @@ void StatementRecovery::begin()
     }
     if (generation_ == std::numeric_limits<std::uint64_t>::max())
         throw std::overflow_error("Statement generation exhausted");
+    uuid_generate_random(statementId_);
 
     journalFile_.emplace(
-        journalDir_, "journal.log",
+        journalDir_, "journal.log", dbId_, statementId_,
         LinuxFile::OpenMode::CreateNew);
-
-    uuid_generate_random(statementId_);
 
     JournalHeader header{};
     header.magic = JournalMagic;
@@ -157,9 +164,14 @@ void StatementRecovery::begin()
     header.pageSize = PAGE_SIZE;
     header.checksum = 0;
 
-    const auto end = journalFile_->writeJournalHeader(header);
-    appendOffset_ = end;
-    recoveryEnd_ = end;
+    JournalBoundary journalBoundary{.generation = 0, .endOffset = JournalDataOffset, .checksum = 0};
+
+    journalFile_->writeJournalHeader(header);
+    journalFile_->writeJournalBoundary(journalBoundary, 0);
+    journalFile_->writeJournalBoundary(journalBoundary, 1);
+
+    appendOffset_ = JournalDataOffset;
+    recoveryEnd_ = JournalDataOffset;
     ++generation_;
     recoveryReady_ = true;
 
@@ -324,9 +336,7 @@ void StatementRecovery::rollback()
     std::unordered_map<std::filesystem::path, FileBeforeImage> rollbackFiles;
 
     validateJournalForRecovery(recoveryEnd_);
-    journalFile_->rewind();
-
-    (void)journalFile_->readJournalHeader(); // Skip header; it is not needed for recovery.
+    // journalFile_->rewind();
 
     while (auto image = journalFile_->readNext(recoveryEnd_))
     {
@@ -486,11 +496,20 @@ void StatementRecovery::ensureDurable(std::uint64_t requiredEnd)
 void StatementRecovery::ensureDurable()
 {
     requireWritableStatement();
+    const auto nextSlot = 1 - activeBoundarySlot_;
 
     try
     {
         if (journalFile_->size() != appendOffset_)
             throw std::runtime_error("Journal size does not match completed appends");
+        journalFile_->sync();
+        journalFile_->writeJournalBoundary(
+            JournalBoundary{
+                .generation = boundaryGeneration_ + 1,
+                .endOffset = appendOffset_,
+                .checksum = 0},
+            nextSlot);
+
         journalFile_->sync();
 
         if (journalDirectoryNeedsSync_)
@@ -504,6 +523,8 @@ void StatementRecovery::ensureDurable()
         throw;
     }
     // Only update this after both required syncs succeed.
+    activeBoundarySlot_ = nextSlot;
+    ++boundaryGeneration_;
     syncOffset_ = appendOffset_;
     journalDirectoryNeedsSync_ = false;
 }

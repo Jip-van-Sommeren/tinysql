@@ -8,6 +8,45 @@
 // Owns a Linux descriptor. Writes reach the OS cache; only sync() requests
 // durable file contents. Creating/removing directory entries needs a separate
 // directory sync as part of the eventual recovery protocol.
+
+class LinuxDirectory
+{
+public:
+    explicit LinuxDirectory(
+        const std::filesystem::path &path);
+    LinuxDirectory(const LinuxDirectory &parent,
+                   const std::filesystem::path &path);
+    ~LinuxDirectory() noexcept;
+
+    LinuxDirectory(const LinuxDirectory &) = delete;
+    LinuxDirectory &operator=(const LinuxDirectory &) = delete;
+    LinuxDirectory(LinuxDirectory &&other) noexcept;
+    LinuxDirectory &operator=(LinuxDirectory &&other) noexcept;
+
+    void deleteFile(const std::string &fileName);
+    void lockExclusive();
+
+    // On an I/O error a prefix may already have been transferred. Neither
+    // method provides rollback; successful return guarantees the full transfer.
+    void sync();
+    int getFd() const noexcept { return fd_; }
+
+    void setFd(int fd) { fd_ = fd; };
+
+    std::filesystem::path getPath() const noexcept { return path_; };
+    std::filesystem::path getPath() { return path_; };
+    bool entryExists(
+        const std::filesystem::path &fileName) const;
+
+private:
+    std::filesystem::path path_;
+    int fd_ = -1;
+
+    void closeDescriptor() noexcept;
+    void ensureOpen() const;
+    [[noreturn]] void throwError(const char *operation, int error) const;
+};
+
 class LinuxFile
 {
 public:
@@ -47,43 +86,5 @@ private:
     void closeDescriptor() noexcept;
     void ensureOpen() const;
     void validateRange(std::uint64_t offset, std::size_t count) const;
-    [[noreturn]] void throwError(const char *operation, int error) const;
-};
-
-class LinuxDirectory
-{
-public:
-    explicit LinuxDirectory(
-        const std::filesystem::path &path);
-    LinuxDirectory(const LinuxDirectory &parent,
-                   const std::filesystem::path &path);
-    ~LinuxDirectory() noexcept;
-
-    LinuxDirectory(const LinuxDirectory &) = delete;
-    LinuxDirectory &operator=(const LinuxDirectory &) = delete;
-    LinuxDirectory(LinuxDirectory &&other) noexcept;
-    LinuxDirectory &operator=(LinuxDirectory &&other) noexcept;
-
-    void deleteFile(const std::string &fileName);
-    void lockExclusive();
-
-    // On an I/O error a prefix may already have been transferred. Neither
-    // method provides rollback; successful return guarantees the full transfer.
-    void sync();
-    int getFd() const noexcept { return fd_; }
-
-    void setFd(int fd) { fd_ = fd; };
-
-    std::filesystem::path getPath() const noexcept { return path_; };
-    std::filesystem::path getPath() { return path_; };
-    bool LinuxDirectory::entryExists(
-        const std::filesystem::path &fileName) const;
-
-private:
-    std::filesystem::path path_;
-    int fd_ = -1;
-
-    void closeDescriptor() noexcept;
-    void ensureOpen() const;
     [[noreturn]] void throwError(const char *operation, int error) const;
 };

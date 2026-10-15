@@ -53,15 +53,75 @@ std::size_t FileBeforeImage::size() const
     return 4 + 8 + 1 + encodedPath(relativeFilePath).size() + JournalRecordHeaderBytes; // path length + original size + new file flag + path + record header
 }
 
-JournalFile::JournalFile(const LinuxDirectory &parent, const std::filesystem::path &path, LinuxFile::OpenMode mode)
+JournalFile::JournalFile(const LinuxDirectory &parent, const std::filesystem::path &path, const uuid_t &dbId, const uuid_t &statementId, LinuxFile::OpenMode mode)
     : file_(parent, path, mode), appendOffset_(file_.size()), writeSequenceInitialized_(appendOffset_ == 0)
 {
+    uuid_copy(dbId_, dbId);
+    uuid_copy(statementId_, statementId);
 }
 
+std::optional<JournalBoundary> JournalFile::readJournalBoundary(const std::uint8_t slot)
+{
+    std::array<std::byte, JournalBoundaryBytes> headerBytes{};
+    const auto recordStart = JournalHeaderBytes + (slot * JournalBoundaryBytes);
+    file_.readExactAt(recordStart, headerBytes);
+    ByteReader reader(headerBytes);
+    JournalBoundary header{};
+
+    header.generation = reader.readUnsigned<std::uint64_t>();
+    header.endOffset = reader.readUnsigned<std::uint64_t>();
+
+    header.checksum = reader.readUnsigned<std::uint32_t>();
+
+    std::vector<std::byte> bytes(JournalBoundaryBytes);
+    file_.readExactAt(recordStart,
+                      std::span<std::byte>{bytes});
+
+    constexpr std::size_t checksumOffset = 8 + 8;
+
+    std::fill_n(
+        bytes.begin() + checksumOffset,
+        sizeof(std::uint32_t),
+        std::byte{0});
+
+    std::vector<std::byte> checksumInput;
+    checksumInput.reserve(
+        sizeof(dbId_) + sizeof(statementId_) + bytes.size());
+
+    for (const auto &id : {std::as_bytes(std::span{dbId_}),
+                           std::as_bytes(std::span{statementId_})})
+    {
+        checksumInput.insert(checksumInput.end(), id.begin(), id.end());
+    }
+
+    checksumInput.insert(checksumInput.end(), bytes.begin(), bytes.end());
+    if (checksum(checksumInput) != header.checksum)
+    {
+        return std::nullopt;
+    }
+
+    readOffset_ = JournalDataOffset;
+    nextReadSequence_ = 0;
+    return header;
+}
+std::uint64_t JournalFile::validateJournalHeader(uuid_t &statementId)
+{
+    const auto header = readJournalHeader();
+    uuid_copy(statementId_, header.statementId);
+
+    uuid_copy(statementId, statementId_);
+    const auto slot0 = readJournalBoundary(0);
+    const auto slot1 = readJournalBoundary(1);
+    if (slot0->generation == slot1->generation && slot0->endOffset != slot1->endOffset)
+    {
+        throw std::runtime_error("inequal endoffset for the same gen");
+    }
+    return std::max(slot0->generation, slot1->generation);
+}
 std::uint64_t JournalFile::findRecoveryEnd(
     std::uint64_t fileSize)
 {
-    std::uint64_t offset{JournalHeaderBytes};
+    std::uint64_t offset{JournalDataOffset};
     (void)readJournalHeader(); // Validate the header and reset record iteration.
     while (readRecord(offset, fileSize))
     {
@@ -96,8 +156,13 @@ JournalHeader JournalFile::readJournalHeader()
     }
 
     reader.readBytes(header.dbId, sizeof(header.dbId));
+    if (uuid_compare(dbId_, header.dbId) != 0)
+    {
+        throw std::runtime_error("Mismatch in db id");
+    }
 
     reader.readBytes(header.statementId, sizeof(header.statementId));
+
     header.pageSize = reader.readUnsigned<std::uint64_t>();
     if (header.pageSize != PAGE_SIZE)
     {
@@ -111,7 +176,9 @@ JournalHeader JournalFile::readJournalHeader()
         throw std::runtime_error("Invalid journal header checksum");
     }
 
-    readOffset_ = JournalHeaderBytes;
+    // uuid_copy(dbId_, header.dbId);
+
+    readOffset_ = JournalDataOffset;
     nextReadSequence_ = 0;
     return header;
 }
@@ -178,8 +245,22 @@ std::optional<JournalRecord> JournalFile::readRecord(
         sizeof(std::uint32_t),
         std::byte{0});
 
-    if (checksum(bytes) != storedChecksum)
+    std::vector<std::byte> checksumInput;
+    checksumInput.reserve(
+        sizeof(dbId_) + sizeof(statementId_) + bytes.size());
+
+    for (const auto &id : {std::as_bytes(std::span{dbId_}),
+                           std::as_bytes(std::span{statementId_})})
+    {
+        checksumInput.insert(checksumInput.end(), id.begin(), id.end());
+    }
+
+    checksumInput.insert(checksumInput.end(), bytes.begin(), bytes.end());
+
+    if (checksum(checksumInput) != storedChecksum)
+    {
         throw std::runtime_error("Invalid journal record checksum");
+    }
 
     if (sequenceNumber != nextReadSequence_)
     {
@@ -277,7 +358,48 @@ std::uint64_t JournalFile::writePage(const PageBeforeImage &pageBeforeImage)
     return appendRecord(JournalRecordType::PageBeforeImage, writer.bytes());
 }
 
-std::uint64_t JournalFile::writeJournalHeader(const JournalHeader &header)
+void JournalFile::writeJournalBoundary(const JournalBoundary &boundary, const std::uint8_t slot)
+{
+    ByteWriter writer(JournalBoundaryBytes);
+    writer.writeUnsigned<std::uint64_t>(boundary.generation);
+    writer.writeUnsigned<std::uint64_t>(boundary.endOffset);
+
+    const auto checksumOffset = writer.position(); // Byte 13 within this buffer
+    writer.writeUnsigned<std::uint32_t>(boundary.checksum);
+
+    std::vector<std::byte> bytes;
+    bytes.reserve(sizeof(dbId_) + sizeof(statementId_) + writer.bytes().size());
+    for (const auto &id : {std::as_bytes(std::span{dbId_}),
+                           std::as_bytes(std::span{statementId_})})
+    {
+        bytes.insert(bytes.end(), id.begin(), id.end());
+    }
+
+    bytes.insert(bytes.end(), writer.bytes().begin(), writer.bytes().end());
+
+    const auto recordChecksum = checksum(bytes);
+    writer.writeUnsignedAt<std::uint32_t>(
+        checksumOffset, recordChecksum);
+
+    if (writer.size() > std::numeric_limits<std::uint64_t>::max() - appendOffset_)
+    {
+        throw std::out_of_range("Journal append offset overflow");
+    }
+    try
+    {
+        file_.writeAllAt(JournalHeaderBytes + (slot * JournalBoundaryBytes), writer.bytes());
+    }
+    catch (...)
+    {
+        // A partial record may have reached disk. Never append past it on this
+        // object or report it as a successfully synchronized record stream.
+        appendFailed_ = true;
+        throw;
+    }
+    // return writer.position();
+}
+
+void JournalFile::writeJournalHeader(const JournalHeader &header)
 {
     if (appendFailed_)
     {
@@ -303,7 +425,7 @@ std::uint64_t JournalFile::writeJournalHeader(const JournalHeader &header)
     }
     try
     {
-        file_.writeAllAt(appendOffset_, writer.bytes());
+        file_.writeAllAt(0, writer.bytes());
     }
     catch (...)
     {
@@ -312,8 +434,8 @@ std::uint64_t JournalFile::writeJournalHeader(const JournalHeader &header)
         appendFailed_ = true;
         throw;
     }
-    appendOffset_ += writer.size();
-    return appendOffset_;
+    // appendOffset_ += writer.size();
+    // return appendOffset_;
 }
 
 void JournalFile::sync()
@@ -382,7 +504,17 @@ std::uint64_t JournalFile::appendRecord(
 
     writer.writeBytes(payload.data(), payload.size());
 
-    const auto recordChecksum = checksum(writer.bytes());
+    std::vector<std::byte> bytes;
+    bytes.reserve(sizeof(dbId_) + sizeof(statementId_) + writer.bytes().size());
+    for (const auto &id : {std::as_bytes(std::span{dbId_}),
+                           std::as_bytes(std::span{statementId_})})
+    {
+        bytes.insert(bytes.end(), id.begin(), id.end());
+    }
+
+    bytes.insert(bytes.end(), writer.bytes().begin(), writer.bytes().end());
+
+    const auto recordChecksum = checksum(bytes);
     writer.writeUnsignedAt<std::uint32_t>(
         checksumOffset, recordChecksum);
     if (writer.size() > std::numeric_limits<std::uint64_t>::max() - appendOffset_)

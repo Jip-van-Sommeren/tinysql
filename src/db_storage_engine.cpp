@@ -152,7 +152,7 @@ StorageEngine StorageEngine::open(
 
     StorageEngine engine{path, std::move(root), dbId};
 
-    if (std::filesystem::exists(path / "journal" / "journal.log"))
+    if (engine.journalDirectory_.entryExists("journal.log"))
     {
         engine.statementRecovery_.initializeForRecover();
         engine.statementRecovery_.rollback();

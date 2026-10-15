@@ -20,6 +20,18 @@ constexpr std::uint64_t JournalRecordHeaderBytes =
 constexpr std::array<char, 8> JournalMagic{
     'D', 'B', 'J', 'R', 'N', 'L', '\0', '\0'};
 
+constexpr std::size_t JournalBoundaryBytes = 8 + 8 + 4;
+constexpr std::size_t JournalDataOffset =
+    JournalHeaderBytes + 2 * JournalBoundaryBytes;
+
+struct JournalBoundary
+{
+    std::uint64_t generation; // Increments whenever a boundary is published.
+    std::uint64_t endOffset;  // Exclusive end of the required journal prefix.
+
+    std::uint32_t checksum;
+};
+
 struct JournalHeader
 {
     std::array<char, 8> magic;
@@ -79,6 +91,7 @@ public:
     // New journals are created exclusively. Reopening must be explicit.
     explicit JournalFile(const LinuxDirectory &parent,
                          const std::filesystem::path &path,
+                         const uuid_t &dbId, const uuid_t &statementId,
                          LinuxFile::OpenMode mode = LinuxFile::OpenMode::CreateNew);
 
     static constexpr std::size_t MaxPathBytes = 4096;
@@ -97,6 +110,7 @@ public:
     std::uint64_t findRecoveryEnd(
         std::uint64_t fileSize);
     void rewind() noexcept { readOffset_ = 0; }
+    void rewind(std::uint64_t start) { readOffset_ = start; }
 
     // Appends return the end of the complete record; neither synchronizes it.
     std::uint64_t writeFileBeforeImage(const FileBeforeImage &fileBeforeImage);
@@ -105,14 +119,21 @@ public:
     void sync();
     std::uint64_t size() const { return file_.size(); }
 
-    std::uint64_t writeJournalHeader(const JournalHeader &header);
+    void writeJournalHeader(const JournalHeader &header);
+    void writeJournalBoundary(const JournalBoundary &boundary, const std::uint8_t slot);
+
+    std::uint64_t validateJournalHeader(uuid_t &statementId);
+    std::optional<JournalBoundary> readJournalBoundary(const std::uint8_t slot);
 
 private:
     LinuxFile file_;
-    std::uint64_t appendOffset_{0};
+    std::uint64_t appendOffset_{JournalDataOffset};
     std::uint64_t readOffset_{0};
     std::uint64_t nextWriteSequence_{0};
     std::uint64_t nextReadSequence_{0};
+
+    uuid_t dbId_;
+    uuid_t statementId_;
     bool writeSequenceInitialized_ = false;
     bool appendFailed_ = false;
 

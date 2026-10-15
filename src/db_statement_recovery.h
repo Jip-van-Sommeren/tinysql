@@ -84,7 +84,10 @@ private:
     std::uint64_t appendOffset_ = 0;
     std::uint64_t syncOffset_ = 0;
     std::uint64_t recoveryEnd_ = 0;
-    uuid_t statementId_;
+
+    std::uint8_t activeBoundarySlot_ = 0; // A
+    std::uint64_t boundaryGeneration_ = 0;
+    uuid_t statementId_{};
     uuid_t dbId_{};
     bool recoveryReady_ = false;
 
