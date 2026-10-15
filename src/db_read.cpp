@@ -679,10 +679,11 @@ Page DataPageDecoder::decode()
 }
 
 RawPage readPageFromFile(
+    const LinuxDirectory &tablesDir,
     const std::filesystem::path &tablePath,
     std::uint32_t pageId)
 {
-    PageFile file{tablePath, LinuxFile::OpenMode::ReadOnly};
+    PageFile file{tablesDir, tablePath, LinuxFile::OpenMode::ReadOnly};
     return file.readPage(pageId);
 }
 

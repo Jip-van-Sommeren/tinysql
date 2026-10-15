@@ -173,6 +173,7 @@ private:
 };
 
 RawPage readPageFromFile(
+    const LinuxDirectory &tablesDir,
     const std::filesystem::path &tablePath,
     std::uint32_t pageId);
 

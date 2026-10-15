@@ -77,23 +77,22 @@ std::optional<Row> TableCursor::next()
 }
 
 Table Table::create(
-    const std::filesystem::path &dbRoot,
-    const std::filesystem::path &relTablePath,
+    const LinuxDirectory &tablesDir,
     const std::string &tableName,
     const std::string &magic,
     const std::vector<Column> &columns,
     const std::vector<Constraint> &constraints,
     StatementRecovery &statementRecovery)
 {
-    Table table{dbRoot, relTablePath, LinuxFile::OpenMode::CreateNew, statementRecovery};
+    Table table{tablesDir, tableName, LinuxFile::OpenMode::CreateNew, statementRecovery};
     table.initializeNewTable(tableName, magic, columns, constraints);
     return table;
 }
 
-Table Table::open(const std::filesystem::path &dbRoot,
+Table Table::open(const LinuxDirectory &tablesDir,
                   const std::filesystem::path &relTablePath, StatementRecovery &statementRecovery)
 {
-    Table table{dbRoot, relTablePath, LinuxFile::OpenMode::OpenExisting, statementRecovery};
+    Table table{tablesDir, relTablePath, LinuxFile::OpenMode::OpenExisting, statementRecovery};
     table.validateHeaderPage();
     return table;
 }
@@ -168,8 +167,8 @@ std::uint64_t Table::deleteRows(const BoundDelete &del)
     return deletedCount;
 }
 
-Table::Table(const std::filesystem::path &dbRoot, const std::filesystem::path &relTablePath, LinuxFile::OpenMode mode, StatementRecovery &statementRecovery)
-    : bufferManager(dbRoot, relTablePath, mode, statementRecovery)
+Table::Table(const LinuxDirectory &tablesDir, const std::filesystem::path &relTablePath, LinuxFile::OpenMode mode, StatementRecovery &statementRecovery)
+    : bufferManager(tablesDir, relTablePath, mode, statementRecovery)
 {
 }
 

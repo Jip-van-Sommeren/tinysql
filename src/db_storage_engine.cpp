@@ -48,13 +48,14 @@ StorageEngine::StorageEngine(
       dbRootDirectory_(std::move(lockedRoot)),
       tablesDirectory_(dbPath_ / "tables"),
       journalDirectory_(dbPath_ / "journal"),
-      statementRecovery_(path, dbId)
+      statementRecovery_(dbRootDirectory_, dbId)
 {
 }
 
 void StorageEngine::createMetaFile(const std::filesystem::path &dbPath, const uuid_t &dbId)
 {
-    LinuxFile dbMetaFile{dbPath / "db.meta", LinuxFile::OpenMode::CreateNew};
+    LinuxDirectory journalDir{dbPath / "journal"};
+    LinuxFile dbMetaFile{journalDir, dbPath / "db.meta", LinuxFile::OpenMode::CreateNew};
     ByteWriter writer{META_FILE_SIZE};
 
     writer.writeBytes(MetaMagic.data(), MetaMagic.size());
@@ -118,7 +119,7 @@ StorageEngine StorageEngine::open(
     LinuxDirectory root{path};
     root.lockExclusive();
 
-    LinuxFile dbMetaFile{path / "db.meta", LinuxFile::OpenMode::OpenExisting};
+    LinuxFile dbMetaFile{root, path / "db.meta", LinuxFile::OpenMode::OpenExisting};
 
     std::array<std::byte, META_FILE_SIZE> metaBytes{};
     dbMetaFile.readExactAt(0, metaBytes);
@@ -166,17 +167,16 @@ bool StorageEngine::tableExists(const std::string &name) const
     return std::filesystem::exists(getTablePath(name));
 }
 
-HeaderPage StorageEngine::getTableHeader(const std::string &name) const
+HeaderPage StorageEngine::getTableHeader(const std::string &tableName) const
 {
     requireReadable();
-    std::filesystem::path path = getTablePath(name);
 
-    if (!std::filesystem::exists(path))
+    if (!tablesDirectory_.entryExists(tableName))
     {
-        throw std::runtime_error("Table does not exist: " + name);
+        throw std::runtime_error("Table does not exist: " + tableName);
     }
 
-    RawPage rawPage = readPageFromFile(path, 0);
+    RawPage rawPage = readPageFromFile(tablesDirectory_, tableName, 0);
     Page page = decodeHeaderPage(rawPage);
 
     return std::get<HeaderPage>(page.data);
@@ -189,17 +189,15 @@ Table StorageEngine::createTable(
     const std::vector<Constraint> &constraints)
 {
     requireReadable();
-    const std::filesystem::path relativeTablePath =
-        std::filesystem::path{"tables"} / (tableName + ".table");
 
-    if (std::filesystem::exists(getTablePath(tableName)))
+    if (tablesDirectory_.entryExists(tableName))
     {
         throw std::runtime_error("Table already exists: " + tableName);
     }
 
     return Table::create(
-        dbPath_,
-        relativeTablePath,
+        tablesDirectory_,
+
         tableName,
         magic,
         columns,
@@ -210,13 +208,11 @@ Table StorageEngine::createTable(
 Table StorageEngine::openTable(const std::string &tableName)
 {
     requireReadable();
-    const std::filesystem::path relativeTablePath =
-        std::filesystem::path{"tables"} / (tableName + ".table");
 
-    if (!std::filesystem::exists(getTablePath(tableName)))
+    if (!tablesDirectory_.entryExists(tableName))
     {
         throw std::runtime_error("Table does not exist: " + tableName);
     }
 
-    return Table::open(dbPath_, relativeTablePath, statementRecovery_);
+    return Table::open(tablesDirectory_, tableName, statementRecovery_);
 }

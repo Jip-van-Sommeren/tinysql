@@ -8,6 +8,7 @@ class PageFile
 {
 public:
     explicit PageFile(
+        const LinuxDirectory &parent,
         const std::filesystem::path &path,
         LinuxFile::OpenMode mode = LinuxFile::OpenMode::OpenExisting);
 

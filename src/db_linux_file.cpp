@@ -11,8 +11,10 @@
 #include <sys/file.h>
 #include <unistd.h>
 #include <utility>
+#include <linux/openat2.h> /* Definition of RESOLVE_* constants */
+#include <sys/syscall.h>
 
-LinuxFile::LinuxFile(const std::filesystem::path &path, OpenMode mode)
+LinuxFile::LinuxFile(const LinuxDirectory &parent, const std::filesystem::path &path, OpenMode mode)
     : path_(path)
 {
     int flags = O_CLOEXEC;
@@ -32,10 +34,18 @@ LinuxFile::LinuxFile(const std::filesystem::path &path, OpenMode mode)
     default:
         throw std::invalid_argument("Invalid LinuxFile open mode");
     }
+    struct open_how how{};
+    how.flags = flags;
+    how.resolve = RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS;
 
     do
     {
-        fd_ = ::open(path_.c_str(), flags, 0600);
+        fd_ = static_cast<int>(::syscall(
+            SYS_openat2,
+            parent.getFd(),
+            path.c_str(),
+            &how,
+            sizeof(how)));
     } while (fd_ == -1 && errno == EINTR);
     if (fd_ == -1)
     {
@@ -206,21 +216,20 @@ void LinuxFile::sync()
     }
 }
 
-void LinuxFile::deleteFile()
-{
-    closeDescriptor();
-    if (::unlink(path_.c_str()) == -1)
-    {
-        const int error = errno;
+// void LinuxFile::deleteFile()
+// {
+//     closeDescriptor();
+//     if (::unlink(path_.c_str()) == -1)
+//     {
+//         const int error = errno;
 
-        throwError("unlink", error);
-    }
-}
+//         throwError("unlink", error);
+//     }
+// }
 
-void LinuxFile::deleteFile(const int parentFd, const std::string &fileName)
+void LinuxDirectory::deleteFile(const std::string &fileName)
 {
-    closeDescriptor();
-    if (::unlinkat(parentFd, fileName.c_str(), 0) == -1)
+    if (::unlinkat(fd_, fileName.c_str(), 0) == -1)
     {
         const int error = errno;
 
@@ -240,9 +249,35 @@ LinuxDirectory::LinuxDirectory(const std::filesystem::path &path)
 
     do
     {
+
         fd_ = ::open(
             path.c_str(),
             O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    } while (fd_ == -1 && errno == EINTR);
+
+    if (fd_ == -1)
+    {
+        const int error = errno;
+        throwError("open directory", error);
+    }
+}
+
+LinuxDirectory::LinuxDirectory(const LinuxDirectory &parent, const std::filesystem::path &path)
+    : path_(path)
+{
+
+    struct open_how how{};
+    how.flags = O_RDONLY | O_DIRECTORY | O_CLOEXEC;
+    how.resolve = RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS;
+
+    do
+    {
+        fd_ = static_cast<int>(::syscall(
+            SYS_openat2,
+            parent.getFd(),
+            path.c_str(),
+            &how,
+            sizeof(how)));
     } while (fd_ == -1 && errno == EINTR);
 
     if (fd_ == -1)
@@ -334,4 +369,27 @@ void LinuxDirectory::throwError(const char *operation, int error) const
 {
     throw std::system_error(error, std::generic_category(),
                             std::string{operation} + " failed: " + path_.string());
+}
+
+bool LinuxDirectory::entryExists(
+    const std::filesystem::path &fileName) const
+{
+    ensureOpen();
+
+    // fileName must be a validated single filename component.
+    struct stat info{};
+
+    if (::fstatat(fd_, fileName.c_str(), &info,
+                  AT_SYMLINK_NOFOLLOW) == 0)
+    {
+        return true;
+    }
+
+    const int error = errno;
+    if (error == ENOENT)
+    {
+        return false;
+    }
+
+    throwError("fstatat", error);
 }

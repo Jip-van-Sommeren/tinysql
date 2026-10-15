@@ -64,7 +64,7 @@ public:
     using PageReader = std::function<Page(const RawPage &)>;
 
     explicit BufferManager(
-        std::filesystem::path dbRoot, std::filesystem::path relTablePath,
+        const LinuxDirectory &tablesDir, std::filesystem::path relTablePath,
         LinuxFile::OpenMode mode, StatementRecovery &statementRecovery);
     BufferManager(const BufferManager &) = delete;
     BufferManager &operator=(const BufferManager &) = delete;

@@ -20,7 +20,7 @@
 
 namespace
 {
-    PageFile openPageFile(const std::filesystem::path &dbRoot,
+    PageFile openPageFile(const LinuxDirectory &tablesDir,
                           const std::filesystem::path &relativePath,
                           LinuxFile::OpenMode mode,
                           StatementRecovery &recovery)
@@ -34,7 +34,7 @@ namespace
         }
         try
         {
-            return PageFile{dbRoot / relativePath, mode};
+            return PageFile{tablesDir, relativePath, mode};
         }
         catch (...)
         {
@@ -109,11 +109,11 @@ void PageGuard::markDirty()
     bufferManager_->markDirty(pageId_);
 }
 
-BufferManager::BufferManager(std::filesystem::path dbRoot,
+BufferManager::BufferManager(const LinuxDirectory &tablesDir,
                              std::filesystem::path relTablePath,
                              LinuxFile::OpenMode mode,
                              StatementRecovery &statementRecovery)
-    : pageFile_(openPageFile(dbRoot, relTablePath, mode, statementRecovery)),
+    : pageFile_(openPageFile(tablesDir, relTablePath, mode, statementRecovery)),
       statementRecovery_(statementRecovery),
       relativeTablePath_(relTablePath),
       cacheEpoch_(statementRecovery.cacheEpoch()),

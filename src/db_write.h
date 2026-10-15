@@ -216,7 +216,7 @@ RawPage encodePage(const Page &page);
 std::size_t encodedSlotSize();
 std::size_t encodedRowSize(const HeaderPage &tableHeader, const Row &row);
 
-void writePageToFile(
-    const std::filesystem::path &path,
-    std::uint32_t pageId,
-    const RawPage &page);
+// void writePageToFile(
+//     const std::filesystem::path &path,
+//     std::uint32_t pageId,
+//     const RawPage &page);

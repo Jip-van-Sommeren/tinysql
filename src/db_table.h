@@ -42,13 +42,13 @@ class Table
 {
 public:
     static Table create(
-        const std::filesystem::path &dbRoot, const std::filesystem::path &relTablePath,
+        const LinuxDirectory &tablesDir,
         const std::string &tableName,
         const std::string &magic,
         const std::vector<Column> &columns,
         const std::vector<Constraint> &constraints, StatementRecovery &statementRecovery);
 
-    static Table open(const std::filesystem::path &dbRoot, const std::filesystem::path &relTablePath, StatementRecovery &statementRecovery);
+    static Table open(const LinuxDirectory &dbRoot, const std::filesystem::path &relTablePath, StatementRecovery &statementRecovery);
 
     void insertRows(const BoundInsert &insert);
     TableCursor scan() &;
@@ -57,7 +57,7 @@ public:
 private:
     friend class TableCursor;
 
-    explicit Table(const std::filesystem::path &dbRoot, const std::filesystem::path &relTablePath, LinuxFile::OpenMode mode, StatementRecovery &statementRecovery);
+    explicit Table(const LinuxDirectory &tablesDir, const std::filesystem::path &relTablePath, LinuxFile::OpenMode mode, StatementRecovery &statementRecovery);
 
     BufferManager bufferManager;
 

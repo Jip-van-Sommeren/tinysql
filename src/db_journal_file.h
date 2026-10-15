@@ -77,9 +77,9 @@ class JournalFile
 {
 public:
     // New journals are created exclusively. Reopening must be explicit.
-    explicit JournalFile(
-        const std::filesystem::path &path,
-        LinuxFile::OpenMode mode = LinuxFile::OpenMode::CreateNew);
+    explicit JournalFile(const LinuxDirectory &parent,
+                         const std::filesystem::path &path,
+                         LinuxFile::OpenMode mode = LinuxFile::OpenMode::CreateNew);
 
     static constexpr std::size_t MaxPathBytes = 4096;
     static constexpr std::size_t maxFileRecord =

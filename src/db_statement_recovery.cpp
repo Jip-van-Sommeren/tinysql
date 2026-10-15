@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <set>
 #include <zlib.h>
 #include <uuid/uuid.h>
 
@@ -21,8 +22,15 @@
 //     // path_length and  pageId = 2* sizeof(std::uint32_t)
 // }
 
-StatementRecovery::StatementRecovery(const std::filesystem::path &path, const uuid_t &dbId)
-    : dbRootPath_(path), journalPath_(path / "journal" / "journal.log") { uuid_copy(dbId_, dbId); }
+StatementRecovery::StatementRecovery(
+    const LinuxDirectory &root,
+    const uuid_t &dbId)
+    : dbRootDir_(root, "."),
+      journalDir_(dbRootDir_, "journal"),
+      tableDir_(dbRootDir_, "tables")
+{
+    uuid_copy(dbId_, dbId);
+}
 
 void StatementRecovery::requireWritableStatement() const
 {
@@ -41,7 +49,7 @@ void StatementRecovery::requireReadable() const
     }
 }
 
-std::uint64_t StatementRecovery::validateJournalForRecovery()
+void StatementRecovery::validateJournalForRecovery(std::uint64_t end)
 {
 
     if (!journalFile_)
@@ -49,7 +57,6 @@ std::uint64_t StatementRecovery::validateJournalForRecovery()
         throw std::logic_error("No journal open for recovery");
     }
 
-    const auto end = journalFile_->findRecoveryEnd(journalFile_->size());
     journalFile_->rewind();
 
     const auto header = journalFile_->readJournalHeader();
@@ -59,6 +66,7 @@ std::uint64_t StatementRecovery::validateJournalForRecovery()
         throw std::runtime_error("Journal belongs to another database");
     }
     std::unordered_map<std::filesystem::path, FileBeforeImage> rollbackFiles;
+    std::set<std::pair<std::filesystem::path, std::uint32_t>> seenPages;
     while (auto image = journalFile_->readNext(end))
     {
         std::visit(
@@ -68,6 +76,11 @@ std::uint64_t StatementRecovery::validateJournalForRecovery()
 
                 if constexpr (std::is_same_v<T, PageBeforeImage>)
                 {
+                    if (!seenPages.emplace(value.relativeFilePath, value.pageId).second)
+                    {
+                        throw std::runtime_error("Duplicate page before-image in journal");
+                    }
+
                     const auto metadata = rollbackFiles.find(value.relativeFilePath);
                     if (metadata == rollbackFiles.end() || metadata->second.newFile ||
                         std::uint64_t{value.pageId} * PAGE_SIZE >= metadata->second.originalSize)
@@ -93,7 +106,7 @@ std::uint64_t StatementRecovery::validateJournalForRecovery()
             image.value().record);
     }
     journalFile_->rewind();
-    return end;
+    return;
 }
 
 void StatementRecovery::initializeForRecover()
@@ -102,16 +115,16 @@ void StatementRecovery::initializeForRecover()
         throw std::logic_error("A statement is already active");
     failed_ = true; // No normal access until replay and cleanup finish.
     journalFile_.emplace(
-        journalPath_,
+        journalDir_, "journal.log",
         LinuxFile::OpenMode::OpenExisting);
-    recoveryEnd_ = validateJournalForRecovery();
-    recoveryReady_ = true;
     const auto end = journalFile_->size();
+    recoveryEnd_ = end;
+    recoveryReady_ = true;
 
     journalFile_->sync();
 
-    LinuxDirectory directory{journalPath_.parent_path()};
-    directory.sync();
+    // LinuxDirectory directory{journalDir_.getPath().parent_path()};
+    journalDir_.sync();
 
     // Update these only after both syncs succeed.
     appendOffset_ = end;
@@ -130,13 +143,9 @@ void StatementRecovery::begin()
         throw std::overflow_error("Statement generation exhausted");
 
     journalFile_.emplace(
-        journalPath_,
+        journalDir_, "journal.log",
         LinuxFile::OpenMode::CreateNew);
-    ++generation_;
-    recoveryReady_ = true;
 
-    journalDirectoryNeedsSync_ = true;
-    active_ = true;
     uuid_generate_random(statementId_);
 
     JournalHeader header{};
@@ -151,6 +160,11 @@ void StatementRecovery::begin()
     const auto end = journalFile_->writeJournalHeader(header);
     appendOffset_ = end;
     recoveryEnd_ = end;
+    ++generation_;
+    recoveryReady_ = true;
+
+    journalDirectoryNeedsSync_ = true;
+    active_ = true;
     ensureDurable();
 }
 
@@ -191,10 +205,11 @@ void StatementRecovery::captureFileOnce(const std::filesystem::path &relativePat
     requireWritableStatement();
     try
     {
-        const auto resolvedPath = dbRootPath_ / relativePath;
-        if (newFile && std::filesystem::exists(std::filesystem::symlink_status(resolvedPath)))
+
+        // const auto resolvedPath = tableDir_.getPath() / relativePath;
+        if (newFile && tableDir_.entryExists(relativePath))
         {
-            throw std::runtime_error("Table already exists: " + resolvedPath.string());
+            throw std::runtime_error("Table already exists: " + relativePath.string());
         }
         if (const auto existing = originalFiles_.find(relativePath); existing != originalFiles_.end())
         {
@@ -204,7 +219,7 @@ void StatementRecovery::captureFileOnce(const std::filesystem::path &relativePat
         }
 
         // A new file does not exist yet; opening it here would violate write-ahead ordering.
-        const auto originalSize = newFile ? std::uint64_t{0} : PageFile(resolvedPath).size();
+        const auto originalSize = newFile ? std::uint64_t{0} : PageFile(tableDir_, relativePath).size();
         if (originalSize % PAGE_SIZE != 0)
             throw std::runtime_error("Invalid original table file size");
 
@@ -295,12 +310,11 @@ void StatementRecovery::rollback()
     if (retirement_ == Retirement::Commit)
         throw std::runtime_error("Commit outcome is uncertain; reopen the database before recovery");
     failed_ = true;
-    if (!recoveryReady_)
-        throw std::runtime_error("Journal has not been validated for recovery");
+
     if (retirement_ == Retirement::Rollback)
     {
-        LinuxDirectory directory{journalPath_.parent_path()};
-        directory.sync();
+        // LinuxDirectory directory{journalPath_.parent_path()};
+        journalDir_.sync();
         finish();
         return;
     }
@@ -309,6 +323,7 @@ void StatementRecovery::rollback()
     std::unordered_map<std::filesystem::path, PageFile> openedFiles;
     std::unordered_map<std::filesystem::path, FileBeforeImage> rollbackFiles;
 
+    validateJournalForRecovery(recoveryEnd_);
     journalFile_->rewind();
 
     (void)journalFile_->readJournalHeader(); // Skip header; it is not needed for recovery.
@@ -329,12 +344,9 @@ void StatementRecovery::rollback()
                         throw std::runtime_error("Page before-image has no valid original file metadata");
                     }
 
-                    const std::filesystem::path resolvedTablePath =
-                        dbRootPath_ / value.relativeFilePath;
-
                     auto [it, inserted] = openedFiles.try_emplace(
                         value.relativeFilePath,
-                        resolvedTablePath,
+                        tableDir_, value.relativeFilePath.filename(),
                         LinuxFile::OpenMode::OpenExisting);
 
                     PageFile &file = it->second;
@@ -361,37 +373,37 @@ void StatementRecovery::rollback()
             image.value().record);
     }
 
-    std::unordered_set<std::filesystem::path> changedDirectories;
+    bool tableDirChanged{false};
+
     for (const auto &[relativePath, metadata] : rollbackFiles)
     {
         if (metadata.newFile)
         {
             // Already absent is success: creation or a previous rollback may have failed.
-            (void)std::filesystem::remove(dbRootPath_ / relativePath);
-            changedDirectories.insert((dbRootPath_ / relativePath).parent_path());
+            // LinuxDirectory dir{relativePath.parent_path()};
+            tableDir_.deleteFile(relativePath.filename());
+            // (void)std::filesystem::remove(dbRootPath_ / relativePath);
+
+            tableDirChanged = true;
+
             continue;
         }
         auto [it, inserted] = openedFiles.try_emplace(
             relativePath,
-            dbRootPath_ / relativePath,
+            tableDir_, relativePath.filename(),
             LinuxFile::OpenMode::OpenExisting);
 
         it->second.resize(metadata.originalSize);
         it->second.sync();
     }
-    for (const auto &path : changedDirectories)
-    {
-        LinuxDirectory directory{path};
-        directory.sync();
-    }
-    if (!std::filesystem::remove(journalPath_))
-    {
-        throw std::runtime_error("Expected journal file was missing");
-    }
+    if (tableDirChanged)
+        tableDir_.sync();
+    journalDir_.deleteFile("journal.log");
+
     retirement_ = Retirement::Rollback;
     ++cacheEpoch_;
-    LinuxDirectory directory{journalPath_.parent_path()};
-    directory.sync();
+    // LinuxDirectory directory{journalPath_.parent_path()};
+    journalDir_.sync();
 
     finish();
 }
@@ -412,22 +424,21 @@ void StatementRecovery::commit()
         }
         // Table mutation methods synchronize file contents before commit. Persist
         // new names too, including callers using StorageEngine directly.
-        std::unordered_set<std::filesystem::path> changedDirectories;
+        bool tableDirChanged{false};
         for (const auto &[relativePath, metadata] : originalFiles_)
         {
             if (metadata.beforeImage.newFile)
-                changedDirectories.insert((dbRootPath_ / relativePath).parent_path());
+            {
+                tableDirChanged = true;
+                break;
+            }
         }
-        for (const auto &path : changedDirectories)
-        {
-            LinuxDirectory directory{path};
-            directory.sync();
-        }
-        if (!std::filesystem::remove(journalPath_))
-            throw std::runtime_error("Expected journal file was missing");
+        if (tableDirChanged)
+            tableDir_.sync();
+        journalDir_.deleteFile("journal.log");
+
         retirement_ = Retirement::Commit;
-        LinuxDirectory directory{journalPath_.parent_path()};
-        directory.sync();
+        journalDir_.sync();
     }
     catch (...)
     {
@@ -484,8 +495,7 @@ void StatementRecovery::ensureDurable()
 
         if (journalDirectoryNeedsSync_)
         {
-            LinuxDirectory directory{journalPath_.parent_path()};
-            directory.sync();
+            journalDir_.sync();
         }
     }
     catch (...)

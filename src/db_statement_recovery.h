@@ -22,7 +22,7 @@ private:
     void trackParticipant(const std::shared_ptr<Participant> &participant);
 
 public:
-    explicit StatementRecovery(const std::filesystem::path &path, const uuid_t &dbId);
+    explicit StatementRecovery(const LinuxDirectory &root, const uuid_t &dbId);
 
     void begin();
     void initializeForRecover();
@@ -44,7 +44,7 @@ public:
     JournalCoverage requiredCoverageForPage(const std::filesystem::path &relativePath, std::uint32_t pageId) const;
     void validateCoverage(const std::filesystem::path &relativePath, std::uint32_t pageId,
                           JournalCoverage coverage) const;
-    std::uint64_t validateJournalForRecovery();
+    void validateJournalForRecovery(std::uint64_t end);
 
     void commit();
 
@@ -55,8 +55,9 @@ private:
         JournalCoverage coverage;
     };
     std::optional<JournalFile> journalFile_;
-    const std::filesystem::path dbRootPath_;
-    const std::filesystem::path journalPath_;
+    LinuxDirectory dbRootDir_;
+    LinuxDirectory journalDir_;
+    LinuxDirectory tableDir_;
     std::unordered_map<
         std::filesystem::path,
         std::unordered_map<std::uint32_t, JournalCoverage>>

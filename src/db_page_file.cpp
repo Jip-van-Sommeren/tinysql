@@ -1,7 +1,7 @@
 #include "db_page_file.h"
 
-PageFile::PageFile(const std::filesystem::path &path, LinuxFile::OpenMode mode)
-    : file_(path, mode)
+PageFile::PageFile(const LinuxDirectory &parent, const std::filesystem::path &path, LinuxFile::OpenMode mode)
+    : file_(parent, path, mode)
 {
 }
 

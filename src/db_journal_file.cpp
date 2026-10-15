@@ -53,8 +53,8 @@ std::size_t FileBeforeImage::size() const
     return 4 + 8 + 1 + encodedPath(relativeFilePath).size() + JournalRecordHeaderBytes; // path length + original size + new file flag + path + record header
 }
 
-JournalFile::JournalFile(const std::filesystem::path &path, LinuxFile::OpenMode mode)
-    : file_(path, mode), appendOffset_(file_.size()), writeSequenceInitialized_(appendOffset_ == 0)
+JournalFile::JournalFile(const LinuxDirectory &parent, const std::filesystem::path &path, LinuxFile::OpenMode mode)
+    : file_(parent, path, mode), appendOffset_(file_.size()), writeSequenceInitialized_(appendOffset_ == 0)
 {
 }
 
