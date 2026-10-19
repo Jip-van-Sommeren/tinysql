@@ -54,7 +54,7 @@ std::size_t FileBeforeImage::size() const
 }
 
 JournalFile::JournalFile(const LinuxDirectory &parent, const std::filesystem::path &path, const uuid_t &dbId, const uuid_t &statementId, LinuxFile::OpenMode mode)
-    : file_(parent, path, mode), appendOffset_(mode == LinuxFile::OpenMode::CreateNew ? JournalDataOffset : file_.size()), writeSequenceInitialized_(appendOffset_ == JournalDataOffset)
+    : file_(parent, path, mode), appendOffset_(mode == LinuxFile::OpenMode::CreateNew ? JournalDataOffset : file_.size()), writeSequenceInitialized_(mode == LinuxFile::OpenMode::CreateNew)
 {
     uuid_copy(dbId_, dbId);
     uuid_copy(statementId_, statementId);
@@ -109,7 +109,6 @@ std::uint64_t JournalFile::validateJournalHeader(uuid_t &statementId)
     const auto header = readJournalHeader();
     uuid_copy(statementId_, header.statementId);
 
-    uuid_copy(statementId, statementId_);
     const auto slot0 = readJournalBoundary(0);
     const auto slot1 = readJournalBoundary(1);
     if (slot0 && slot1 &&

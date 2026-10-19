@@ -84,7 +84,7 @@ Table Table::create(
     const std::vector<Constraint> &constraints,
     StatementRecovery &statementRecovery)
 {
-    Table table{tablesDir, tableName, LinuxFile::OpenMode::CreateNew, statementRecovery};
+    Table table{tablesDir, tableName + ".table", LinuxFile::OpenMode::CreateNew, statementRecovery};
     table.initializeNewTable(tableName, magic, columns, constraints);
     return table;
 }

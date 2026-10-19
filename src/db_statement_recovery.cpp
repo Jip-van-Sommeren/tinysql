@@ -1,5 +1,6 @@
 #include "db_statement_recovery.h"
 #include <stdexcept>
+#include <system_error>
 #include <algorithm>
 #include <limits>
 #include <cstddef>
@@ -69,7 +70,7 @@ void StatementRecovery::validateJournalForRecovery(std::uint64_t end)
 
     if (uuid_compare(header.statementId, statementId_) != 0)
     {
-        throw std::runtime_error("Journal belongs to another database");
+        throw std::runtime_error("Journal belongs to another statement");
     }
 
     std::unordered_map<std::filesystem::path, FileBeforeImage> rollbackFiles;
@@ -113,7 +114,7 @@ void StatementRecovery::validateJournalForRecovery(std::uint64_t end)
             },
             payload);
     }
-    journalFile_->rewind(JournalDataOffset);
+    journalFile_->rewind();
     return;
 }
 
@@ -396,7 +397,17 @@ void StatementRecovery::rollback()
         {
             // Already absent is success: creation or a previous rollback may have failed.
             // LinuxDirectory dir{relativePath.parent_path()};
-            tableDir_.deleteFile(relativePath.filename());
+            try
+            {
+                tableDir_.deleteFile(relativePath.filename());
+            }
+            catch (const std::system_error &error)
+            {
+                // Creation may have failed, or an earlier rollback already
+                // removed the file before its directory sync failed.
+                if (error.code() != std::errc::no_such_file_or_directory)
+                    throw;
+            }
             // (void)std::filesystem::remove(dbRootPath_ / relativePath);
 
             tableDirChanged = true;

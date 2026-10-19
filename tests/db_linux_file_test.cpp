@@ -8,6 +8,8 @@
 #include <cstdarg>
 #include <cstdlib>
 #include <fcntl.h>
+#include <linux/openat2.h>
+#include <sys/syscall.h>
 #include <limits>
 #include <optional>
 #include <stdexcept>
@@ -87,6 +89,26 @@ namespace
 // production API. Real calls still operate on isolated temporary files.
 extern "C"
 {
+    long __real_syscall(long, ...);
+
+    long __wrap_syscall(long number, ...)
+    {
+        // Production uses syscall() only for openat2; fail on an unexpected call.
+        if (number != SYS_openat2) { errno = ENOSYS; return -1; }
+        va_list args;
+        va_start(args, number);
+        const int parent = va_arg(args, int);
+        const char *path = va_arg(args, const char *);
+        const auto *how = va_arg(args, struct open_how *);
+        const auto size = va_arg(args, size_t);
+        va_end(args);
+        if (interrupted(faults.openInterrupts)) return -1;
+        if (faults.openError) { errno = faults.openError; return -1; }
+        const auto result = __real_syscall(number, parent, path, how, size);
+        if (result != -1) faults.lastOpened = static_cast<int>(result);
+        return result;
+    }
+
     int __real_open(const char *, int, ...);
     ssize_t __real_pread(int, void *, size_t, off_t);
     ssize_t __real_pwrite(int, const void *, size_t, off_t);
@@ -218,16 +240,17 @@ namespace
 
     void testOpeningAndOwnership(const std::filesystem::path &directory)
     {
+        LinuxDirectory parent{directory};
         const auto path = directory / "ownership";
-        requireThrows<std::system_error>([&] { LinuxFile missing(path); }, "open");
+        requireThrows<std::system_error>([&] { LinuxFile missing(parent, path.filename()); }, "open");
         require(!std::filesystem::exists(path), "OpenExisting created a file");
         faults.openInterrupts = 2;
-        LinuxFile first(path, Mode::CreateNew);
+        LinuxFile first(parent, path.filename(), Mode::CreateNew);
         const int firstFd = faults.lastOpened;
         require((::fcntl(firstFd, F_GETFD) & FD_CLOEXEC) != 0, "Missing close-on-exec");
         const std::array<std::byte, 3> bytes{std::byte{1}, std::byte{2}, std::byte{3}};
         first.writeAllAt(0, bytes);
-        requireThrows<std::system_error>([&] { LinuxFile duplicate(path, Mode::CreateNew); }, "open");
+        requireThrows<std::system_error>([&] { LinuxFile duplicate(parent, path.filename(), Mode::CreateNew); }, "open");
         require(first.size() == 3, "Exclusive creation overwrote a file");
 
         LinuxFile moved(std::move(first));
@@ -235,7 +258,7 @@ namespace
         require(moved.size() == 3, "Move construction lost the descriptor");
         unsigned closesBeforeDestruction = 0;
         {
-            LinuxFile target(directory / "target", Mode::CreateNew);
+            LinuxFile target(parent, "target", Mode::CreateNew);
             const int oldFd = faults.lastOpened;
             target = std::move(moved);
             require(::fcntl(oldFd, F_GETFD) == -1 && errno == EBADF,
@@ -252,24 +275,25 @@ namespace
         require(faults.closes == closesBeforeDestruction + 1, "close was retried after EINTR");
         require(::fcntl(firstFd, F_GETFD) == -1 && errno == EBADF, "Destructor leaked descriptor");
 
-        LinuxFile reopened(path);
+        LinuxFile reopened(parent, path.filename());
         require(reopened.size() == 3, "Reopening lost data");
-        LinuxFile readOnly(path, Mode::ReadOnly);
+        LinuxFile readOnly(parent, path.filename(), Mode::ReadOnly);
         std::array<std::byte, 3> restored{};
         readOnly.readExactAt(0, restored);
         require(restored == bytes, "Read-only open could not read");
         requireThrows<std::system_error>([&] { readOnly.writeAllAt(0, bytes); }, "pwrite");
         const auto closesBefore = faults.closes;
-        requireThrows<std::runtime_error>([&] { LinuxFile invalid(directory, Mode::ReadOnly); }, "regular file");
+        requireThrows<std::runtime_error>([&] { LinuxFile invalid(parent, ".", Mode::ReadOnly); }, "regular file");
         require(faults.closes == closesBefore + 1, "Constructor failure leaked descriptor");
         faults.openError = EACCES;
-        requireThrows<std::system_error>([&] { LinuxFile denied(path); }, path.string());
+        requireThrows<std::system_error>([&] { LinuxFile denied(parent, path.filename()); }, path.filename().string());
         faults.openError = 0;
     }
 
     void testTransfersAndErrors(const std::filesystem::path &directory)
     {
-        LinuxFile file(directory / "transfers", Mode::CreateNew);
+        LinuxDirectory parent{directory};
+        LinuxFile file(parent, "transfers", Mode::CreateNew);
         const std::array<std::byte, 5> bytes{
             std::byte{5}, std::byte{4}, std::byte{3}, std::byte{2}, std::byte{1}};
         faults.maxTransfer = 2;
@@ -328,22 +352,26 @@ namespace
 
     void testFailedJournalAppend(const std::filesystem::path &directory)
     {
+        LinuxDirectory parent{directory};
         const auto path = directory / "partial-journal";
-        JournalFile journal(path);
-        journal.writeJournalHeader(journal_test::header());
+        JournalFile journal(parent, path.filename(), journal_test::DatabaseId, journal_test::StatementId);
+        journal_test::initialize(journal);
         (void)journal.readJournalHeader();
+        faults.readError = EIO;
+        requireThrows<std::system_error>([&] { (void)journal.readJournalBoundary(0); }, "pread");
+        faults.readError = 0;
         const PageBeforeImage record{.relativeFilePath = "tables/a.table", .pageId = 1, .originalPage = {}};
         faults.writeBudget = 10;
         requireThrows<std::system_error>([&] { journal.writePage(record); }, "pwrite");
         faults.writeBudget.reset();
-        require(std::filesystem::file_size(path) == JournalHeaderBytes + 10, "Partial-write injection did not run");
+        require(std::filesystem::file_size(path) == JournalDataOffset + 10, "Partial-write injection did not run");
         requireThrows<std::runtime_error>([&] { journal.writePage(record); }, "previously failed");
         requireThrows<std::runtime_error>([&] {
             journal.writeFileBeforeImage(FileBeforeImage{"tables/new.table", 0, true});
         }, "previously failed");
         requireThrows<std::runtime_error>([&] { journal.sync(); }, "previously failed");
         requireThrows<std::runtime_error>([&] { journal.readNext(); }, "Truncated");
-        require(std::filesystem::file_size(path) == JournalHeaderBytes + 10, "Failed journal was appended again");
+        require(std::filesystem::file_size(path) == JournalDataOffset + 10, "Failed journal was appended again");
     }
 }
 

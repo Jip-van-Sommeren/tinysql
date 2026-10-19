@@ -17,6 +17,8 @@ function(db_configure_target target_name usage_requirement)
             -Wall
             -Wextra
             -Wpedantic
+            -Werror
+            -Wconversion
         )
     endif()
 endfunction()
@@ -77,7 +79,7 @@ if(BUILD_TESTING)
     db_configure_target(db_linux_file_test PRIVATE)
     target_link_libraries(db_linux_file_test PRIVATE db_core)
     target_link_options(db_linux_file_test PRIVATE
-        -Wl,--wrap=open -Wl,--wrap=pread -Wl,--wrap=pwrite
+        -Wl,--wrap=open -Wl,--wrap=syscall -Wl,--wrap=pread -Wl,--wrap=pwrite
         -Wl,--wrap=fstat -Wl,--wrap=ftruncate -Wl,--wrap=fsync -Wl,--wrap=close
     )
     add_test(NAME db_linux_file_test COMMAND db_linux_file_test)
@@ -126,7 +128,7 @@ if(BUILD_TESTING)
     db_configure_target(db_statement_recovery_test PRIVATE)
     target_link_libraries(db_statement_recovery_test PRIVATE db_core)
     target_link_options(db_statement_recovery_test PRIVATE
-        -Wl,--wrap=open -Wl,--wrap=pwrite -Wl,--wrap=fsync
+        -Wl,--wrap=open -Wl,--wrap=syscall -Wl,--wrap=pwrite -Wl,--wrap=fsync
     )
     add_test(NAME db_statement_recovery_test COMMAND db_statement_recovery_test)
 endif()

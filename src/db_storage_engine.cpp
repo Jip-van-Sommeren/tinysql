@@ -54,8 +54,8 @@ StorageEngine::StorageEngine(
 
 void StorageEngine::createMetaFile(const std::filesystem::path &dbPath, const uuid_t &dbId)
 {
-    LinuxDirectory journalDir{dbPath / "journal"};
-    LinuxFile dbMetaFile{journalDir, dbPath / "db.meta", LinuxFile::OpenMode::CreateNew};
+    LinuxDirectory root{dbPath};
+    LinuxFile dbMetaFile{root, "db.meta", LinuxFile::OpenMode::CreateNew};
     ByteWriter writer{META_FILE_SIZE};
 
     writer.writeBytes(MetaMagic.data(), MetaMagic.size());
@@ -119,7 +119,7 @@ StorageEngine StorageEngine::open(
     LinuxDirectory root{path};
     root.lockExclusive();
 
-    LinuxFile dbMetaFile{root, path / "db.meta", LinuxFile::OpenMode::OpenExisting};
+    LinuxFile dbMetaFile{root, "db.meta", LinuxFile::OpenMode::OpenExisting};
 
     std::array<std::byte, META_FILE_SIZE> metaBytes{};
     dbMetaFile.readExactAt(0, metaBytes);
@@ -171,12 +171,13 @@ HeaderPage StorageEngine::getTableHeader(const std::string &tableName) const
 {
     requireReadable();
 
-    if (!tablesDirectory_.entryExists(tableName))
+    const auto fileName = getTablePath(tableName).filename();
+    if (!tablesDirectory_.entryExists(fileName))
     {
         throw std::runtime_error("Table does not exist: " + tableName);
     }
 
-    RawPage rawPage = readPageFromFile(tablesDirectory_, tableName, 0);
+    RawPage rawPage = readPageFromFile(tablesDirectory_, fileName, 0);
     Page page = decodeHeaderPage(rawPage);
 
     return std::get<HeaderPage>(page.data);
@@ -190,7 +191,7 @@ Table StorageEngine::createTable(
 {
     requireReadable();
 
-    if (tablesDirectory_.entryExists(tableName))
+    if (tablesDirectory_.entryExists(getTablePath(tableName).filename()))
     {
         throw std::runtime_error("Table already exists: " + tableName);
     }
@@ -209,10 +210,11 @@ Table StorageEngine::openTable(const std::string &tableName)
 {
     requireReadable();
 
-    if (!tablesDirectory_.entryExists(tableName))
+    const auto fileName = getTablePath(tableName).filename();
+    if (!tablesDirectory_.entryExists(fileName))
     {
         throw std::runtime_error("Table does not exist: " + tableName);
     }
 
-    return Table::open(tablesDirectory_, tableName, statementRecovery_);
+    return Table::open(tablesDirectory_, fileName, statementRecovery_);
 }

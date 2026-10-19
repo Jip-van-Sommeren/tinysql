@@ -52,7 +52,7 @@ namespace
 
     std::vector<std::byte> readFile(const std::filesystem::path &path)
     {
-        LinuxFile file{path, LinuxFile::OpenMode::ReadOnly};
+        LinuxFile file{LinuxDirectory{path.parent_path()}, path.filename(), LinuxFile::OpenMode::ReadOnly};
         std::vector<std::byte> bytes(static_cast<std::size_t>(file.size()));
         file.readExactAt(0, bytes);
         return bytes;
@@ -67,8 +67,8 @@ namespace
         const auto unrelated = directory.path / "unrelated";
         std::filesystem::create_directories(unrelated / "tables");
         {
-            LinuxFile decoy{unrelated / "tables/items.table", LinuxFile::OpenMode::CreateNew};
-            LinuxFile missing{unrelated / "tables/missing.table", LinuxFile::OpenMode::CreateNew};
+            LinuxFile decoy{LinuxDirectory{(unrelated / "tables/items.table").parent_path()}, (unrelated / "tables/items.table").filename(), LinuxFile::OpenMode::CreateNew};
+            LinuxFile missing{LinuxDirectory{(unrelated / "tables/missing.table").parent_path()}, (unrelated / "tables/missing.table").filename(), LinuxFile::OpenMode::CreateNew};
         }
         WorkingDirectory workingDirectory{unrelated};
 
@@ -136,7 +136,7 @@ namespace
         {
             auto engine = StorageEngine::open(root);
             engine.beginStatement();
-            JournalFile journal(root / "journal/journal.log", LinuxFile::OpenMode::ReadOnly);
+            JournalFile journal(LinuxDirectory{root / "journal"}, "journal.log", identity.bytes, journal_test::StatementId, LinuxFile::OpenMode::ReadOnly);
             const auto header = journal.readJournalHeader();
             require(uuid_compare(header.dbId, identity.bytes) == 0 && !uuid_is_null(header.statementId),
                     "Statement journal lost its database or statement identity");
@@ -144,7 +144,7 @@ namespace
         }
         const auto reject = [&](journal_test::Bytes bytes, const std::string &message)
         {
-            LinuxFile meta(metaPath);
+            LinuxFile meta(LinuxDirectory{metaPath.parent_path()}, metaPath.filename());
             meta.resize(0);
             meta.writeAllAt(0, bytes);
             requireError([&] { (void)StorageEngine::open(root); }, message);
@@ -162,7 +162,7 @@ namespace
         reject(bytes, "version");
         bytes = original; bytes.pop_back();
         reject(bytes, "EOF");
-        LinuxFile meta(metaPath);
+        LinuxFile meta(LinuxDirectory{metaPath.parent_path()}, metaPath.filename());
         meta.resize(0);
         meta.writeAllAt(0, original);
         { auto engine = StorageEngine::open(root); }
@@ -193,7 +193,7 @@ namespace
         require(changed != before, "Restart fixture did not write modified table bytes");
         const auto reject = [&](const journal_test::Bytes &bytes, const std::string &message)
         {
-            LinuxFile journal(journalPath);
+            LinuxFile journal(LinuxDirectory{journalPath.parent_path()}, journalPath.filename());
             journal.resize(0);
             journal.writeAllAt(0, bytes);
             requireError([&] { (void)StorageEngine::open(root); }, message);
@@ -204,17 +204,16 @@ namespace
         auto bytes = originalJournal;
         bytes[16] ^= std::byte{1}; // A different DB UUID with a valid header CRC.
         journal_test::setUnsigned(bytes, 56, journal_test::crc(std::span<const std::byte>{bytes}.first(56)));
-        reject(bytes, "another database");
+        reject(bytes, "db id");
         bytes = originalJournal; bytes.back() ^= std::byte{1};
         reject(bytes, "checksum");
         bytes = originalJournal; bytes.pop_back();
-        reject(bytes, "Truncated");
-        bytes = originalJournal; bytes.push_back(std::byte{0});
-        reject(bytes, "Truncated");
+        reject(bytes, "endoffset");
+
         bytes = originalJournal; bytes.resize(59);
         reject(bytes, "EOF");
         {
-            LinuxFile journal(journalPath);
+            LinuxFile journal(LinuxDirectory{journalPath.parent_path()}, journalPath.filename());
             journal.resize(0);
             journal.writeAllAt(0, originalJournal);
         }
@@ -225,6 +224,120 @@ namespace
         recovered.beginStatement();
         recovered.commitStatement();
     }
+
+    void testUnpublishedTailsAreIgnored()
+    {
+        for (const std::string tail : {"partial", "complete", "corrupt"})
+        {
+            TestDirectory directory{"db-unpublished-tail"};
+            const auto root = directory.path / "db";
+            const auto target = root / "tables/items.table";
+            const auto journalPath = root / "journal/journal.log";
+            {
+                auto database = Database::create(root, "test");
+                database.executeSql("CREATE TABLE items (id INT);");
+                database.executeSql("CREATE TABLE victim (id INT);");
+                database.executeSql("INSERT INTO items VALUES (1);");
+            }
+            const auto before = readFile(target);
+            {
+                auto engine = StorageEngine::open(root);
+                engine.beginStatement();
+                auto table = engine.openTable("items");
+                table.insertRows({.tableName = "items", .rows = {Row{{std::int32_t{2}}}}});
+            }
+            require(readFile(target) != before, "Tail fixture did not issue a database write");
+            const journal_test::DatabaseIdentity db{root};
+            LinuxDirectory journalDir{root / "journal"};
+            uuid_t statement{};
+            JournalFile reader(journalDir, "journal.log", db.bytes, statement, LinuxFile::OpenMode::ReadOnly);
+            const auto publishedEnd = reader.validateJournalHeader(statement);
+            const auto identity = reader.readJournalHeader();
+            std::uint32_t sequence = 0;
+            while (reader.readNext(publishedEnd)) ++sequence;
+            // This complete, correctly sequenced record would delete a committed
+            // table if recovery accidentally included the unpublished suffix.
+            auto suffix = journal_test::encode(FileBeforeImage{"victim.table", 0, true}, sequence);
+            journal_test::refreshChecksum(suffix, identity);
+            if (tail == "partial") suffix.resize(7);
+            if (tail == "corrupt") suffix.back() ^= std::byte{1};
+            LinuxFile raw(journalDir, "journal.log");
+            raw.writeAllAt(publishedEnd, suffix);
+            raw.sync();
+            auto recovered = StorageEngine::open(root);
+            require(readFile(target) == before, "Published undo prefix was not restored");
+            require(recovered.tableExists("victim"), "Unpublished record was replayed");
+            require(!std::filesystem::exists(journalPath), "Recovered journal was not retired");
+        }
+    }
+
+    void testInvalidNewestBoundaryDoesNotFallBack()
+    {
+        TestDirectory directory{"db-invalid-boundary"};
+        const auto root = directory.path / "db";
+        const auto journalPath = root / "journal/journal.log";
+        const auto target = root / "tables/items.table";
+        {
+            auto database = Database::create(root, "test");
+            database.executeSql("CREATE TABLE items (id INT);");
+            database.executeSql("INSERT INTO items VALUES (1);");
+        }
+        {
+            auto engine = StorageEngine::open(root);
+            engine.beginStatement();
+            auto table = engine.openTable("items");
+            table.insertRows({.tableName = "items", .rows = {Row{{std::int32_t{2}}}}});
+        }
+        const auto changed = readFile(target);
+        const auto original = readFile(journalPath);
+        const journal_test::DatabaseIdentity db{root};
+        LinuxDirectory journalDir{root / "journal"};
+        JournalFile reader(journalDir, "journal.log", db.bytes, journal_test::StatementId, LinuxFile::OpenMode::ReadOnly);
+        const auto identity = reader.readJournalHeader();
+        for (const auto end : {std::uint64_t{journal_test::DataOffset - 1},
+                               std::uint64_t{original.size() + 1},
+                               std::uint64_t{journal_test::DataOffset + 1},
+                               std::uint64_t{original.size()}})
+        {
+            auto bytes = original;
+            const auto newest = journal_test::encodeBoundary(10, end, identity);
+            const auto older = journal_test::encodeBoundary(9, journal_test::DataOffset, identity);
+            std::copy(newest.begin(), newest.end(), bytes.begin() + journal_test::HeaderSize);
+            std::copy(older.begin(), older.end(), bytes.begin() + journal_test::HeaderSize + journal_test::BoundarySize);
+            if (end == original.size()) bytes.back() ^= std::byte{1};
+            LinuxFile raw(journalDir, "journal.log");
+            raw.writeAllAt(0, bytes);
+            requireError([&] { (void)StorageEngine::open(root); },
+                         end < journal_test::DataOffset || end > original.size() ? "endoffset" :
+                         end == original.size() ? "checksum" : "Truncated");
+            require(readFile(target) == changed, "Invalid newest boundary caused partial undo");
+            require(readFile(journalPath) == bytes, "Invalid newest boundary discarded recovery evidence");
+        }
+    }
+
+    void testLiveRollbackChecksStatementIdentity()
+    {
+        TestDirectory directory{"db-live-identity"};
+        const auto root = directory.path / "db";
+        auto engine = StorageEngine::create(root);
+        engine.beginStatement();
+        { auto table = engine.createTable("items", "test", {}, {}); }
+        const auto journalPath = root / "journal/journal.log";
+        const auto original = readFile(journalPath);
+        auto changed = original;
+        changed[32] ^= std::byte{1}; // Statement UUID; keep the header CRC valid.
+        journal_test::setUnsigned(changed, 56, journal_test::crc(std::span<const std::byte>{changed}.first(56)));
+        LinuxFile raw(LinuxDirectory{root / "journal"}, "journal.log");
+        raw.writeAllAt(0, changed);
+        const auto tableBefore = readFile(root / "tables/items.table");
+        requireError([&] { engine.rollbackStatement(); }, "another statement");
+        require(readFile(root / "tables/items.table") == tableBefore, "Identity mismatch modified a table");
+        require(readFile(journalPath) == changed, "Identity mismatch discarded the journal");
+        raw.writeAllAt(0, original);
+        engine.rollbackStatement();
+        require(!engine.tableExists("items"), "Rollback retry did not reset record sequence");
+        require(!std::filesystem::exists(journalPath), "Rollback retry did not retire the journal");
+    }
 }
 
 int main()
@@ -234,6 +347,9 @@ int main()
         testStorageIntegration();
         testMetadataValidation();
         testRestartValidationBeforeReplay();
+        testUnpublishedTailsAreIgnored();
+        testInvalidNewestBoundaryDoesNotFallBack();
+        testLiveRollbackChecksStatementIdentity();
     }
     catch (const std::exception &error)
     {

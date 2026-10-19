@@ -9,6 +9,8 @@
 #include <cerrno>
 #include <cstdarg>
 #include <fcntl.h>
+#include <linux/openat2.h>
+#include <sys/syscall.h>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -47,6 +49,7 @@ namespace
         Path path;
         bool tableExists;
         bool journalExists;
+        off_t offset;
     };
 
     struct Probe
@@ -70,14 +73,14 @@ namespace
         ~Observe() { activeProbe = nullptr; }
     };
 
-    bool observe(const std::string &operation, const Path &path)
+    bool observe(const std::string &operation, const Path &path, off_t offset = -1)
     {
         if (!activeProbe)
             return false;
         auto &probe = *activeProbe;
         probe.events.push_back(Event{operation, path,
             std::filesystem::exists(probe.target),
-            std::filesystem::exists(probe.root / "journal/journal.log")});
+            std::filesystem::exists(probe.root / "journal/journal.log"), offset});
         if (!probe.failed && operation == probe.failOperation && path == probe.failPath)
         {
             if (probe.skipMatches != 0)
@@ -102,7 +105,7 @@ namespace
 
     std::vector<std::byte> readFile(const Path &path)
     {
-        LinuxFile file{path, LinuxFile::OpenMode::ReadOnly};
+        LinuxFile file{LinuxDirectory{path.parent_path()}, path.filename(), LinuxFile::OpenMode::ReadOnly};
         std::vector<std::byte> bytes(static_cast<std::size_t>(file.size()));
         file.readExactAt(0, bytes);
         return bytes;
@@ -132,8 +135,8 @@ namespace
             probe.target = target;
             probe.failOperation = boundary == "create" ? "create" : boundary == "write" ? "write" : "sync";
             probe.failPath = boundary == "journal-sync" ? journal : target;
-            // Skip the header-only journal sync to fail the metadata barrier.
-            probe.skipMatches = boundary == "write" || boundary == "journal-sync" ? 1 : 0;
+            // Skip both initial journal syncs to fail the metadata barrier.
+            probe.skipMatches = boundary == "journal-sync" ? 2 : boundary == "write" ? 1 : 0;
             {
                 Observe observe{probe};
                 requireError([&] { database.executeSql("CREATE TABLE items (id INT);"); }, "Input/output error");
@@ -178,7 +181,7 @@ namespace
 
     void testBeginBarrierFailures()
     {
-        for (const bool directorySync : {false, true})
+        for (const unsigned phase : {0, 1, 2})
         {
             TestDirectory directory{"db-begin-barrier"};
             const Path root = directory.path / "db";
@@ -189,14 +192,15 @@ namespace
                 probe.root = root;
                 probe.target = root / "tables/items.table";
                 probe.failOperation = "sync";
-                probe.failPath = directorySync ? root / "journal" : journal;
+                probe.failPath = phase == 2 ? root / "journal" : journal;
+                probe.skipMatches = phase == 1 ? 1 : 0;
                 {
                     Observe observe{probe};
                     requireError([&] { database.executeSql("CREATE TABLE items (id INT);"); }, "fsync");
                 }
                 require(probe.failed && !std::filesystem::exists(probe.target),
                         "Failed header barrier allowed a table write");
-                require(std::filesystem::file_size(journal) == JournalHeaderBytes,
+                require(std::filesystem::file_size(journal) == JournalDataOffset,
                         "Failed begin did not retain the header-only journal");
                 requireError([&] { database.executeSql("SELECT * FROM items;"); }, "recovery is required");
             }
@@ -253,8 +257,9 @@ namespace
             before = readFile(root / "tables/items.table");
             engine.beginStatement();
             table.insertRows(BoundInsert{.tableName = "items", .rows = {Row{{std::int32_t{2}}}}});
-            JournalFile journal{root / "journal/journal.log", LinuxFile::OpenMode::ReadOnly};
-            (void)journal.readJournalHeader();
+            JournalFile journal{LinuxDirectory{root / "journal"}, "journal.log", journal_test::DatabaseIdentity{root}.bytes, journal_test::StatementId, LinuxFile::OpenMode::ReadOnly};
+            uuid_t recoveredId{};
+            (void)journal.validateJournalHeader(recoveredId);
             const auto image = journal.readNext();
             require(image && !std::get<FileBeforeImage>(image->record).newFile,
                     "A later statement still considers a committed table new");
@@ -274,11 +279,11 @@ namespace
         const Path root = directory.path / "db";
         auto engine = StorageEngine::create(root);
         const journal_test::DatabaseIdentity identity{root};
-        StatementRecovery recovery{root, identity.bytes};
+        StatementRecovery recovery{LinuxDirectory{root}, identity.bytes};
         const Path journal = root / "journal/journal.log";
         requireError([&] { recovery.ensureDurable(0); }, "active statement");
         {
-            LinuxFile existing{journal, LinuxFile::OpenMode::CreateNew};
+            LinuxFile existing{LinuxDirectory{journal.parent_path()}, journal.filename(), LinuxFile::OpenMode::CreateNew};
             requireError([&] { recovery.begin(); }, "open");
             require(!recovery.isActive(), "Failed begin left active state");
         }
@@ -288,7 +293,7 @@ namespace
         for (int statement = 0; statement < 3; ++statement)
         {
             recovery.begin();
-            recovery.captureFileOnce("tables/never_created.table", true);
+            recovery.captureFileOnce("never_created.table", true);
             const auto end = std::filesystem::file_size(journal);
             Probe probe{};
             probe.root = root;
@@ -300,7 +305,7 @@ namespace
             }
             require(std::count_if(probe.events.begin(), probe.events.end(), [&](const Event &event) {
                 return event.operation == "sync" && event.path == journal;
-            }) == 1, "Durable offsets were not reset or an already-covered record was resynchronized");
+            }) == 2, "Durable offsets were not reset or an already-covered record was resynchronized");
             requireError([&] { recovery.ensureDurable(end + 1); }, "not been appended");
             if (statement == 0)
                 recovery.commit();
@@ -317,7 +322,7 @@ namespace
 
         recovery.begin();
         {
-            LinuxFile changed{journal};
+            LinuxFile changed{LinuxDirectory{journal.parent_path()}, journal.filename()};
             changed.resize(1);
         }
         requireError([&] { recovery.ensureDurable(); }, "does not match completed appends");
@@ -346,18 +351,18 @@ namespace
         const Path root = directory.path / "db";
         seedTables(root);
         const journal_test::DatabaseIdentity identity{root};
-        StatementRecovery recovery{root, identity.bytes};
-        const Path first = "tables/items.table";
-        const Path second = "tables/other.table";
+        StatementRecovery recovery{LinuxDirectory{root}, identity.bytes};
+        const Path first = "items.table";
+        const Path second = "other.table";
         const Path journal = root / "journal/journal.log";
-        BufferManager a{root, first, LinuxFile::OpenMode::OpenExisting, recovery};
-        BufferManager b{root, second, LinuxFile::OpenMode::OpenExisting, recovery};
+        BufferManager a{LinuxDirectory{root / "tables"}, first.filename(), LinuxFile::OpenMode::OpenExisting, recovery};
+        BufferManager b{LinuxDirectory{root / "tables"}, second.filename(), LinuxFile::OpenMode::OpenExisting, recovery};
         recovery.begin();
         a.getHeaderPage().write<HeaderPage>().magic = "changed";
         const auto firstCoverage = recovery.requiredCoverageForPage(first, 0);
         Probe probe{};
         probe.root = root;
-        probe.target = root / first;
+        probe.target = root / "tables" / first;
         {
             Observe observe{probe};
             a.flushPage(0);
@@ -366,13 +371,13 @@ namespace
             b.getHeaderPage().write<HeaderPage>().magic = "other";
             a.getHeaderPage().write<HeaderPage>().magic = "again";
             a.flushPage(0);
-            require(eventCount(probe, "sync", journal) == 1,
+            require(eventCount(probe, "sync", journal) == 2,
                     "Already-covered single-page write repeated the barrier");
             b.getDataPage(1).write<DataPage>().rows[0].row.values[0] = std::int32_t{2};
             b.flushAll();
-            require(eventCount(probe, "sync", journal) == 2,
-                    "A batch must synchronize new captures exactly once");
-            require(eventIndex(probe, "sync", journal) < eventIndex(probe, "write", root / first),
+            require(eventCount(probe, "sync", journal) == 4,
+                    "A batch must use exactly one two-sync publication");
+            require(eventIndex(probe, "sync", journal) < eventIndex(probe, "write", root / "tables" / first),
                     "Existing-page write preceded its journal barrier");
             a.sync();
             b.sync();
@@ -398,9 +403,96 @@ namespace
         requireError([&] { a.getHeaderPage(); }, "invalidated by rollback");
         recovery.begin();
         recovery.captureFileOnce(first);
-        recovery.capturePageOnce({first, 0, PageFile{root / first}.readPage(0)});
+        recovery.capturePageOnce({first, 0, PageFile{LinuxDirectory{root / "tables"}, first}.readPage(0)});
         requireError([&] { recovery.ensureDurable(nextCoverage); }, "generation");
         recovery.rollback();
+    }
+
+    void testBoundaryPublicationOrder()
+    {
+        TestDirectory directory{"db-boundary-publication"};
+        const Path root = directory.path / "db";
+        auto engine = StorageEngine::create(root);
+        const journal_test::DatabaseIdentity identity{root};
+        StatementRecovery recovery{LinuxDirectory{root}, identity.bytes};
+        recovery.begin();
+        const Path path = root / "journal/journal.log";
+        JournalFile reader{LinuxDirectory{root / "journal"}, "journal.log", identity.bytes,
+                           journal_test::StatementId, LinuxFile::OpenMode::ReadOnly};
+        uuid_t recovered{};
+        (void)reader.validateJournalHeader(recovered);
+        auto a = reader.readJournalBoundary(0).value();
+        auto b = reader.readJournalBoundary(1).value();
+        unsigned active = a.generation >= b.generation ? 0 : 1;
+        auto generation = std::max(a.generation, b.generation);
+        for (const std::string file : {"first.table", "second.table", "third.table"})
+        {
+            recovery.captureFileOnce(file, true);
+            const auto end = reader.size();
+            const auto before = readFile(path);
+            Probe probe{};
+            probe.root = root;
+            probe.target = root / "tables" / file;
+            {
+                Observe observe{probe};
+                recovery.ensureDurable(end);
+                recovery.ensureDurable(end); // Already-covered requests do no I/O.
+            }
+            require(probe.events.size() == 3 &&
+                        probe.events[0].operation == "sync" && probe.events[0].path == path &&
+                        probe.events[1].operation == "write" && probe.events[1].path == path &&
+                        probe.events[1].offset == static_cast<off_t>(JournalHeaderBytes + (1 - active) * JournalBoundaryBytes) &&
+                        probe.events[2].operation == "sync" && probe.events[2].path == path,
+                    "Publication must sync records, overwrite the older slot, then sync the boundary");
+            const auto current = reader.readJournalBoundary(1 - active).value();
+            const auto previous = reader.readJournalBoundary(active).value();
+            require(current.generation == generation + 1 && current.endOffset == end && previous.generation == generation,
+                    "Publication did not preserve the previous generation");
+            const auto after = readFile(path);
+            require(before.size() == after.size() &&
+                        std::equal(before.begin(), before.begin() + JournalHeaderBytes, after.begin()) &&
+                        std::equal(before.begin() + JournalDataOffset, before.end(), after.begin() + JournalDataOffset),
+                    "Boundary publication changed the immutable header or records");
+            active = 1 - active;
+            ++generation;
+        }
+        recovery.rollback();
+    }
+
+    void testPublicationFailuresBlockDatabaseWrites()
+    {
+        for (const std::string phase : {"record-sync", "boundary-write", "boundary-sync"})
+        {
+            TestDirectory directory{"db-publication-failure"};
+            const Path root = directory.path / "db";
+            seedTables(root);
+            const Path target = root / "tables/items.table";
+            const Path journal = root / "journal/journal.log";
+            const auto before = readFile(target);
+            const journal_test::DatabaseIdentity identity{root};
+            StatementRecovery recovery{LinuxDirectory{root}, identity.bytes};
+            BufferManager manager{LinuxDirectory{root / "tables"}, "items.table", LinuxFile::OpenMode::OpenExisting, recovery};
+            recovery.begin();
+            manager.getHeaderPage().write<HeaderPage>().magic = "changed";
+            Probe probe{};
+            probe.root = root;
+            probe.target = target;
+            probe.failPath = journal;
+            probe.failOperation = phase == "boundary-write" ? "write" : "sync";
+            probe.skipMatches = phase == "boundary-sync" ? 1 : 0;
+            {
+                Observe observe{probe};
+                requireError([&] { manager.flushPage(0); }, "Input/output error");
+            }
+            require(probe.failed && eventCount(probe, "write", target) == 0,
+                    "Failed publication allowed a dependent database write: " + phase);
+            require(readFile(target) == before && std::filesystem::exists(journal),
+                    "Failed publication changed data or discarded undo");
+            requireError([&] { recovery.commit(); }, "failed");
+            recovery.rollback();
+            require(readFile(target) == before && !std::filesystem::exists(journal),
+                    "Failed publication could not be rolled back");
+        }
     }
 
     void testCommitChecksEveryHandle()
@@ -412,20 +504,20 @@ namespace
             seedTables(root);
             const auto before = readFile(root / "tables/items.table");
             const journal_test::DatabaseIdentity identity{root};
-            StatementRecovery recovery{root, identity.bytes};
+            StatementRecovery recovery{LinuxDirectory{root}, identity.bytes};
             recovery.begin();
             {
-                BufferManager writer{root, "tables/items.table", LinuxFile::OpenMode::OpenExisting, recovery};
+                BufferManager writer{LinuxDirectory{root / "tables"}, "items.table", LinuxFile::OpenMode::OpenExisting, recovery};
                 writer.getHeaderPage().write<HeaderPage>().magic = "changed";
                 if (flush)
                     writer.flushAll();
                 // Synchronizing a different handle/file must not acknowledge
                 // this writer, nor may destroying its cache hide pending work.
-                BufferManager other{root, "tables/other.table", LinuxFile::OpenMode::OpenExisting, recovery};
+                BufferManager other{LinuxDirectory{root / "tables"}, "other.table", LinuxFile::OpenMode::OpenExisting, recovery};
                 other.getHeaderPage().write<HeaderPage>().magic = "other";
                 other.flushAll();
                 other.sync();
-                BufferManager samePath{root, "tables/items.table", LinuxFile::OpenMode::OpenExisting, recovery};
+                BufferManager samePath{LinuxDirectory{root / "tables"}, "items.table", LinuxFile::OpenMode::OpenExisting, recovery};
                 samePath.sync();
             }
             requireError([&] { recovery.commit(); }, flush ? "unsynchronized" : "unflushed");
@@ -446,10 +538,10 @@ namespace
             const Path journal = root / "journal/journal.log";
             const auto before = readFile(target);
             const journal_test::DatabaseIdentity identity{root};
-            StatementRecovery recovery{root, identity.bytes};
-            BufferManager manager{root, "tables/items.table", LinuxFile::OpenMode::OpenExisting, recovery};
+            StatementRecovery recovery{LinuxDirectory{root}, identity.bytes};
+            BufferManager manager{LinuxDirectory{root / "tables"}, "items.table", LinuxFile::OpenMode::OpenExisting, recovery};
             auto guard = manager.getHeaderPage();
-            auto table = Table::open(root, "tables/items.table", recovery);
+            auto table = Table::open(LinuxDirectory{root / "tables"}, "items.table", recovery);
             auto cursor = table.scan();
             require(cursor.next().has_value(), "Cursor fixture is empty");
             recovery.begin();
@@ -495,7 +587,7 @@ namespace
             require(readFile(target) == before, "Rollback did not restore grown file, links, and header");
             requireError([&] { guard.page(); }, "invalidated by rollback");
             requireError([&] { cursor.next(); }, "invalidated by rollback");
-            auto restored = Table::open(root, "tables/items.table", recovery);
+            auto restored = Table::open(LinuxDirectory{root / "tables"}, "items.table", recovery);
             auto scan = restored.scan();
             require(scan.next().has_value() && !scan.next(), "Fresh handle did not see restored contents");
         }
@@ -557,8 +649,8 @@ namespace
         const Path target = root / "tables/items.table";
         const auto before = readFile(target);
         const journal_test::DatabaseIdentity identity{root};
-        StatementRecovery recovery{root, identity.bytes};
-        BufferManager manager{root, "tables/items.table", LinuxFile::OpenMode::OpenExisting, recovery};
+        StatementRecovery recovery{LinuxDirectory{root}, identity.bytes};
+        BufferManager manager{LinuxDirectory{root / "tables"}, "items.table", LinuxFile::OpenMode::OpenExisting, recovery};
         recovery.begin();
         manager.getHeaderPage().write<HeaderPage>().magic = "changed";
         manager.flushPage(0);
@@ -695,6 +787,23 @@ namespace
 
 extern "C"
 {
+    long __real_syscall(long, ...);
+
+    long __wrap_syscall(long number, ...)
+    {
+        if (number != SYS_openat2) { errno = ENOSYS; return -1; }
+        va_list args;
+        va_start(args, number);
+        const int parent = va_arg(args, int);
+        const char *path = va_arg(args, const char *);
+        const auto *how = va_arg(args, struct open_how *);
+        const auto size = va_arg(args, size_t);
+        va_end(args);
+        if ((how->flags & O_CREAT) && observe("create", descriptorPath(parent) / path))
+            return -1;
+        return __real_syscall(number, parent, path, how, size);
+    }
+
     int __real_open(const char *, int, ...);
     ssize_t __real_pwrite(int, const void *, size_t, off_t);
     int __real_fsync(int);
@@ -717,7 +826,7 @@ extern "C"
     ssize_t __wrap_pwrite(int fd, const void *bytes, size_t count, off_t offset)
     {
         const auto path = descriptorPath(fd);
-        if (observe("write", path))
+        if (observe("write", path, offset))
             return -1;
         if (activeProbe && activeProbe->shortWrite && !activeProbe->shortWriteDone &&
             path == activeProbe->failPath)
@@ -747,6 +856,8 @@ int main()
         testReuseAcrossStatements();
         testOffsetsAndMissingFiles();
         testCoverageGenerationsAndBatches();
+        testBoundaryPublicationOrder();
+        testPublicationFailuresBlockDatabaseWrites();
         testCommitChecksEveryHandle();
         testExistingWriteFailuresAndGrowth();
         testMultipleFileFailureAndReadGating();

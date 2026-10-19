@@ -36,6 +36,7 @@ LinuxFile::LinuxFile(const LinuxDirectory &parent, const std::filesystem::path &
     }
     struct open_how how{};
     how.flags = flags;
+    how.mode = mode == OpenMode::CreateNew ? 0600 : 0;
     how.resolve = RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS;
 
     do

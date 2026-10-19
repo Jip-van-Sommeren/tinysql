@@ -311,8 +311,8 @@ int main()
         "Implicit alias was not rejected");
 
     const journal_test::DatabaseIdentity identity{path};
-    StatementRecovery recovery{path, identity.bytes};
-    Table table = Table::open(path, "tables/products.table", recovery);
+    StatementRecovery recovery{LinuxDirectory{path}, identity.bytes};
+    Table table = Table::open(LinuxDirectory{path / "tables"}, "products.table", recovery);
     BoundSelect grouped{
         .tableName = "products",
         .projections = {},

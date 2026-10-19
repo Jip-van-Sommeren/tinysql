@@ -67,23 +67,23 @@ namespace
         const auto second = makeRecord("tables/two.table", 1, std::byte{0xb2});
         const FileBeforeImage metadata{"tables/one.table", (1ULL << 40) + PAGE_SIZE};
         const auto expectedHeader = journal_test::header();
-        auto expectedBytes = journal_test::encodeHeader();
+        auto expectedBytes = journal_test::encodePrefix();
         for (const auto &record : {journal_test::encode(metadata, 0), journal_test::encode(first, 1),
                                   journal_test::encode(second, 2), journal_test::encode(first, 3)})
             expectedBytes.insert(expectedBytes.end(), record.begin(), record.end());
         {
-            JournalFile journal(path);
-            require(journal.writeJournalHeader(expectedHeader) == 60, "Header append end changed");
-            require(journal.writeFileBeforeImage(metadata) == 60 + metadata.size(), "File append end changed");
+            JournalFile journal(LinuxDirectory{directory}, path.filename(), journal_test::DatabaseId, journal_test::StatementId);
+            journal_test::initialize(journal, expectedHeader);
+            require(journal.writeFileBeforeImage(metadata) == JournalDataOffset + metadata.size(), "File append end changed");
             journal.writePage(first);
             journal.writePage(second);
             journal.writePage(first); // Preserve duplicate images and cross-file page IDs.
             journal.sync();
             require(journal_test::readFile(path) == expectedBytes, "Writer disagrees with version-1 wire format");
         }
-        requireThrows<std::system_error>([&] { JournalFile duplicate(path); }, "open");
+        requireThrows<std::system_error>([&] { JournalFile duplicate(LinuxDirectory{directory}, path.filename(), journal_test::DatabaseId, journal_test::StatementId); }, "open");
         require(journal_test::readFile(path) == expectedBytes, "CreateNew overwrote an existing journal");
-        JournalFile reader(path, Mode::ReadOnly);
+        JournalFile reader(LinuxDirectory{directory}, path.filename(), journal_test::DatabaseId, journal_test::StatementId, Mode::ReadOnly);
         for (int pass = 0; pass < 2; ++pass)
         {
             reader.rewind();
@@ -110,13 +110,13 @@ namespace
         const FileBeforeImage first{"tables/a.table", PAGE_SIZE};
         const auto second = makeRecord("tables/a.table", 0, std::byte{0x19});
         {
-            JournalFile writer(path);
-            writer.writeJournalHeader(journal_test::header());
+            JournalFile writer(LinuxDirectory{directory}, path.filename(), journal_test::DatabaseId, journal_test::StatementId);
+            journal_test::initialize(writer);
             writer.writeFileBeforeImage(first);
         }
         const auto before = journal_test::readFile(path);
         {
-            JournalFile writer(path, Mode::OpenExisting);
+            JournalFile writer(LinuxDirectory{directory}, path.filename(), journal_test::DatabaseId, journal_test::StatementId, Mode::OpenExisting);
             (void)writer.readJournalHeader();
             requireRecord(writer.readNext().value(), first, 0);
             require(writer.writePage(second) == before.size() + second.size(), "Reopen did not append at EOF");
@@ -124,11 +124,49 @@ namespace
         }
         const auto after = journal_test::readFile(path);
         require(std::equal(before.begin(), before.end(), after.begin()), "Append overwrote existing recovery data");
-        JournalFile reader(path, Mode::ReadOnly);
+        JournalFile reader(LinuxDirectory{directory}, path.filename(), journal_test::DatabaseId, journal_test::StatementId, Mode::ReadOnly);
         (void)reader.readJournalHeader();
         requireRecord(reader.readNext().value(), first, 0);
         requireRecord(reader.readNext().value(), second, 1);
         require(!reader.readNext(), "Reopened append has extra bytes");
+    }
+
+    void testBoundaryUpdatesPreserveRecords(const std::filesystem::path &directory)
+    {
+        LinuxDirectory parent{directory};
+        const auto path = directory / "boundary-writes";
+        JournalFile journal(parent, path.filename(), journal_test::DatabaseId, journal_test::StatementId);
+        journal_test::initialize(journal);
+        const FileBeforeImage first{"one.table", PAGE_SIZE};
+        const FileBeforeImage second{"two.table", PAGE_SIZE};
+        const auto firstEnd = journal.writeFileBeforeImage(first);
+        auto expected = journal_test::encodePrefix();
+        const auto firstBytes = journal_test::encode(first);
+        expected.insert(expected.end(), firstBytes.begin(), firstBytes.end());
+        require(journal_test::readFile(path) == expected, "First append overwrote journal metadata");
+
+        journal.writeJournalBoundary({1, firstEnd, 0}, 1);
+        const auto boundary = journal_test::encodeBoundary(1, firstEnd);
+        std::copy(boundary.begin(), boundary.end(), expected.begin() + journal_test::HeaderSize + journal_test::BoundarySize);
+        require(journal_test::readFile(path) == expected, "Boundary publication modified other journal bytes");
+        require(journal.writeFileBeforeImage(second) == firstEnd + second.size(),
+                "Boundary publication moved the append offset");
+        const auto secondBytes = journal_test::encode(second, 1);
+        expected.insert(expected.end(), secondBytes.begin(), secondBytes.end());
+        require(journal_test::readFile(path) == expected, "Append after boundary publication lost data or sequence");
+    }
+
+    void testReopenedEmptyJournalValidatesHeader(const std::filesystem::path &directory)
+    {
+        LinuxDirectory parent{directory};
+        const auto path = directory / "invalid-empty";
+        auto bytes = journal_test::encodePrefix();
+        bytes[0] ^= std::byte{1};
+        LinuxFile raw(parent, path.filename(), Mode::CreateNew);
+        raw.writeAllAt(0, bytes);
+        JournalFile reopened(parent, path.filename(), journal_test::DatabaseId, journal_test::StatementId, Mode::OpenExisting);
+        requireThrows<std::runtime_error>([&] { reopened.writeFileBeforeImage({"one.table", 0, true}); }, "magic");
+        require(journal_test::readFile(path) == bytes, "Reopened empty journal skipped header validation");
     }
 
     void testReopenedAppendRejectsCorruption(const std::filesystem::path &directory)
@@ -138,17 +176,17 @@ namespace
         const auto goodRecord = journal_test::encode(first);
         for (const bool truncated : {false, true})
         {
-            LinuxFile raw(path, truncated ? Mode::OpenExisting : Mode::CreateNew);
+            LinuxFile raw(LinuxDirectory{path.parent_path()}, path.filename(), truncated ? Mode::OpenExisting : Mode::CreateNew);
             raw.resize(0);
-            raw.writeAllAt(0, journal_test::encodeHeader());
+            raw.writeAllAt(0, journal_test::encodePrefix());
             auto badRecord = goodRecord;
             if (truncated)
                 badRecord.pop_back();
             else
                 badRecord.back() ^= std::byte{1};
-            raw.writeAllAt(JournalHeaderBytes, badRecord);
+            raw.writeAllAt(JournalDataOffset, badRecord);
             const auto before = journal_test::readFile(path);
-            JournalFile writer(path, Mode::OpenExisting);
+            JournalFile writer(LinuxDirectory{directory}, path.filename(), journal_test::DatabaseId, journal_test::StatementId, Mode::OpenExisting);
             requireThrows<std::runtime_error>([&] { writer.writeFileBeforeImage(first); },
                                              truncated ? "Truncated" : "checksum");
             require(journal_test::readFile(path) == before, "Reopened append modified invalid recovery data");
@@ -158,10 +196,10 @@ namespace
     void testHeaderOnlyAndInvalidPaths(const std::filesystem::path &directory)
     {
         const auto path = directory / "empty";
-        JournalFile journal(path);
-        journal.writeJournalHeader(journal_test::header());
+        JournalFile journal(LinuxDirectory{directory}, path.filename(), journal_test::DatabaseId, journal_test::StatementId);
+        journal_test::initialize(journal);
         (void)journal.readJournalHeader();
-        require(!journal.readNext() && journal.findRecoveryEnd(journal.size()) == 60,
+        require(!journal.readNext() && journal.findRecoveryEnd(journal.size()) == JournalDataOffset,
                 "Header-only journal is not a valid empty statement");
         for (const auto &name : {std::string{}, std::string{"/absolute"}, std::string{"../outside"},
                                  std::string{"x\0y", 3}, std::string(JournalFile::MaxPathBytes + 1, 'x')})
@@ -169,7 +207,7 @@ namespace
             requireThrows<std::runtime_error>([&] { journal.writePage(makeRecord(name, 0, std::byte{0})); });
             requireThrows<std::runtime_error>([&] { journal.writeFileBeforeImage({name, 0, true}); });
         }
-        require(journal_test::readFile(path) == journal_test::encodeHeader(), "Rejected append wrote partial bytes");
+        require(journal_test::readFile(path) == journal_test::encodePrefix(), "Rejected append wrote partial bytes");
         const FileBeforeImage valid{"tables/new.table", 0, true};
         journal.writeFileBeforeImage(valid);
         (void)journal.readJournalHeader();
@@ -181,13 +219,13 @@ namespace
         const auto path = directory / "large";
         const auto record = makeRecord("tables/one.table", 1, std::byte{0x71});
         {
-            JournalFile writer(path);
-            writer.writeJournalHeader(journal_test::header());
+            JournalFile writer(LinuxDirectory{directory}, path.filename(), journal_test::DatabaseId, journal_test::StatementId);
+            journal_test::initialize(writer);
             writer.writePage(record);
         }
-        LinuxFile raw(path);
+        LinuxFile raw(LinuxDirectory{path.parent_path()}, path.filename());
         raw.resize(1ULL << 30); // Sparse; reading one record must not allocate the entire journal.
-        JournalFile reader(path, Mode::ReadOnly);
+        JournalFile reader(LinuxDirectory{directory}, path.filename(), journal_test::DatabaseId, journal_test::StatementId, Mode::ReadOnly);
         (void)reader.readJournalHeader();
         requireRecord(reader.readNext().value(), record, 0);
         requireThrows<std::runtime_error>([&] { reader.readNext(); }, "Record Type");
@@ -196,20 +234,22 @@ namespace
     void testPageFile(const std::filesystem::path &directory)
     {
         const auto path = directory / "pages";
-        requireThrows<std::system_error>([&] { PageFile missing(path); }, "open");
+        requireThrows<std::system_error>([&] { PageFile missing(LinuxDirectory{path.parent_path()}, path.filename()); }, "open");
         require(!std::filesystem::exists(path), "PageFile reopen created missing file");
-        PageFile pages(path, Mode::CreateNew);
+        PageFile pages(LinuxDirectory{path.parent_path()}, path.filename(), Mode::CreateNew);
         RawPage expected{};
         expected.bytes.fill(std::byte{0x9a});
         pages.writePage(3, expected);
-        PageFile reopened(path);
+        PageFile reopened(LinuxDirectory{path.parent_path()}, path.filename());
         require(reopened.readPage(3).bytes == expected.bytes, "Unflushed page write was not visible");
-        require(readPageFromFile(path, 3).bytes == expected.bytes, "Standalone reader changed behavior");
+        require(readPageFromFile(LinuxDirectory{path.parent_path()}, path.filename(), 3).bytes == expected.bytes, "Standalone reader changed behavior");
         requireThrows<std::runtime_error>([&] { pages.readPage(4); }, "EOF");
-        requireThrows<std::system_error>([&] { PageFile duplicate(path, Mode::CreateNew); }, "open");
+        requireThrows<std::system_error>([&] { PageFile duplicate(LinuxDirectory{path.parent_path()}, path.filename(), Mode::CreateNew); }, "open");
         pages.sync();
-        StatementRecovery recovery{directory, journal_test::DatabaseId};
-        requireThrows<std::system_error>([&] { Table::open(directory, "missing.table", recovery); }, "open");
+        std::filesystem::create_directory(directory / "journal");
+        std::filesystem::create_directory(directory / "tables");
+        StatementRecovery recovery{LinuxDirectory{directory}, journal_test::DatabaseId};
+        requireThrows<std::system_error>([&] { Table::open(LinuxDirectory{directory / "tables"}, "missing.table", recovery); }, "open");
         require(!std::filesystem::exists(directory / "missing.table"), "Table::open created a missing table");
     }
 }
@@ -221,6 +261,8 @@ int main()
         TestDirectory directory{"db-journal-test"};
         testRoundTrip(directory.path);
         testReopenedAppend(directory.path);
+        testBoundaryUpdatesPreserveRecords(directory.path);
+        testReopenedEmptyJournalValidatesHeader(directory.path);
         testReopenedAppendRejectsCorruption(directory.path);
         testHeaderOnlyAndInvalidPaths(directory.path);
         testLargeJournalStreaming(directory.path);

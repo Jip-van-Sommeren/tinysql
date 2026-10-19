@@ -82,12 +82,12 @@ namespace
         database.executeSql("INSERT INTO guard_values VALUES (1);");
         const std::filesystem::path relativeFile = "tables/guard_values.table";
         const auto file = path / relativeFile;
-        const Page headerSnapshot = decodeHeaderPage(readPageFromFile(file, 0));
+        const Page headerSnapshot = decodeHeaderPage(readPageFromFile(LinuxDirectory{file.parent_path()}, file.filename(), 0));
         const HeaderPage &schema = std::get<HeaderPage>(headerSnapshot.data);
         // Seed extra physical pages before opening the cache, instead of using
         // the now-private setPage() as a fixture-building API.
         {
-            PageFile pages{file};
+            PageFile pages{LinuxDirectory{file.parent_path()}, file.filename()};
             for (PageId id = 2; id < 128; ++id)
             {
                 const Page page = makeEmptyDataPage(id);
@@ -96,8 +96,8 @@ namespace
             pages.sync();
         }
         const journal_test::DatabaseIdentity identity{path};
-        StatementRecovery recovery{path, identity.bytes};
-        BufferManager manager{path, relativeFile, LinuxFile::OpenMode::OpenExisting, recovery};
+        StatementRecovery recovery{LinuxDirectory{path}, identity.bytes};
+        BufferManager manager{LinuxDirectory{path / "tables"}, relativeFile.filename(), LinuxFile::OpenMode::OpenExisting, recovery};
         {
             auto guard = manager.getDataPage(1);
             requireThrows([&] { guard.write<DataPage>(); }, "active statement");
@@ -127,14 +127,14 @@ namespace
         }
         recovery.commit();
 
-        BufferManager reopened{path, relativeFile, LinuxFile::OpenMode::OpenExisting, recovery};
+        BufferManager reopened{LinuxDirectory{path / "tables"}, relativeFile.filename(), LinuxFile::OpenMode::OpenExisting, recovery};
         require(std::get<std::int32_t>(reopened.getDataPage(1).as<DataPage>().rows.at(0).row.values.at(0)) == 42,
                 "Dirty page changes did not survive reopening");
 
         // Initialization replaces cached page zero through the public API. It
         // must reject a pinned header and succeed once its last guard releases.
         recovery.begin();
-        BufferManager pins{path, "tables/pins.table", LinuxFile::OpenMode::CreateNew, recovery};
+        BufferManager pins{LinuxDirectory{path / "tables"}, "pins.table", LinuxFile::OpenMode::CreateNew, recovery};
         auto initialize = [&]
         {
             pins.initializeNewTable("pins", "test", schema.columns, schema.constraints);
@@ -167,7 +167,7 @@ namespace
             require(target.page().pageId() == 0, "Self-move lost the page guard");
         }
         initialize();
-        BufferManager otherPins{path, "tables/other-pins.table", LinuxFile::OpenMode::CreateNew, recovery};
+        BufferManager otherPins{LinuxDirectory{path / "tables"}, "other-pins.table", LinuxFile::OpenMode::CreateNew, recovery};
         auto initializeOther = [&]
         {
             otherPins.initializeNewTable("other-pins", "test", schema.columns, schema.constraints);
@@ -195,14 +195,14 @@ namespace
         requireThrows([&] { pins.getDataPage(0); }, "not a data page");
         initialize();
 
-        BufferManager invalidHeader{path, relativeFile, LinuxFile::OpenMode::OpenExisting, recovery};
+        BufferManager invalidHeader{LinuxDirectory{path / "tables"}, relativeFile.filename(), LinuxFile::OpenMode::OpenExisting, recovery};
         invalidHeader.getPage(0, [](const RawPage &) { return makeEmptyDataPage(0); });
         requireThrows([&] { invalidHeader.getHeaderPage(); }, "not a table header");
         requireThrows([&] {
             invalidHeader.initializeNewTable("guard_values", "test", schema.columns, schema.constraints);
         }, "new, unwritten table");
 
-        BufferManager decodeFailure{path, relativeFile, LinuxFile::OpenMode::OpenExisting, recovery};
+        BufferManager decodeFailure{LinuxDirectory{path / "tables"}, relativeFile.filename(), LinuxFile::OpenMode::OpenExisting, recovery};
         requireThrows(
             [&]
             {
@@ -224,9 +224,9 @@ namespace
         database.executeSql("CREATE TABLE cursor_values (id INT, label TEXT);");
         const std::filesystem::path relativeFile = "tables/cursor_values.table";
         const journal_test::DatabaseIdentity identity{path};
-        StatementRecovery recovery{path, identity.bytes};
+        StatementRecovery recovery{LinuxDirectory{path}, identity.bytes};
         {
-            Table table = Table::open(path, relativeFile, recovery);
+            Table table = Table::open(LinuxDirectory{path / "tables"}, relativeFile.filename(), recovery);
             require(scanIds(table).empty(), "An empty table returned rows");
         }
         const std::string label(1500, 'x');
@@ -237,7 +237,7 @@ namespace
         }
         database.insertRows("cursor_values", rows);
         {
-            BufferManager manager{path, relativeFile, LinuxFile::OpenMode::OpenExisting, recovery};
+            BufferManager manager{LinuxDirectory{path / "tables"}, relativeFile.filename(), LinuxFile::OpenMode::OpenExisting, recovery};
             auto first = manager.getDataPage(1);
             require(first.as<DataPage>().rows.size() == 2 && first.page().nextPageId() != 0,
                     "Cursor fixture did not span multiple pages");
@@ -245,7 +245,7 @@ namespace
 
         std::optional<Row> retained;
         {
-            Table table = Table::open(path, relativeFile, recovery);
+            Table table = Table::open(LinuxDirectory{path / "tables"}, relativeFile.filename(), recovery);
             require(scanIds(table) == std::vector<std::int32_t>{1, 2, 3, 4, 5, 6},
                     "Cursor did not traverse all pages in order");
             {
@@ -299,7 +299,7 @@ namespace
                     std::get<std::string>(retained->values.at(1)) == label,
                 "Destroying the table invalidated a returned row");
 
-        Table reopened = Table::open(path, relativeFile, recovery);
+        Table reopened = Table::open(LinuxDirectory{path / "tables"}, relativeFile.filename(), recovery);
         auto ids = scanIds(reopened);
         std::sort(ids.begin(), ids.end());
         require(ids == std::vector<std::int32_t>{2, 5, 6, 99},
@@ -314,17 +314,17 @@ namespace
         database.executeSql("INSERT INTO lazy_values VALUES (1), (2);");
         const std::filesystem::path relativeFile = "tables/lazy_values.table";
         const journal_test::DatabaseIdentity identity{path};
-        StatementRecovery recovery{path, identity.bytes};
+        StatementRecovery recovery{LinuxDirectory{path}, identity.bytes};
         recovery.begin();
         {
-            BufferManager manager{path, relativeFile, LinuxFile::OpenMode::OpenExisting, recovery};
+            BufferManager manager{LinuxDirectory{path / "tables"}, relativeFile.filename(), LinuxFile::OpenMode::OpenExisting, recovery};
             auto page = manager.getDataPage(1);
             page.writePage().header.nextPageId = 50; // Deliberately missing next page.
             manager.flushPage(1);
             manager.sync();
         }
         recovery.commit();
-        Table table = Table::open(path, relativeFile, recovery);
+        Table table = Table::open(LinuxDirectory{path / "tables"}, relativeFile.filename(), recovery);
         {
             auto cursor = table.scan();
             require(nextId(cursor) == 1, "Cursor eagerly read a later page");
@@ -343,18 +343,18 @@ namespace
         constexpr PageId highId = 70000;
         // Build the sparse physical-page fixture without accessing setPage().
         {
-            const auto header = decodeHeaderPage(readPageFromFile(file, 0));
+            const auto header = decodeHeaderPage(readPageFromFile(LinuxDirectory{file.parent_path()}, file.filename(), 0));
             const auto page = makeEmptyDataPage(highId);
-            PageFile pages{file};
+            PageFile pages{LinuxDirectory{file.parent_path()}, file.filename()};
             pages.writePage(highId, encodeDataPage(page.header,
                            std::get<HeaderPage>(header.data), std::get<DataPage>(page.data)));
             pages.sync();
         }
         const journal_test::DatabaseIdentity identity{path};
-        StatementRecovery recovery{path, identity.bytes};
+        StatementRecovery recovery{LinuxDirectory{path}, identity.bytes};
         recovery.begin();
         {
-            BufferManager manager{path, relativeFile, LinuxFile::OpenMode::OpenExisting, recovery};
+            BufferManager manager{LinuxDirectory{path / "tables"}, relativeFile.filename(), LinuxFile::OpenMode::OpenExisting, recovery};
             auto header = manager.getHeaderPage();
             auto &metadata = header.write<HeaderPage>();
             metadata.firstDataPageId = highId;
@@ -368,7 +368,7 @@ namespace
             manager.sync();
         }
         recovery.commit();
-        Table table = Table::open(path, relativeFile, recovery);
+        Table table = Table::open(LinuxDirectory{path / "tables"}, relativeFile.filename(), recovery);
         require(scanIds(table) == std::vector<std::int32_t>{42},
                 "A page ID above 65535 was truncated during scanning");
     }
