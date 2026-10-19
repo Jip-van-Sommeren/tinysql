@@ -2,10 +2,11 @@
 
 Date: 2026-09-15
 
-Status: steps 2 and 3 completed and reviewed on 2026-10-12.
-Statement journaling, generation-qualified writeback barriers, participant
-durability checks, and fail-closed access are implemented. Recovery-format
-hardening and complete restart/power-loss verification remain unfinished.
+Status: implementation and tests reviewed on 2026-10-19.
+Steps 1–3, versioned journal records, published recovery boundaries, validation
+before replay, and startup recovery are implemented. Shared-sector torn-write
+protection and complete recovery/power-loss verification remain unfinished.
+The normal warnings-as-errors build currently fails on conversion warnings.
 Checked items describe implemented pieces, not a claim of crash-safe statement
 atomicity.
 
@@ -25,15 +26,19 @@ back until synchronization succeeds. See
 Assume Linux, C++23, and one active modifying statement per database. Keep the
 database page format and generic `ByteReader`/`ByteWriter` encoding unchanged.
 Concurrent transactions, LRU implementation, and new SQL features are outside
-this plan. Recovery-format prerequisites are tracked below; their detailed
-design remains to be done. Dirty eviction must remain disabled until the
+this plan. Remaining recovery-format prerequisites are tracked below.
+Dirty eviction must remain disabled until the
 recovery prerequisites below are satisfied.
 
 ## Current implementation
 
 - `PageFile` and `JournalFile` use the descriptor-owning `LinuxFile` backend,
   with explicit `sync()` using `fsync()`. `PageFile::flush()` has been removed.
-  `LinuxDirectory` provides directory synchronization.
+  `LinuxDirectory` provides directory synchronization. Descriptor-relative
+  opens use `openat2()` with `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS`.
+- `db.meta` persists a database UUID, version, and checksum. Journal version 1
+  has a checksummed header with database/statement UUIDs and page size, two
+  checksummed recovery-boundary slots, and sequenced, checksummed records.
 - `StorageEngine` owns `StatementRecovery`, shared by participating buffer
   managers. SQL INSERT, DELETE, and CREATE TABLE call begin/commit/rollback;
   direct `Database::insertRows()` uses the same INSERT path. The bypassing
@@ -50,7 +55,9 @@ recovery prerequisites below are satisfied.
   path, original size, and `newFile`; this state lives in the coordinator for
   one statement, not in a persistent buffer-manager flag.
 - `flushPage()` and `flushAll()` call `ensureDurable()` before database writes.
-  This synchronizes the journal and, on the first barrier, its directory.
+  This synchronizes records, publishes the completed end offset to the older
+  boundary slot, synchronizes the journal again, and persists its directory
+  when needed. `begin()` also durably publishes the initial empty boundary.
   Table mutation methods write back and synchronize their table file before
   `commit()` synchronizes directories containing new files, removes the journal,
   and synchronizes the journal directory. Buffer-manager writeback validates
@@ -62,21 +69,28 @@ recovery prerequisites below are satisfied.
   `readPages()` has been removed. Rollback replays pages, restores recorded file
   sizes, synchronizes those files, removes newly created files, and synchronizes
   their directories before retiring the journal. Already-absent new files are
-  accepted on retry. Opening a DB now takes an exclusive directory lock and
-  invokes the existing startup replay path; its format and interrupted-append
-  policy still need the hardening listed in section 4. In-process rollback uses
-  the known completed-append boundary, including after a partial failed append.
+  accepted on retry. Opening a DB takes an exclusive directory lock, validates
+  `db.meta`, and recovers a leftover journal before returning. Recovery validates
+  the entire selected prefix before replay, including identity, checksums,
+  sequence, metadata relationships, and duplicate page records. Startup uses
+  the newest checksum-valid published boundary and ignores its unpublished
+  suffix; in-process rollback uses the known completed-append boundary,
+  including after a partial failed append. Shared-sector torn writes remain
+  an open issue because the header, both slots, and records are packed together.
 - Database writes, file syncs, and journal barriers fail closed. SQL, catalog
   reads, table handles, page guards, and cursors reject access until recovery
   succeeds. Rollback invalidates existing handles; callers must reopen them.
   After journal unlink, rollback retries only directory cleanup. An uncertain
   commit rejects rollback and requires reopening the database.
-- All 12 CTest tests pass. Recovery tests inject CREATE failures around journal
+- Recovery tests inject CREATE failures around journal
   sync, directory sync, file creation, page writes, and table sync; they also
   cover stale coverage generations, batch barriers, partial native writes,
   multiple participants, file growth/truncation, failed recovery retries, and
-  read gating after cleanup failures. These tests do not yet simulate power
-  loss or prove the complete restart recovery protocol.
+  read gating after cleanup failures. New tests cover startup undo, validation
+  before replay, unpublished tails, boundary publication failures, and partial
+  boundary-slot overwrites. These tests do not yet simulate power loss or prove
+  the complete restart recovery protocol. Current build/test results are
+  recorded in section 5.
 
 ## 1. Add explicit durable storage operations
 
@@ -134,7 +148,7 @@ recovery prerequisites below are satisfied.
 - [x] Capture existing pages before writable access through
       `PageGuard::write()` / `writePage()`, rather than relying on a dirty flag
       set after modification. Reject writable access without an active statement.
-- [x] Identify pages by `(database-relative file path, page ID)` and deduplicate
+- [x] Identify pages by `(tables-relative file path, page ID)` and deduplicate
       in the normal buffer-manager path, including page zero and linked-page
       changes. Clear capture bookkeeping after successful commit/rollback.
 - [x] Enforce active/nonfailed state and deduplication inside the coordinator's
@@ -211,7 +225,9 @@ Required batch ordering, not a complete commit algorithm:
 
 ```text
 append original records A and B
-    -> synchronize journal and any pending journal-creation directory entry
+    -> synchronize journal records
+    -> publish the completed end offset to the older recovery-boundary slot
+    -> synchronize journal again and any pending journal-creation directory entry
     -> write modified database pages A and B
     -> synchronize every modified database file at commit
     -> durably finalize the statement's journal state
@@ -233,45 +249,54 @@ before claiming crash recovery or enabling dirty-page eviction:
 - [x] Extend recovery-required access gating to the database/storage boundary,
       including SELECT, catalog/header reads, and previously opened handles.
       Covered by the step 3 failure-injection tests.
-- [ ] Specify a versioned journal format and recovery/cleanup protocol with
+- [x] Specify a versioned journal format and recovery/cleanup protocol with
       statement/database identity. Keep before-images available until all
-      affected files are durable and journal retirement is durable. Existing
-      records have type and length fields but no format header or checksums.
-- [ ] Make journal parsing distinguish clean EOF, incomplete trailing records,
+      affected files are durable and journal retirement is durable. Version 1
+      uses a 60-byte header, two 20-byte boundary slots, and 17-byte record
+      headers containing type, total length, sequence, and checksum. Record and
+      boundary CRCs include both UUIDs. `db.meta` persists the database identity;
+      commit/rollback explicitly synchronize files and directory cleanup.
+- [x] Make journal parsing distinguish clean EOF, incomplete trailing records,
       and corruption. Validate record boundaries, lengths, checksums, paths, and
-      statement identity. Later appends must not invalidate previously durable
-      recovery information, including through torn writes to a shared sector.
-      Do not blindly ignore every malformed final record.
-      Partial: clean EOF is distinct from errors, lengths are bounded, and
-      truncated/malformed records throw without advancing the read cursor.
-      In-process rollback uses its known completed-append boundary. Startup
-      replay currently skips an incomplete tail, but the format does not yet
-      establish that this is safe after a torn write or corruption.
-- [ ] Recover an existing journal before exposing tables or beginning another
+      statement identity. Clean EOF is distinct from errors; malformed records
+      in the selected prefix throw without advancing the cursor. Startup selects
+      the newest checksum-valid boundary, rejects invalid offsets or records
+      within it, and ignores only the unpublished suffix. In-process rollback
+      uses its known completed-append boundary.
+- [ ] Ensure later appends and boundary updates cannot invalidate previously
+      durable recovery information through torn writes to a shared sector.
+      The header, both boundary slots, and the first record share the first
+      sector; later records are also packed without sector isolation. Slot-prefix
+      overwrite tests do not cover damage to neighboring durable bytes.
+- [x] Recover an existing journal before exposing tables or beginning another
       statement; opening an existing journal must never reset its append offset
       to zero and overwrite unresolved recovery information.
-      Partial: `StorageEngine::open()` locks the database root exclusively and
-      replays an existing journal before returning. Low-level journal reopening
-      preserves the append position at EOF. The current trailing-record policy
-      and format/identity validation still need the hardening above before this
-      is a complete restart recovery protocol.
+      `StorageEngine::open()` locks the database root exclusively, validates the
+      published journal prefix, and replays it before returning. Low-level
+      reopening preserves EOF and validates the record stream before appending.
+      Startup restoration and rejection of invalid journals are tested.
 - [x] Provide bounded streaming journal reads through `readNext()` rather than
       requiring the whole journal to be materialized.
       Preserve each record's file path as well as its page ID. Bound path/record
       lengths before allocation and reject invalid relative paths.
 - [x] Connect `readNext()` to rollback using `std::visit` for page and file
       records. The file-record layout is now consistently
-      `[type:u8][pathLength:u32][path][originalSize:u64][newFile:u8]`.
+      `[type:u8][recordSize:u64][sequence:u32][checksum:u32]`
+      followed by `[pathLength:u32][path][originalSize:u64][newFile:u8]`.
 - [x] Validate the new-file flag, aligned original sizes, zero original size for
       a new file, and consistent duplicate file-metadata records. Require valid
       preceding metadata and an in-range page ID before replaying a page image;
       new files must not have page before-images.
-- [ ] Complete corruption validation, including conflicting duplicate page
-      images and the format/identity checks above. Streaming replay can still
-      modify earlier pages before encountering an invalid later record.
-- [ ] Confine replay to intended table files, not just lexical relative paths.
-      Current decoding rejects absolute paths, `..`, NULs, and oversized paths,
-      but does not enforce the tables subtree or prevent symlink escape.
+- [x] Complete corruption validation, including conflicting duplicate page
+      images and the format/identity checks above. `validateJournalForRecovery()`
+      validates the complete selected prefix before any replay writes, rejects
+      all duplicate page identities, and checks preceding file metadata and
+      page ranges. Recovery-level tests for all cross-record cases remain below.
+- [x] Confine replay to intended table files, not just lexical relative paths.
+      Recovery opens `tables/` relative to the locked root and resolves replay
+      filenames beneath that directory with `RESOLVE_BENEATH` and
+      `RESOLVE_NO_SYMLINKS`; removals use `unlinkat()` with a filename.
+      Decoding also rejects absolute paths, `..`, NULs, and oversized paths.
 - [x] Undo table creation by removing files that did not exist beforehand and
       synchronizing their directories before journal retirement. Accept an
       already-absent file, including when creation never completed or a previous
@@ -284,16 +309,18 @@ before claiming crash recovery or enabling dirty-page eviction:
       sync, removal, or directory sync. Preserve unresolved evidence and block
       normal access, including reads, until recovery succeeds.
       Partial: retries after new-file deletion, existing-file sync failure, and
-      journal-unlink/directory-sync failure are tested. Normal access remains
-      blocked throughout; general restart recovery is still unfinished.
-- [ ] Treat a failure during final commit/cleanup synchronization as an uncertain
+      journal-unlink/directory-sync failure are tested, as are restart recovery
+      and retries after journal validation fails. Normal access remains blocked
+      throughout. Replay-write, resize, unlink, and interrupted-recovery restart
+      failures still need end-to-end coverage.
+- [x] Treat a failure during final commit/cleanup synchronization as an uncertain
       outcome: preserve remaining evidence and require recovery before serving
       further operations. Do not report success or blindly retry the statement.
-      Partial: commit marks the coordinator failed on cleanup errors and stays
+      Commit marks the coordinator failed on cleanup errors and stays
       outside the Database mutation catch. Reads and mutations are blocked.
       After commit unlinks the journal, rollback is rejected and the caller must
       reopen the database. Rollback retirement retries only directory cleanup.
-      Durable format/identity and power-loss outcome guarantees remain pending.
+      Power-loss outcome guarantees remain pending in section 5.
 
 ## 5. Verification and completion criteria
 
@@ -303,7 +330,10 @@ before claiming crash recovery or enabling dirty-page eviction:
       transfers and partial journal appends.
 - [ ] Extend those probes to every persistence boundary, including journal
       append failures through the coordinator, resize, unlink, and final cleanup
-      directory sync. They are not yet a complete simulated storage backend.
+      directory sync. Partial: coordinator append failures, record-sync /
+      boundary-write / boundary-sync failures, and final cleanup directory-sync
+      failures are covered. Recovery resize/unlink and partial header creation
+      still need coverage. These are not yet a complete simulated storage backend.
 - [x] Verify metadata-only durable offsets, skipping an already-covered offset,
       counter reset after commit and rollback, empty statements, invalid offset
       rejection, and catchable journal-size mismatch errors.
@@ -327,6 +357,10 @@ before claiming crash recovery or enabling dirty-page eviction:
 - [x] Test both journal record types, consecutive records, reopening/appending,
       both new-file flag values, invalid flags, and preserving the read position
       after decoding failures. Reader fixtures encode the wire layout independently.
+- [x] Test versioned headers, database/statement identity, checksums, sequences,
+      boundary selection/conflicts, and interrupted updates of either boundary
+      slot. Verify record-sync / boundary-write / boundary-sync ordering and
+      that failures at each stage prevent dependent database writes.
 - [x] Test Database operations with a root different from the working directory,
       direct INSERT recovery integration, rollback after mid-batch validation
       failure, journal cleanup, and a subsequent successful statement.
@@ -343,42 +377,51 @@ before claiming crash recovery or enabling dirty-page eviction:
       file was never created.
 - [x] Retry rollback after deletion followed by a failed tables-directory sync;
       require the journal to survive the failure and the retry to accept absence.
-- [ ] Test final commit/cleanup failures, access blocked after recovery failure,
+- [x] Test final commit/cleanup failures, access blocked after recovery failure,
       and startup recovery of a leftover journal.
-      Partial: final cleanup, read gating through all public handle types, and
-      in-process recovery/cleanup retries are tested. Restart coverage remains
-      pending.
+      Final cleanup, read gating through all public handle types, and in-process
+      recovery/cleanup retries are tested. `db_database_storage_test` now reopens
+      a database with durable undo, restores existing table bytes, removes an
+      uncommitted table, retires the journal, and starts a subsequent statement.
+      Header-only journals after failed begin barriers are also recovered.
 - [ ] Exercise malformed journals and cross-record validation through recovery,
       not just through the record reader. Extend recovery retries beyond the
-      covered new-file deletion case.
+      covered new-file deletion case. Partial: startup rejects foreign identity,
+      checksum corruption, truncation, and invalid published boundaries before
+      changing tables; unpublished tails are ignored. Live rollback retries
+      after an identity failure are tested. Conflicting file metadata, duplicate
+      pages, and missing/out-of-range page metadata still need recovery fixtures.
 - [ ] Inject failures before and after each persistence boundary and reopen.
       Observe either the previous complete state or the
       committed complete state, never a mixture. Process-termination tests alone
       do not simulate power loss because the OS cache survives; also use a fake
       backend that loses unsynchronized writes and exercises torn writes.
-- [x] Include journal/recovery sources in `db_core` and pass the normal build
-      and CTest suite. Reverified on 2026-10-12: all 12 tests pass.
+- [x] Include journal/recovery sources in `db_core` and pass the CTest suite.
+      Reverified on 2026-10-19: all 12 tests pass in a fresh GCC 14 Debug build
+      using `-Wno-error=conversion`. The normal build is blocked as noted below.
 - [x] Run focused ASan/UBSan checks. Reverified on 2026-10-12: statement-recovery,
       database-storage, storage-cursor, journal-file, and journal-reader tests
-      pass. LeakSanitizer is disabled because of the sandbox's ptrace restriction.
-- [x] Pass a fresh full warnings-as-errors build. Verified on 2026-10-12 with
-      GCC 14 and `-Werror`, including the executable and all test targets. The
-      previously reported qualifier and unused-variable/parameter warnings are
-      fixed.
+      pass. Not rerun in the 2026-10-19 review. LeakSanitizer was disabled because
+      of the sandbox's ptrace restriction.
+- [ ] Pass a fresh full warnings-as-errors build. Previously verified on
+      2026-10-12; the 2026-10-19 normal build fails at `db_sql_parser.cpp:679`
+      under `-Werror=conversion`. A separate build with only conversion warnings
+      downgraded also reports conversions in `db_query_validator.cpp`,
+      `db_statement_recovery.cpp`, `db_journal_reader_test.cpp`, and
+      `db_statement_recovery_test.cpp`.
 
 ## Recommended next steps
 
-1. Completed in steps 2 and 3: access gating, generation-qualified writeback,
-   per-handle commit durability checks, and in-process cleanup failure handling.
-2. Extend failure injection to resize/truncate and other outstanding boundaries,
-   building on the existing growth, partial-write, and multi-file tests.
-3. Specify the recoverable journal format, then recover leftover journals before
-   exposing tables. Harden the existing startup replay path for interrupted
-   appends, corruption, statement identity, safe target paths, and failures
-   during recovery. Exclusive ownership and root-parent persistence are present.
-4. Extend the existing failure-injection tests through all recovery/retirement
-   boundaries and simulate loss of unsynchronized data; passing ordinary file
-   tests is not a power-loss guarantee.
+1. Protect published recovery information from shared-sector torn writes during
+   record appends and boundary updates. Versioned records, identity validation,
+   boundary publication, and startup replay are already implemented.
+2. Extend failure injection to recovery writes, resize/truncate, unlink, partial
+   header creation, and reopening after interrupted recovery. Add recovery
+   fixtures for conflicting metadata, duplicate pages, and path confinement.
+3. Simulate loss of unsynchronized data and torn writes across all recovery and
+   retirement boundaries; passing ordinary file tests is not a power-loss guarantee.
+4. Resolve the conversion warnings blocking the normal build, then rerun the
+   full warnings-as-errors build and focused sanitizers for the current code.
 5. Keep dirty eviction disabled until the recovery-format and restart
    prerequisites are complete; future eviction must reuse checked writeback.
 
