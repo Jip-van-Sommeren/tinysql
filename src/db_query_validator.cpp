@@ -951,10 +951,12 @@ BoundCreateTable QueryValidator::bindCreateTable(
     // First pass: build all columns.
     for (const auto &columnDef : statement.columns)
     {
+        if (result.columns.size() > std::numeric_limits<std::uint32_t>::max())
+            throw std::runtime_error("Too many table columns");
         result.columns.push_back(
             bindColumnDefinition(
                 *columnDef,
-                result.columns.size()));
+                static_cast<std::uint32_t>(result.columns.size())));
     }
 
     BindContext context{

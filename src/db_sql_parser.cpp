@@ -912,7 +912,7 @@ std::vector<std::string> Parser::parseIdentifierList()
     return identifiers;
 }
 
-std::vector<std::unique_ptr<Expr>> Parser::parseExpressionList(std::uint32_t maxCount)
+std::vector<std::unique_ptr<Expr>> Parser::parseExpressionList(std::size_t maxCount)
 {
     std::vector<std::unique_ptr<Expr>> expressions;
     expressions.reserve(maxCount);

@@ -129,6 +129,16 @@ if(BUILD_TESTING)
     target_link_libraries(db_statement_recovery_test PRIVATE db_core)
     target_link_options(db_statement_recovery_test PRIVATE
         -Wl,--wrap=open -Wl,--wrap=syscall -Wl,--wrap=pwrite -Wl,--wrap=fsync
+        -Wl,--wrap=ftruncate -Wl,--wrap=unlinkat -Wl,--wrap=renameat
     )
     add_test(NAME db_statement_recovery_test COMMAND db_statement_recovery_test)
+
+    add_executable(db_power_loss_test tests/db_power_loss_test.cpp)
+    db_configure_target(db_power_loss_test PRIVATE)
+    target_link_libraries(db_power_loss_test PRIVATE db_core)
+    target_link_options(db_power_loss_test PRIVATE
+        -Wl,--wrap=syscall -Wl,--wrap=pwrite -Wl,--wrap=fsync
+        -Wl,--wrap=ftruncate -Wl,--wrap=unlinkat -Wl,--wrap=renameat
+    )
+    add_test(NAME db_power_loss_test COMMAND db_power_loss_test)
 endif()

@@ -14,7 +14,16 @@ namespace journal_test
     using Bytes = std::vector<std::byte>;
     inline constexpr std::size_t HeaderSize = 60;
     inline constexpr std::size_t BoundarySize = 20;
-    inline constexpr std::size_t DataOffset = HeaderSize + 2 * BoundarySize;
+    inline constexpr std::size_t SectorSize = 4096;
+    inline constexpr std::size_t DataOffset = 3 * SectorSize;
+    constexpr std::size_t padded(std::size_t size)
+    {
+        return (size + SectorSize - 1) / SectorSize * SectorSize;
+    }
+    constexpr std::size_t boundaryOffset(std::size_t slot)
+    {
+        return (slot + 1) * SectorSize;
+    }
     inline constexpr std::size_t RecordHeaderSize = 17;
     inline constexpr std::size_t RecordChecksumOffset = 13;
     inline constexpr uuid_t DatabaseId{
@@ -53,7 +62,7 @@ namespace journal_test
     {
         JournalHeader value{};
         value.magic = {'D', 'B', 'J', 'R', 'N', 'L', '\0', '\0'};
-        value.version = 1;
+        value.version = 2;
         value.headerLength = HeaderSize;
         uuid_copy(value.dbId, DatabaseId);
         uuid_copy(value.statementId, StatementId);
@@ -96,6 +105,7 @@ namespace journal_test
         appendUnsigned(bytes, generation);
         appendUnsigned(bytes, end);
         appendUnsigned(bytes, std::uint32_t{0});
+        bytes.resize(SectorSize);
         setUnsigned(bytes, 16, identityChecksum(bytes, identity));
         return bytes;
     }
@@ -103,6 +113,7 @@ namespace journal_test
     inline Bytes encodePrefix(const JournalHeader &identity = header())
     {
         auto bytes = encodeHeader(identity);
+        bytes.resize(SectorSize);
         const auto boundary = encodeBoundary(0, DataOffset, identity);
         for (int slot = 0; slot < 2; ++slot)
             bytes.insert(bytes.end(), boundary.begin(), boundary.end());
@@ -138,6 +149,7 @@ namespace journal_test
         appendUnsigned(bytes, sequence);
         appendUnsigned(bytes, std::uint32_t{0});
         bytes.insert(bytes.end(), payload.begin(), payload.end());
+        bytes.resize(padded(bytes.size()));
         refreshChecksum(bytes);
         return bytes;
     }

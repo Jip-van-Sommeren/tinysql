@@ -24,6 +24,7 @@ public:
     LinuxDirectory &operator=(LinuxDirectory &&other) noexcept;
 
     void deleteFile(const std::string &fileName);
+    void renameFile(const std::string &from, const std::string &to);
     void lockExclusive();
 
     // On an I/O error a prefix may already have been transferred. Neither

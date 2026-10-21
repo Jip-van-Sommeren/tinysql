@@ -90,6 +90,8 @@ private:
     uuid_t statementId_{};
     uuid_t dbId_{};
     bool recoveryReady_ = false;
+    bool initializing_ = false;
+    bool journalPublished_ = false;
 
     void requireWritableStatement() const;
     void finish();

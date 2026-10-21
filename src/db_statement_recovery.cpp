@@ -10,18 +10,18 @@
 #include <zlib.h>
 #include <uuid/uuid.h>
 
-// namespace
-// {
-
-//     std::uint32_t checksum(std::span<const std::byte> bytes)
-//     {
-//         return static_cast<std::uint32_t>(
-//             crc32_z(0,
-//                     reinterpret_cast<const Bytef *>(bytes.data()),
-//                     bytes.size()));
-//     }
-//     // path_length and  pageId = 2* sizeof(std::uint32_t)
-// }
+namespace
+{
+    void validateTablePath(const std::filesystem::path &path)
+    {
+        // Table files are direct children of tables/. Never silently discard
+        // a journal path's directory components during replay.
+        const auto name = path.generic_string();
+        if (name.empty() || path != path.filename() || name == "." || name == ".." ||
+            name.find('\0') != std::string::npos)
+            throw std::runtime_error("Invalid table path in journal");
+    }
+}
 
 StatementRecovery::StatementRecovery(
     const LinuxDirectory &root,
@@ -82,6 +82,7 @@ void StatementRecovery::validateJournalForRecovery(std::uint64_t end)
             [&](const auto &value)
             {
                 using T = std::decay_t<decltype(value)>;
+                validateTablePath(value.relativeFilePath);
 
                 if constexpr (std::is_same_v<T, PageBeforeImage>)
                 {
@@ -110,6 +111,10 @@ void StatementRecovery::validateJournalForRecovery(std::uint64_t end)
                     {
                         throw std::runtime_error("Conflicting original file metadata in journal");
                     }
+                    // Resolve every existing target before any replay writes,
+                    // including rejecting symlinks in later records.
+                    if (!value.newFile)
+                        (void)LinuxFile(tableDir_, value.relativeFilePath, LinuxFile::OpenMode::ReadOnly);
                 }
             },
             payload);
@@ -134,6 +139,7 @@ void StatementRecovery::initializeForRecover()
     }
     recoveryEnd_ = end;
     recoveryReady_ = true;
+    journalPublished_ = true;
 
     journalFile_->sync();
 
@@ -157,33 +163,53 @@ void StatementRecovery::begin()
         throw std::overflow_error("Statement generation exhausted");
     uuid_generate_random(statementId_);
 
+    if (journalDir_.entryExists("journal.log"))
+        throw std::runtime_error("Cannot open new journal: unresolved journal exists");
     journalFile_.emplace(
-        journalDir_, "journal.log", dbId_, statementId_,
+        journalDir_, "journal.pending", dbId_, statementId_,
         LinuxFile::OpenMode::CreateNew);
+    initializing_ = true;
+    try
+    {
+        JournalHeader header{};
+        header.magic = JournalMagic;
+        header.version = JournalVersion;
+        header.headerLength = JournalHeaderBytes;
+        uuid_copy(header.dbId, dbId_);
+        uuid_copy(header.statementId, statementId_);
+        header.pageSize = PAGE_SIZE;
+        header.checksum = 0;
 
-    JournalHeader header{};
-    header.magic = JournalMagic;
-    header.version = 1;
-    header.headerLength = JournalHeaderBytes;
-    uuid_copy(header.dbId, dbId_);
-    uuid_copy(header.statementId, statementId_);
-    header.pageSize = PAGE_SIZE;
-    header.checksum = 0;
+        JournalBoundary journalBoundary{.generation = 0, .endOffset = JournalDataOffset, .checksum = 0};
 
-    JournalBoundary journalBoundary{.generation = 0, .endOffset = JournalDataOffset, .checksum = 0};
+        journalFile_->writeJournalHeader(header);
+        journalFile_->writeJournalBoundary(journalBoundary, 0);
+        journalFile_->writeJournalBoundary(journalBoundary, 1);
 
-    journalFile_->writeJournalHeader(header);
-    journalFile_->writeJournalBoundary(journalBoundary, 0);
-    journalFile_->writeJournalBoundary(journalBoundary, 1);
+        // An incomplete header must never appear under the recovery filename.
+        // No table mutation is authorized until this rename is durable.
+        journalFile_->sync();
+        journalDir_.renameFile("journal.pending", "journal.log");
+        journalPublished_ = true;
+        journalDir_.sync();
 
-    appendOffset_ = JournalDataOffset;
-    recoveryEnd_ = JournalDataOffset;
-    ++generation_;
-    recoveryReady_ = true;
+        appendOffset_ = JournalDataOffset;
+        syncOffset_ = JournalDataOffset;
+        recoveryEnd_ = JournalDataOffset;
+        ++generation_;
+        recoveryReady_ = true;
 
-    journalDirectoryNeedsSync_ = true;
-    active_ = true;
-    ensureDurable();
+        journalDirectoryNeedsSync_ = false;
+        activeBoundarySlot_ = 0;
+        boundaryGeneration_ = 0;
+        active_ = true;
+        initializing_ = false;
+    }
+    catch (...)
+    {
+        failed_ = true;
+        throw;
+    }
 }
 
 void StatementRecovery::capturePageOnce(const PageBeforeImage &image)
@@ -191,6 +217,7 @@ void StatementRecovery::capturePageOnce(const PageBeforeImage &image)
     requireWritableStatement();
     try
     {
+        validateTablePath(image.relativeFilePath);
         if (hasCapturedPage(image.relativeFilePath, image.pageId))
             return;
         if (std::uint64_t{image.pageId} * PAGE_SIZE >= getOriginalFileSize(image.relativeFilePath))
@@ -223,7 +250,7 @@ void StatementRecovery::captureFileOnce(const std::filesystem::path &relativePat
     requireWritableStatement();
     try
     {
-
+        validateTablePath(relativePath);
         // const auto resolvedPath = tableDir_.getPath() / relativePath;
         if (newFile && tableDir_.entryExists(relativePath))
         {
@@ -328,6 +355,18 @@ void StatementRecovery::rollback()
     if (retirement_ == Retirement::Commit)
         throw std::runtime_error("Commit outcome is uncertain; reopen the database before recovery");
     failed_ = true;
+
+    if (initializing_)
+    {
+        // No dependent writes were allowed. This also works after a short
+        // header write, without trying to parse that incomplete header.
+        const auto name = journalPublished_ ? "journal.log" : "journal.pending";
+        if (journalDir_.entryExists(name))
+            journalDir_.deleteFile(name);
+        journalDir_.sync();
+        finish();
+        return;
+    }
 
     if (retirement_ == Retirement::Rollback)
     {
@@ -484,6 +523,8 @@ void StatementRecovery::finish()
     syncOffset_ = 0;
     recoveryEnd_ = 0;
     recoveryReady_ = false;
+    initializing_ = false;
+    journalPublished_ = false;
     journalDirectoryNeedsSync_ = false;
     failed_ = false;
     active_ = false;
@@ -512,10 +553,12 @@ void StatementRecovery::ensureDurable(std::uint64_t requiredEnd)
 void StatementRecovery::ensureDurable()
 {
     requireWritableStatement();
-    const auto nextSlot = 1 - activeBoundarySlot_;
+    const auto nextSlot = static_cast<std::uint8_t>(1 - activeBoundarySlot_);
 
     try
     {
+        if (boundaryGeneration_ == std::numeric_limits<std::uint64_t>::max())
+            throw std::overflow_error("Journal boundary generation exhausted");
         if (journalFile_->size() != appendOffset_)
             throw std::runtime_error("Journal size does not match completed appends");
         journalFile_->sync();

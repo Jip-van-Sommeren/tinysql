@@ -152,6 +152,14 @@ StorageEngine StorageEngine::open(
 
     StorageEngine engine{path, std::move(root), dbId};
 
+    // Staging journals never authorize database writes. A crash during header
+    // construction or before its rename may leave this disposable file behind.
+    if (engine.journalDirectory_.entryExists("journal.pending"))
+    {
+        engine.journalDirectory_.deleteFile("journal.pending");
+        engine.journalDirectory_.sync();
+    }
+
     if (engine.journalDirectory_.entryExists("journal.log"))
     {
         engine.statementRecovery_.initializeForRecover();

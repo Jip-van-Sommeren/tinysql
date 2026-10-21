@@ -74,12 +74,12 @@ namespace
         {
             JournalFile journal(LinuxDirectory{directory}, path.filename(), journal_test::DatabaseId, journal_test::StatementId);
             journal_test::initialize(journal, expectedHeader);
-            require(journal.writeFileBeforeImage(metadata) == JournalDataOffset + metadata.size(), "File append end changed");
+            require(journal.writeFileBeforeImage(metadata) == JournalDataOffset + journal_test::padded(metadata.size()), "File append end changed");
             journal.writePage(first);
             journal.writePage(second);
             journal.writePage(first); // Preserve duplicate images and cross-file page IDs.
             journal.sync();
-            require(journal_test::readFile(path) == expectedBytes, "Writer disagrees with version-1 wire format");
+            require(journal_test::readFile(path) == expectedBytes, "Writer disagrees with version-2 wire format");
         }
         requireThrows<std::system_error>([&] { JournalFile duplicate(LinuxDirectory{directory}, path.filename(), journal_test::DatabaseId, journal_test::StatementId); }, "open");
         require(journal_test::readFile(path) == expectedBytes, "CreateNew overwrote an existing journal");
@@ -88,7 +88,7 @@ namespace
         {
             reader.rewind();
             const auto header = reader.readJournalHeader();
-            require(header.magic == expectedHeader.magic && header.version == 1 && header.headerLength == 60 &&
+            require(header.magic == expectedHeader.magic && header.version == 2 && header.headerLength == 60 &&
                         header.pageSize == PAGE_SIZE && uuid_compare(header.dbId, expectedHeader.dbId) == 0 &&
                         uuid_compare(header.statementId, expectedHeader.statementId) == 0,
                     "Journal header or UUID bytes changed");
@@ -119,7 +119,7 @@ namespace
             JournalFile writer(LinuxDirectory{directory}, path.filename(), journal_test::DatabaseId, journal_test::StatementId, Mode::OpenExisting);
             (void)writer.readJournalHeader();
             requireRecord(writer.readNext().value(), first, 0);
-            require(writer.writePage(second) == before.size() + second.size(), "Reopen did not append at EOF");
+            require(writer.writePage(second) == before.size() + journal_test::padded(second.size()), "Reopen did not append at EOF");
             requireRecord(writer.readNext().value(), second, 1);
         }
         const auto after = journal_test::readFile(path);
@@ -147,9 +147,9 @@ namespace
 
         journal.writeJournalBoundary({1, firstEnd, 0}, 1);
         const auto boundary = journal_test::encodeBoundary(1, firstEnd);
-        std::copy(boundary.begin(), boundary.end(), expected.begin() + journal_test::HeaderSize + journal_test::BoundarySize);
+        std::copy(boundary.begin(), boundary.end(), expected.begin() + journal_test::boundaryOffset(1));
         require(journal_test::readFile(path) == expected, "Boundary publication modified other journal bytes");
-        require(journal.writeFileBeforeImage(second) == firstEnd + second.size(),
+        require(journal.writeFileBeforeImage(second) == firstEnd + journal_test::padded(second.size()),
                 "Boundary publication moved the append offset");
         const auto secondBytes = journal_test::encode(second, 1);
         expected.insert(expected.end(), secondBytes.begin(), secondBytes.end());

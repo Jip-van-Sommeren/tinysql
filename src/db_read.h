@@ -47,7 +47,7 @@ public:
         for (std::size_t i = 0; i < sizeof(T); ++i)
         {
             const auto byte = std::to_integer<std::uint8_t>(buffer[offset + i]);
-            value |= static_cast<T>(byte) << (i * 8);
+            value = static_cast<T>(value | (static_cast<T>(byte) << (i * 8)));
         }
         return value;
     }

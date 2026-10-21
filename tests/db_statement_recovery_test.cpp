@@ -62,6 +62,7 @@ namespace
         bool failed = false;
         bool shortWrite = false;
         bool shortWriteDone = false;
+        std::size_t shortWriteBytes = 128;
         std::vector<Event> events;
     };
 
@@ -135,8 +136,9 @@ namespace
             probe.target = target;
             probe.failOperation = boundary == "create" ? "create" : boundary == "write" ? "write" : "sync";
             probe.failPath = boundary == "journal-sync" ? journal : target;
-            // Skip both initial journal syncs to fail the metadata barrier.
-            probe.skipMatches = boundary == "journal-sync" ? 2 : boundary == "write" ? 1 : 0;
+            // Initialization syncs the staging file; journal.log's first sync
+            // is the metadata barrier. The write fault follows one page write.
+            probe.skipMatches = boundary == "write" ? 1 : 0;
             {
                 Observe observe{probe};
                 requireError([&] { database.executeSql("CREATE TABLE items (id INT);"); }, "Input/output error");
@@ -181,7 +183,7 @@ namespace
 
     void testBeginBarrierFailures()
     {
-        for (const unsigned phase : {0, 1, 2})
+        for (const unsigned phase : {0u, 1u})
         {
             TestDirectory directory{"db-begin-barrier"};
             const Path root = directory.path / "db";
@@ -192,15 +194,15 @@ namespace
                 probe.root = root;
                 probe.target = root / "tables/items.table";
                 probe.failOperation = "sync";
-                probe.failPath = phase == 2 ? root / "journal" : journal;
-                probe.skipMatches = phase == 1 ? 1 : 0;
+                probe.failPath = phase == 1 ? root / "journal" : root / "journal/journal.pending";
+                probe.skipMatches = 0;
                 {
                     Observe observe{probe};
                     requireError([&] { database.executeSql("CREATE TABLE items (id INT);"); }, "fsync");
                 }
                 require(probe.failed && !std::filesystem::exists(probe.target),
                         "Failed header barrier allowed a table write");
-                require(std::filesystem::file_size(journal) == JournalDataOffset,
+                require(std::filesystem::file_size(phase == 0 ? root / "journal/journal.pending" : journal) == JournalDataOffset,
                         "Failed begin did not retain the header-only journal");
                 requireError([&] { database.executeSql("SELECT * FROM items;"); }, "recovery is required");
             }
@@ -441,11 +443,11 @@ namespace
             require(probe.events.size() == 3 &&
                         probe.events[0].operation == "sync" && probe.events[0].path == path &&
                         probe.events[1].operation == "write" && probe.events[1].path == path &&
-                        probe.events[1].offset == static_cast<off_t>(JournalHeaderBytes + (1 - active) * JournalBoundaryBytes) &&
+                        probe.events[1].offset == static_cast<off_t>(journalBoundaryOffset(static_cast<std::uint8_t>(1 - active))) &&
                         probe.events[2].operation == "sync" && probe.events[2].path == path,
                     "Publication must sync records, overwrite the older slot, then sync the boundary");
-            const auto current = reader.readJournalBoundary(1 - active).value();
-            const auto previous = reader.readJournalBoundary(active).value();
+            const auto current = reader.readJournalBoundary(static_cast<std::uint8_t>(1 - active)).value();
+            const auto previous = reader.readJournalBoundary(static_cast<std::uint8_t>(active)).value();
             require(current.generation == generation + 1 && current.endOffset == end && previous.generation == generation,
                     "Publication did not preserve the previous generation");
             const auto after = readFile(path);
@@ -783,6 +785,97 @@ namespace
         }
     }
 
+    void testRestartableRecoveryFailures()
+    {
+        for (const bool reopen : {false, true})
+        for (const std::string phase : {"write", "short-write", "resize", "file-sync",
+                                       "table-unlink", "table-sync", "journal-unlink", "journal-sync"})
+        {
+            TestDirectory directory{"db-replay-retry"};
+            const Path root = directory.path / "db";
+            seedTables(root);
+            const auto before = readFile(root / "tables/items.table");
+            {
+                auto engine = StorageEngine::open(root);
+                auto table = engine.openTable("items");
+                engine.beginStatement();
+                table.insertRows({.tableName = "items", .rows = {
+                    Row{{std::int32_t{2}, std::string(1500, 'b')}},
+                    Row{{std::int32_t{3}, std::string(1500, 'c')}}}});
+                { auto added = engine.createTable("added", "test", {}, {}); }
+                require(readFile(root / "tables/items.table").size() > before.size(), "Retry fixture did not grow");
+                Probe probe{};
+                probe.root = root;
+                probe.target = root / "tables/items.table";
+                probe.failPath = probe.target;
+                probe.failOperation = phase;
+                if (phase == "short-write")
+                {
+                    probe.failOperation = "write";
+                    probe.shortWrite = true;
+                    probe.skipMatches = 1;
+                }
+                if (phase == "file-sync") probe.failOperation = "sync";
+                if (phase == "table-unlink" || phase == "journal-unlink")
+                {
+                    probe.failOperation = "unlink";
+                    probe.failPath = root / (phase == "table-unlink" ? "tables/added.table" : "journal/journal.log");
+                }
+                if (phase == "table-sync" || phase == "journal-sync")
+                {
+                    probe.failOperation = "sync";
+                    probe.failPath = root / (phase == "table-sync" ? "tables" : "journal");
+                }
+                {
+                    Observe observe{probe};
+                    requireError([&] { engine.rollbackStatement(); }, "Input/output error");
+                }
+                require(probe.failed, "Recovery failure not reached: " + phase);
+                requireError([&] { engine.getTableHeader("items"); }, "recovery is required");
+                requireError([&] { table.scan(); }, "recovery is required");
+                if (phase != "journal-sync")
+                    require(std::filesystem::exists(root / "journal/journal.log"), "Recovery failure lost undo");
+                if (!reopen) engine.rollbackStatement();
+            }
+            auto engine = StorageEngine::open(root);
+            require(readFile(root / "tables/items.table") == before, "Recovery retry lost original bytes: " + phase);
+            require(!engine.tableExists("added"), "Recovery retry retained a new table");
+            engine.beginStatement();
+            engine.commitStatement();
+        }
+    }
+
+    void testPartialInitialization()
+    {
+        for (const bool reopen : {false, true})
+        for (const std::string phase : {"header", "slot-a", "slot-b", "rename"})
+        {
+            TestDirectory directory{"db-partial-header"};
+            const Path root = directory.path / "db";
+            {
+                auto engine = StorageEngine::create(root);
+                Probe probe{};
+                probe.root = root;
+                probe.target = root / "tables/items.table";
+                probe.failPath = root / "journal/journal.pending";
+                probe.failOperation = phase == "rename" ? "rename" : "write";
+                probe.shortWrite = phase == "header";
+                probe.shortWriteBytes = 16; // Tear inside the serialized header itself.
+                probe.skipMatches = phase == "header" || phase == "slot-a" ? 1 : phase == "slot-b" ? 2 : 0;
+                {
+                    Observe observe{probe};
+                    requireError([&] { engine.beginStatement(); }, "Input/output error");
+                }
+                require(probe.failed, "Initialization failure not reached");
+                requireError([&] { engine.tableExists("items"); }, "recovery is required");
+                if (!reopen) engine.rollbackStatement();
+            }
+            auto engine = StorageEngine::open(root);
+            require(!std::filesystem::exists(root / "journal/journal.pending"), "Staging journal survived recovery");
+            engine.beginStatement();
+            engine.commitStatement();
+        }
+    }
 }
 
 extern "C"
@@ -807,6 +900,27 @@ extern "C"
     int __real_open(const char *, int, ...);
     ssize_t __real_pwrite(int, const void *, size_t, off_t);
     int __real_fsync(int);
+    int __real_ftruncate(int, off_t);
+    int __real_unlinkat(int, const char *, int);
+    int __real_renameat(int, const char *, int, const char *);
+
+    int __wrap_ftruncate(int fd, off_t size)
+    {
+        if (observe("resize", descriptorPath(fd))) return -1;
+        return __real_ftruncate(fd, size);
+    }
+
+    int __wrap_unlinkat(int fd, const char *path, int flags)
+    {
+        if (observe("unlink", descriptorPath(fd) / path)) return -1;
+        return __real_unlinkat(fd, path, flags);
+    }
+
+    int __wrap_renameat(int from, const char *source, int to, const char *target)
+    {
+        if (observe("rename", descriptorPath(from) / source)) return -1;
+        return __real_renameat(from, source, to, target);
+    }
 
     int __wrap_open(const char *path, int flags, ...)
     {
@@ -832,7 +946,7 @@ extern "C"
             path == activeProbe->failPath)
         {
             activeProbe->shortWriteDone = true;
-            return __real_pwrite(fd, bytes, std::min(count, size_t{128}), offset);
+            return __real_pwrite(fd, bytes, std::min(count, activeProbe->shortWriteBytes), offset);
         }
         return __real_pwrite(fd, bytes, count, offset);
     }
@@ -865,6 +979,8 @@ int main()
         testRetirementFailures();
         testFinalCleanupReadGating();
         testDirectDirectorySyncFailures();
+        testRestartableRecoveryFailures();
+        testPartialInitialization();
     }
     catch (const std::exception &error)
     {

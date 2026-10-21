@@ -473,7 +473,7 @@ private:
     std::unique_ptr<Expr> parseIdentifierExpr();
     std::unique_ptr<ColumnExpr> parseIdentifierColumnExpr();
     std::vector<std::string> parseIdentifierList();
-    std::vector<std::unique_ptr<Expr>> parseExpressionList(std::uint32_t maxCount = std::numeric_limits<std::uint32_t>::max());
+    std::vector<std::unique_ptr<Expr>> parseExpressionList(std::size_t maxCount = std::numeric_limits<std::uint32_t>::max());
     Assignment parseAssignment();
     std::unique_ptr<SelectItem> parseSelectItem();
     std::vector<std::unique_ptr<SelectItem>> parseSelectList();

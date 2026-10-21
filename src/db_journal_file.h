@@ -21,8 +21,20 @@ constexpr std::array<char, 8> JournalMagic{
     'D', 'B', 'J', 'R', 'N', 'L', '\0', '\0'};
 
 constexpr std::size_t JournalBoundaryBytes = 8 + 8 + 4;
-constexpr std::size_t JournalDataOffset =
-    JournalHeaderBytes + 2 * JournalBoundaryBytes;
+// Version 2 assumes torn writes are confined to aligned sectors of at most
+// 4096 bytes. Never rewrite a sector containing published records or the
+// immutable header; each boundary slot owns a different sector.
+constexpr std::uint32_t JournalVersion = 2;
+constexpr std::size_t JournalSectorBytes = 4096;
+constexpr std::size_t JournalDataOffset = 3 * JournalSectorBytes;
+constexpr std::size_t journalPaddedSize(std::size_t size)
+{
+    return (size + JournalSectorBytes - 1) / JournalSectorBytes * JournalSectorBytes;
+}
+constexpr std::size_t journalBoundaryOffset(std::uint8_t slot)
+{
+    return (1 + std::size_t{slot}) * JournalSectorBytes;
+}
 
 struct JournalBoundary
 {
@@ -52,7 +64,7 @@ enum class JournalRecordType : std::uint8_t
 struct JournalRecordHeader
 {
     JournalRecordType type;
-    std::uint64_t recordSize; // Bytes, including header and path.
+    std::uint64_t recordSize; // Logical bytes, including header/path, excluding sector padding.
     std::uint32_t sequenceNumber;
     std::uint32_t checksum;
 };
@@ -83,8 +95,8 @@ struct JournalRecord
 
 // using JournalRecord = std::variant<FileBeforeImage, PageBeforeImage>;
 
-// Record I/O only, not yet a complete statement recovery protocol. Callers must
-// resolve old journals before starting a new statement or applying undo records.
+// Record I/O; StatementRecovery owns publication, replay, and retirement.
+// Callers must resolve old journals before starting a new statement.
 class JournalFile
 {
 public:
@@ -116,7 +128,8 @@ public:
     }
     void rewind(std::uint64_t start) { readOffset_ = start; }
 
-    // Appends return the end of the complete record; neither synchronizes it.
+    // Appends return the sector-aligned end (including zero padding, also
+    // covered by the record checksum); neither synchronizes it.
     std::uint64_t writeFileBeforeImage(const FileBeforeImage &fileBeforeImage);
 
     std::uint64_t writePage(const PageBeforeImage &pageBeforeImage);

@@ -238,6 +238,13 @@ void LinuxDirectory::deleteFile(const std::string &fileName)
     }
 }
 
+void LinuxDirectory::renameFile(const std::string &from, const std::string &to)
+{
+    ensureOpen();
+    if (::renameat(fd_, from.c_str(), fd_, to.c_str()) == -1)
+        throwError("renameat", errno);
+}
+
 void LinuxFile::throwError(const char *operation, int error) const
 {
     throw std::system_error(error, std::generic_category(),

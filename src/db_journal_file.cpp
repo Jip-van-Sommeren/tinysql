@@ -62,8 +62,10 @@ JournalFile::JournalFile(const LinuxDirectory &parent, const std::filesystem::pa
 
 std::optional<JournalBoundary> JournalFile::readJournalBoundary(const std::uint8_t slot)
 {
-    std::array<std::byte, JournalBoundaryBytes> headerBytes{};
-    const auto recordStart = JournalHeaderBytes + (slot * JournalBoundaryBytes);
+    if (slot > 1)
+        throw std::out_of_range("Invalid journal boundary slot");
+    std::array<std::byte, JournalSectorBytes> headerBytes{};
+    const auto recordStart = journalBoundaryOffset(slot);
     file_.readExactAt(recordStart, headerBytes);
     ByteReader reader(headerBytes);
     JournalBoundary header{};
@@ -73,7 +75,7 @@ std::optional<JournalBoundary> JournalFile::readJournalBoundary(const std::uint8
 
     header.checksum = reader.readUnsigned<std::uint32_t>();
 
-    std::vector<std::byte> bytes(JournalBoundaryBytes);
+    std::vector<std::byte> bytes(JournalSectorBytes);
     file_.readExactAt(recordStart,
                       std::span<std::byte>{bytes});
 
@@ -159,7 +161,7 @@ JournalHeader JournalFile::readJournalHeader()
     }
 
     header.version = reader.readUnsigned<std::uint32_t>();
-    if (header.version != 1)
+    if (header.version != JournalVersion)
     {
         throw std::runtime_error("Unsupported journal version");
     }
@@ -243,12 +245,13 @@ std::optional<JournalRecord> JournalFile::readRecord(
         .sequenceNumber = sequenceNumber,
         .checksum = storedChecksum};
 
-    if (recordSize > fileSize - recordStart)
+    const auto paddedSize = journalPaddedSize(recordSize);
+    if (paddedSize > fileSize - recordStart)
     {
         throw std::runtime_error("Truncated journal record");
     }
 
-    std::vector<std::byte> bytes(recordSize);
+    std::vector<std::byte> bytes(paddedSize);
     file_.readExactAt(recordStart,
                       std::span<std::byte>{bytes});
 
@@ -281,7 +284,7 @@ std::optional<JournalRecord> JournalFile::readRecord(
         throw std::runtime_error("Unexpected journal record sequence");
     }
 
-    ByteReader reader(bytes);
+    ByteReader reader(std::span<const std::byte>{bytes}.first(recordSize));
     reader.seek(JournalRecordHeaderBytes);
 
     JournalRecord result{};
@@ -317,7 +320,7 @@ std::optional<JournalRecord> JournalFile::readRecord(
         throw std::runtime_error("Unexpected trailing bytes in journal record");
     }
 
-    offset = recordStart + recordSize;
+    offset = recordStart + paddedSize;
     ++nextReadSequence_;
     return result;
 }
@@ -374,12 +377,16 @@ std::uint64_t JournalFile::writePage(const PageBeforeImage &pageBeforeImage)
 
 void JournalFile::writeJournalBoundary(const JournalBoundary &boundary, const std::uint8_t slot)
 {
-    ByteWriter writer(JournalBoundaryBytes);
+    if (slot > 1)
+        throw std::out_of_range("Invalid journal boundary slot");
+    if (appendFailed_)
+        throw std::runtime_error("Journal append previously failed; recovery is required");
+    ByteWriter writer(JournalSectorBytes);
     writer.writeUnsigned<std::uint64_t>(boundary.generation);
     writer.writeUnsigned<std::uint64_t>(boundary.endOffset);
 
     const auto checksumOffset = writer.position(); // Byte 13 within this buffer
-    writer.writeUnsigned<std::uint32_t>(boundary.checksum);
+    writer.writeUnsigned<std::uint32_t>(0);
 
     std::vector<std::byte> bytes;
     bytes.reserve(sizeof(dbId_) + sizeof(statementId_) + writer.bytes().size());
@@ -401,7 +408,7 @@ void JournalFile::writeJournalBoundary(const JournalBoundary &boundary, const st
     }
     try
     {
-        file_.writeAllAt(JournalHeaderBytes + (slot * JournalBoundaryBytes), writer.bytes());
+        file_.writeAllAt(journalBoundaryOffset(slot), writer.bytes());
     }
     catch (...)
     {
@@ -419,7 +426,7 @@ void JournalFile::writeJournalHeader(const JournalHeader &header)
     {
         throw std::runtime_error("Journal append previously failed; recovery is required");
     }
-    ByteWriter writer(JournalHeaderBytes);
+    ByteWriter writer(JournalSectorBytes);
 
     writer.writeBytes(JournalMagic.data(), JournalMagic.size());
 
@@ -505,7 +512,7 @@ std::uint64_t JournalFile::appendRecord(
         throw std::overflow_error("Journal sequence exhausted");
     }
     const auto recordSize = JournalRecordHeaderBytes + payload.size();
-    ByteWriter writer(recordSize);
+    ByteWriter writer(journalPaddedSize(recordSize));
 
     writer.writeUnsigned<std::uint8_t>(
         static_cast<std::uint8_t>(type));

@@ -120,7 +120,7 @@ namespace
         auto value = header();
         value.magic[0] = 'X';
         check(encodeHeader(value), "magic");
-        value = header(); value.version = 2;
+        value = header(); value.version = 1;
         check(encodeHeader(value), "version");
         value = header(); value.headerLength = 59;
         check(encodeHeader(value), "length");
@@ -186,7 +186,7 @@ namespace
                                  std::string{"x\0y", 3}})
             check(encode(FileBeforeImage{name, PAGE_SIZE}), name.empty() ? "record size" : "path");
         bytes = encode(file);
-        bytes.back() = std::byte{2}; refreshChecksum(bytes);
+        bytes[file.size() - 1] = std::byte{2}; refreshChecksum(bytes);
         check(bytes, "new-file flag");
         bytes = encode(file);
         bytes[RecordHeaderSize + 4] ^= std::byte{1};
@@ -199,8 +199,7 @@ namespace
         check(bytes, "checksum");
         check(encode(file, 1), "sequence");
         bytes = encode(file);
-        bytes.push_back(std::byte{0});
-        setUnsigned(bytes, 1, static_cast<std::uint64_t>(bytes.size()));
+        setUnsigned(bytes, 1, static_cast<std::uint64_t>(file.size() + 1));
         refreshChecksum(bytes);
         check(bytes, "trailing bytes");
         bytes = encode(file);
@@ -261,9 +260,9 @@ namespace
         const auto fixture = [&](const Bytes &a, const Bytes &b) {
             raw.resize(0);
             raw.writeAllAt(0, encodeHeader());
-            raw.writeAllAt(HeaderSize, a);
-            raw.writeAllAt(HeaderSize + BoundarySize, b);
-            raw.resize(600);
+            raw.writeAllAt(boundaryOffset(0), a);
+            raw.writeAllAt(boundaryOffset(1), b);
+            raw.resize(DataOffset);
         };
         const auto select = [&](std::uint64_t expected) {
             uuid_t recovered{}; // Startup does not know the statement identity yet.
@@ -326,20 +325,20 @@ namespace
         const auto old = encodeBoundary(0, DataOffset);
         const auto published = encodeBoundary(1, 200);
         const auto replacement = encodeBoundary(2, 300);
-        for (std::uint8_t target : {0, 1})
+        for (std::uint8_t target : {std::uint8_t{0}, std::uint8_t{1}})
         {
-            for (std::size_t prefix = 0; prefix <= BoundarySize; ++prefix)
+            for (std::size_t prefix = 0; prefix <= SectorSize; ++prefix)
             {
                 raw.resize(0);
                 raw.writeAllAt(0, encodeHeader());
-                raw.writeAllAt(HeaderSize + target * BoundarySize, old);
-                raw.writeAllAt(HeaderSize + (1 - target) * BoundarySize, published);
-                raw.writeAllAt(HeaderSize + target * BoundarySize,
+                raw.writeAllAt(boundaryOffset(target), old);
+                raw.writeAllAt(boundaryOffset(1 - target), published);
+                raw.writeAllAt(boundaryOffset(target),
                                std::span<const std::byte>{replacement}.first(prefix));
-                raw.resize(300);
+                raw.resize(DataOffset);
                 uuid_t recovered{};
                 JournalFile reader(parent, "torn-boundaries", DatabaseId, recovered, Mode::ReadOnly);
-                const auto expected = prefix == BoundarySize ? 300 : 200;
+                const auto expected = prefix >= BoundarySize ? 300 : 200;
                 require(reader.validateJournalHeader(recovered) == static_cast<std::uint64_t>(expected),
                         "Interrupted boundary update lost the previously published prefix");
             }

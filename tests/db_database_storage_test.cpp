@@ -302,8 +302,8 @@ namespace
             auto bytes = original;
             const auto newest = journal_test::encodeBoundary(10, end, identity);
             const auto older = journal_test::encodeBoundary(9, journal_test::DataOffset, identity);
-            std::copy(newest.begin(), newest.end(), bytes.begin() + journal_test::HeaderSize);
-            std::copy(older.begin(), older.end(), bytes.begin() + journal_test::HeaderSize + journal_test::BoundarySize);
+            std::copy(newest.begin(), newest.end(), bytes.begin() + journal_test::boundaryOffset(0));
+            std::copy(older.begin(), older.end(), bytes.begin() + journal_test::boundaryOffset(1));
             if (end == original.size()) bytes.back() ^= std::byte{1};
             LinuxFile raw(journalDir, "journal.log");
             raw.writeAllAt(0, bytes);
@@ -338,6 +338,76 @@ namespace
         require(!engine.tableExists("items"), "Rollback retry did not reset record sequence");
         require(!std::filesystem::exists(journalPath), "Rollback retry did not retire the journal");
     }
+    void testRecoveryRelationshipsAndConfinement()
+    {
+        using namespace journal_test;
+        TestDirectory directory{"db-recovery-relationships"};
+        const auto root = directory.path / "db";
+        {
+            auto database = Database::create(root, "test");
+            database.executeSql("CREATE TABLE items (id INT);");
+            database.executeSql("INSERT INTO items VALUES (7);");
+        }
+        const auto target = root / "tables/items.table";
+        const auto before = readFile(target);
+        auto identity = header();
+        uuid_copy(identity.dbId, DatabaseIdentity{root}.bytes);
+        const auto outside = directory.path / "outside.table";
+        {
+            LinuxFile file(LinuxDirectory{directory.path}, outside.filename(), LinuxFile::OpenMode::CreateNew);
+            file.writeAllAt(0, before);
+        }
+        std::filesystem::create_symlink(outside, root / "tables/link.table");
+        PageBeforeImage page{"items.table", 0, {}};
+        page.originalPage.bytes.fill(std::byte{0xa5}); // Would visibly corrupt the file if replay starts early.
+        const FileBeforeImage metadata{"items.table", before.size()};
+        for (const std::string invalid : {"conflict", "duplicate", "missing", "range", "new-page",
+                                          "unaligned", "new-size", "nested", "dot", "symlink",
+                                          "absolute", "parent", "nul"})
+        {
+            auto bytes = encodePrefix(identity);
+            std::uint32_t sequence = 0;
+            const auto append = [&](const auto &record) {
+                auto encoded = encode(record, sequence++);
+                refreshChecksum(encoded, identity);
+                bytes.insert(bytes.end(), encoded.begin(), encoded.end());
+            };
+            append(metadata);
+            append(page);
+            if (invalid == "conflict") append(FileBeforeImage{"items.table", 0, true});
+            if (invalid == "duplicate") append(page);
+            if (invalid == "missing") append(PageBeforeImage{"missing.table", 0, {}});
+            if (invalid == "range") append(PageBeforeImage{"items.table", static_cast<std::uint32_t>(before.size() / PAGE_SIZE), {}});
+            if (invalid == "new-page")
+            {
+                append(FileBeforeImage{"new.table", 0, true});
+                append(PageBeforeImage{"new.table", 0, {}});
+            }
+            if (invalid == "unaligned") append(FileBeforeImage{"other.table", 1});
+            if (invalid == "new-size") append(FileBeforeImage{"new.table", PAGE_SIZE, true});
+            if (invalid == "nested") append(FileBeforeImage{"nested/items.table", 0, true});
+            if (invalid == "dot") append(FileBeforeImage{".", 0, true});
+            if (invalid == "symlink") append(FileBeforeImage{"link.table", before.size()});
+            if (invalid == "absolute") append(FileBeforeImage{outside, 0, true});
+            if (invalid == "parent") append(FileBeforeImage{"../outside.table", 0, true});
+            if (invalid == "nul") append(FileBeforeImage{std::string{"a\0b", 3}, 0, true});
+            const auto boundary = encodeBoundary(1, bytes.size(), identity);
+            std::copy(boundary.begin(), boundary.end(), bytes.begin() + boundaryOffset(1));
+            const auto journal = root / "journal/journal.log";
+            {
+                LinuxFile raw(LinuxDirectory{root / "journal"}, "journal.log", LinuxFile::OpenMode::CreateNew);
+                raw.writeAllAt(0, bytes);
+            }
+            for (int retry = 0; retry < 2; ++retry)
+            {
+                requireError([&] { (void)StorageEngine::open(root); }, "");
+                require(readFile(target) == before && readFile(outside) == before,
+                        "Malformed recovery changed a target: " + invalid);
+                require(readFile(journal) == bytes, "Recovery discarded invalid evidence: " + invalid);
+            }
+            std::filesystem::remove(journal);
+        }
+    }
 }
 
 int main()
@@ -350,6 +420,7 @@ int main()
         testUnpublishedTailsAreIgnored();
         testInvalidNewestBoundaryDoesNotFallBack();
         testLiveRollbackChecksStatementIdentity();
+        testRecoveryRelationshipsAndConfinement();
     }
     catch (const std::exception &error)
     {
