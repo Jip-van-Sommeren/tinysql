@@ -90,7 +90,7 @@ private:
 
     Column decodeColumn();
     ColumnStorage decodeColumnStorage();
-    Constraint decodeConstraint();
+    BoundConstraint decodeConstraint();
     std::unique_ptr<BoundExpr> decodeExpression();
     std::vector<ColumnId> decodeColumnIds();
 };

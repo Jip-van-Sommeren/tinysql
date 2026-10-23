@@ -453,7 +453,7 @@ struct BoundForeignKeyConstraintExpr final : BoundConstraintExpr
     std::vector<ColumnId> referencedColumnIds;
 };
 
-using Constraint = std::variant<
+using BoundConstraint = std::variant<
     BoundPrimaryKeyConstraintExpr,
     BoundForeignKeyConstraintExpr,
     BoundUniqueConstraintExpr,

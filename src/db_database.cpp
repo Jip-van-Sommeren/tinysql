@@ -22,7 +22,7 @@
 
 Database::Database(StorageEngine engine, const std::string &name)
     : dbName(name), storageEngine(std::move(engine))
-      
+
 {
 }
 
@@ -113,9 +113,7 @@ QueryResult Database::executeInsert(const BoundInsert &insert)
     storageEngine.beginStatement();
     try
     {
-        Table table = storageEngine.openTable(insert.tableName);
-
-        table.insertRows(insert);
+        auto queryResult = storageEngine.insertRows(insert);
     }
     catch (...)
     {

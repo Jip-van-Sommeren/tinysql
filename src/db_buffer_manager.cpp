@@ -273,12 +273,11 @@ void BufferManager::insertAllRows(const std::vector<Row> &rows)
     while (rowIndex < rows.size())
     {
         const Row &row = rows[rowIndex];
-        RowValidationResult validation =
+        RowValidationResult rowValidation =
             validateRowAgainstSchema(headerPage.columns, row);
-
-        if (!validation.valid)
+        if (!rowValidation.valid)
         {
-            throw std::runtime_error(validation.message);
+            throw std::runtime_error(rowValidation.message);
         }
 
         PageGuard data = getDataPage(currentPageId);
@@ -529,7 +528,7 @@ void BufferManager::appendRowToExistingDataPage(
 void BufferManager::initializeNewTable(const std::string &tableName,
                                        const std::string &magic,
                                        const std::vector<Column> &columns,
-                                       const std::vector<Constraint> &constraints)
+                                       const std::vector<BoundConstraint> &constraints)
 {
     requireReadable();
     if (!statementRecovery_.isNewFile(relativeTablePath_) || pageFile_.size() != 0)

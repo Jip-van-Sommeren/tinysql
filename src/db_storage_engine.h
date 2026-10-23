@@ -4,6 +4,8 @@
 #include "db_catalog.h"
 #include "db_journal_file.h"
 #include "db_read.h"
+#include "db_query_result.h"
+#include "db_query_validator.h"
 
 #include <filesystem>
 #include <string>
@@ -22,7 +24,7 @@ public:
         const std::string &tableName,
         const std::string &magic,
         const std::vector<Column> &columns,
-        const std::vector<Constraint> &constraints);
+        const std::vector<BoundConstraint> &constraints);
     Table openTable(const std::string &tableName);
     void requireReadable() const { statementRecovery_.requireReadable(); }
     void syncTablesDirectory()
@@ -48,6 +50,7 @@ public:
     {
         statementRecovery_.rollback();
     }
+    QueryResult insertRows(const BoundInsert &insert);
 
     // const std::filesystem::path &getTablesPath() const;
 

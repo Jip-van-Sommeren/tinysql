@@ -12,4 +12,4 @@ Page makeHeaderPage(
     const std::string &name,
     const std::string &magic,
     const std::vector<Column> &columns,
-    const std::vector<Constraint> &constraints);
+    const std::vector<BoundConstraint> &constraints);

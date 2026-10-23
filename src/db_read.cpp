@@ -192,7 +192,7 @@ std::vector<ColumnId> HeaderPageDecoder::decodeColumnIds()
     return columnIds;
 }
 
-Constraint HeaderPageDecoder::decodeConstraint()
+BoundConstraint HeaderPageDecoder::decodeConstraint()
 {
     ConstraintType type = static_cast<ConstraintType>(
         decoder.readUnsigned<std::uint8_t>());

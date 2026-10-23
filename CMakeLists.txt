@@ -46,6 +46,7 @@ add_library(db_core
     src/db_table.cpp
     src/db_write.cpp
     src/db_page_file.cpp
+    src/db_constraint_validator.cpp
 )
 
 find_package(PkgConfig REQUIRED)

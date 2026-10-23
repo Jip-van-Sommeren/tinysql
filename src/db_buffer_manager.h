@@ -78,7 +78,7 @@ public:
     void initializeNewTable(const std::string &tableName,
                             const std::string &magic,
                             const std::vector<Column> &columns,
-                            const std::vector<Constraint> &constraints);
+                            const std::vector<BoundConstraint> &constraints);
     void insertAllRows(const std::vector<Row> &rows);
     void flushPage(PageId pageId);
     void flushAll();

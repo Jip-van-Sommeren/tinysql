@@ -46,13 +46,14 @@ public:
         const std::string &tableName,
         const std::string &magic,
         const std::vector<Column> &columns,
-        const std::vector<Constraint> &constraints, StatementRecovery &statementRecovery);
+        const std::vector<BoundConstraint> &constraints, StatementRecovery &statementRecovery);
 
     static Table open(const LinuxDirectory &dbRoot, const std::filesystem::path &relTablePath, StatementRecovery &statementRecovery);
 
     void insertRows(const BoundInsert &insert);
     TableCursor scan() &;
     std::uint64_t deleteRows(const BoundDelete &del);
+    std::vector<BoundConstraint> getConstraints();
 
 private:
     friend class TableCursor;
@@ -65,6 +66,6 @@ private:
         const std::string &tableName,
         const std::string &magic,
         const std::vector<Column> &columns,
-        const std::vector<Constraint> &constraints);
+        const std::vector<BoundConstraint> &constraints);
     void validateHeaderPage();
 };

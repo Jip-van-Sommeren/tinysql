@@ -22,7 +22,7 @@ struct BindContext
 {
     std::string tableName;
     std::vector<Column> columns;
-    std::vector<Constraint> constraints;
+    std::vector<BoundConstraint> constraints;
 
     Column &resolveColumn(std::string_view name)
     {
@@ -90,12 +90,12 @@ struct BindContext
         return *it;
     }
 
-    const Constraint &resolveConstraint(std::string_view name) const
+    const BoundConstraint &resolveConstraint(std::string_view name) const
     {
         auto it = std::find_if(
             constraints.begin(),
             constraints.end(),
-            [&](const Constraint &constraint)
+            [&](const BoundConstraint &constraint)
             {
                 return std::visit(
                     [&](const auto &c)
@@ -119,7 +119,7 @@ struct BindContext
 
     const BoundDefaultConstraintExpr *findDefaultConstraint(ColumnId columnId) const
     {
-        for (const Constraint &constraint : constraints)
+        for (const BoundConstraint &constraint : constraints)
         {
             const auto *defaultConstraint =
                 std::get_if<BoundDefaultConstraintExpr>(&constraint);
@@ -193,7 +193,7 @@ struct BoundCreateTable
 {
     std::string tableName;
     std::vector<Column> columns;
-    std::vector<Constraint> constraints;
+    std::vector<BoundConstraint> constraints;
 };
 
 using BoundQuery = std::variant<BoundSelect, BoundInsert, BoundDelete, BoundCreateTable>;
@@ -266,7 +266,7 @@ private:
     BoundInsert validateInsert(const InsertStatement &statement);
     BoundDelete validateDelete(const DeleteStatement &statement);
     BoundCreateTable bindCreateTable(const CreateTableStatement &statement);
-    Constraint bindConstraintExpr(const ConstraintExpr &expr, BindContext &context);
+    BoundConstraint bindConstraintExpr(const ConstraintExpr &expr, BindContext &context);
     std::unique_ptr<BoundExpr> bindExpr(
         const Expr &expr,
         const BindContext &context,

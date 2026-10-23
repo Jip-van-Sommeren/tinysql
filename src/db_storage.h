@@ -48,13 +48,6 @@ struct Row
     std::vector<Value> values;
 };
 
-struct RowValidationResult
-{
-    bool valid;
-    std::optional<size_t> columnIndex;
-    std::string message;
-};
-
 enum class PageType : uint8_t
 {
     DataPage = 1,
@@ -94,7 +87,7 @@ struct HeaderPage
     uint32_t pageSize = PAGE_SIZE;
     std::string tableName;
     std::vector<Column> columns;
-    std::vector<Constraint> constraints;
+    std::vector<BoundConstraint> constraints;
 
     uint64_t totalRowCount = 0;
     uint32_t firstDataPageId = 1;

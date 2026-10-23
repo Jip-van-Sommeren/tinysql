@@ -81,7 +81,7 @@ Table Table::create(
     const std::string &tableName,
     const std::string &magic,
     const std::vector<Column> &columns,
-    const std::vector<Constraint> &constraints,
+    const std::vector<BoundConstraint> &constraints,
     StatementRecovery &statementRecovery)
 {
     Table table{tablesDir, tableName + ".table", LinuxFile::OpenMode::CreateNew, statementRecovery};
@@ -176,7 +176,7 @@ void Table::initializeNewTable(
     const std::string &tableName,
     const std::string &magic,
     const std::vector<Column> &columns,
-    const std::vector<Constraint> &constraints)
+    const std::vector<BoundConstraint> &constraints)
 {
     bufferManager.initializeNewTable(tableName, magic, columns, constraints);
     bufferManager.flushAll();
@@ -186,4 +186,11 @@ void Table::initializeNewTable(
 void Table::validateHeaderPage()
 {
     bufferManager.getHeaderPage();
+}
+
+std::vector<BoundConstraint> Table::getConstraints()
+{
+    PageGuard header = bufferManager.getHeaderPage();
+    const HeaderPage &headerPage = header.as<HeaderPage>();
+    return headerPage.constraints;
 }

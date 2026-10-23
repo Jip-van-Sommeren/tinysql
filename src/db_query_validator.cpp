@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cctype>
 #include <string>
+#include <uuid/uuid.h>
 
 namespace
 {
@@ -25,6 +26,13 @@ namespace
         }
 
         throw std::runtime_error("Only single-table queries are supported");
+    }
+
+    std::string uuidToString(const uuid_t &id)
+    {
+        char buffer[37]; // 36 characters + null terminator
+        uuid_unparse_lower(id, buffer);
+        return std::string{buffer};
     }
 
     bool iequals(std::string_view a, std::string_view b)
@@ -977,7 +985,7 @@ BoundCreateTable QueryValidator::bindCreateTable(
     return result;
 }
 
-Constraint QueryValidator::bindConstraintExpr(
+BoundConstraint QueryValidator::bindConstraintExpr(
     const ConstraintExpr &expr, BindContext &context)
 
 {
@@ -991,8 +999,14 @@ Constraint QueryValidator::bindConstraintExpr(
             static_cast<const NotNullConstraintExpr &>(expr);
         Column &column = context.resolveColumn(notNullExpr.columnName);
         column.nullable = false;
+        uuid_t constraintId{};
+        uuid_generate(constraintId);
         constraintName = expr.constraintName.value_or(
-            std::format("{}_{}", constraintTypeToString(notNullExpr.constraintType), notNullExpr.columnName)); // Use a format for the constraint name if not provided
+            std::format("{}_{}_{}",
+                        constraintTypeToString(notNullExpr.constraintType),
+                        notNullExpr.columnName,
+                        uuidToString(constraintId))); // Use a format for the constraint name if not provided
+        uuid_clear(constraintId);
 
         return BoundNotNullConstraintExpr{
             std::move(constraintName),
@@ -1005,11 +1019,15 @@ Constraint QueryValidator::bindConstraintExpr(
             static_cast<const NullConstraintExpr &>(expr);
         Column &column = context.resolveColumn(nullExpr.columnName);
         column.nullable = true;
+        uuid_t constraintId{};
+        uuid_generate(constraintId);
         constraintName = expr.constraintName.value_or(
             std::format(
-                "{}_{}",
+                "{}_{}_{}",
                 constraintTypeToString(nullExpr.constraintType),
-                nullExpr.columnName));
+                nullExpr.columnName,
+                uuidToString(constraintId)));
+        uuid_clear(constraintId);
 
         return BoundNullConstraintExpr{
             std::move(constraintName),
@@ -1026,9 +1044,14 @@ Constraint QueryValidator::bindConstraintExpr(
         {
             throw std::runtime_error("Multiple DEFAULT constraints for column: " + column.name);
         }
+        uuid_t constraintId{};
+        uuid_generate(constraintId);
         constraintName = expr.constraintName.value_or(
-            std::format("{}_{}", constraintTypeToString(defaultExpr.constraintType), defaultExpr.columnName)); // Use a format for the constraint name if not provided
-
+            std::format("{}_{}_{}",
+                        constraintTypeToString(defaultExpr.constraintType),
+                        defaultExpr.columnName,
+                        uuidToString(constraintId))); // Use a format for the constraint name if not provided
+        uuid_clear(constraintId);
         auto boundValue = bindExpr(*defaultExpr.value, context);
         if (containsColumnReference(*boundValue))
         {
@@ -1054,11 +1077,14 @@ Constraint QueryValidator::bindConstraintExpr(
         const auto &pkExpr =
             dynamic_cast<const PrimaryKeyConstraintExpr &>(expr);
 
+        uuid_t constraintId{};
+        uuid_generate(constraintId);
         constraintName = expr.constraintName.value_or(
             std::format(
                 "{}_{}",
                 constraintTypeToString(pkExpr.constraintType),
-                join(pkExpr.columns, "_")));
+                join(pkExpr.columns, "_"), uuidToString(constraintId)));
+        uuid_clear(constraintId);
 
         std::vector<ColumnId> columnIds;
         columnIds.reserve(pkExpr.columns.size());
@@ -1132,12 +1158,15 @@ Constraint QueryValidator::bindConstraintExpr(
                     "Foreign key column types are incompatible");
             }
         }
+        uuid_t constraintId{};
+        uuid_generate(constraintId);
         constraintName = expr.constraintName.value_or(
             std::format(
-                "{}_{}_{}",
+                "{}_{}_{}_{}",
                 constraintTypeToString(fkExpr.constraintType),
                 join(fkExpr.localColumns, "_"),
-                join(fkExpr.referencedColumns, "_")));
+                join(fkExpr.referencedColumns, "_"),
+                uuidToString(constraintId)));
         return BoundForeignKeyConstraintExpr{
             std::move(constraintName),
             std::move(localColumnIds),
@@ -1149,12 +1178,15 @@ Constraint QueryValidator::bindConstraintExpr(
     {
         const auto &uniqueExpr =
             dynamic_cast<const UniqueConstraintExpr &>(expr);
-
+        uuid_t constraintId{};
+        uuid_generate(constraintId);
         constraintName = expr.constraintName.value_or(
             std::format(
-                "{}_{}",
+                "{}_{}_{}",
                 constraintTypeToString(uniqueExpr.constraintType),
-                join(uniqueExpr.columns, "_")));
+                join(uniqueExpr.columns, "_"),
+                uuidToString(constraintId)));
+        uuid_clear(constraintId);
 
         std::vector<ColumnId> boundColumns;
         boundColumns.reserve(uniqueExpr.columns.size());
@@ -1180,8 +1212,17 @@ Constraint QueryValidator::bindConstraintExpr(
         {
             throw std::runtime_error("CHECK condition must be boolean");
         }
+        uuid_t constraintId{};
+        uuid_generate(constraintId);
 
-        constraintName = expr.constraintName.value_or("CK");
+        constraintName = expr.constraintName.value_or(
+            std::format(
+                "{}_{}",
+                constraintTypeToString(checkExpr.constraintType),
+                uuidToString(constraintId)));
+
+        uuid_clear(constraintId);
+
         return BoundCheckConstraintExpr{
             std::move(constraintName),
             std::move(condition)};
