@@ -1,16 +1,5 @@
 #include "db_constraint_validator.h"
 
-Value boundExprToValue(const BoundExpr &bExpr)
-{
-    if (bExpr.kind() == BoundExprKind::Literal)
-    {
-        const auto &literal =
-            static_cast<const BoundLiteralExpr &>(bExpr);
-
-        const Value &value = literal.value;
-        return value;
-    }
-}
 ConstraintValidationResult ConstraintValidator::validateConstraint(const HeaderPage &schema, Row &row)
 {
     for (BoundConstraint constraint : schema.constraints)
@@ -47,7 +36,7 @@ ConstraintValidationResult ConstraintValidator::validateConstraint(const HeaderP
                             return {
                                 .valid = false,
                                 .constraintName = constraintValue.constraintName,
-                                .message = "Primary Key cannot be NULL"};
+                                .message = "PRIMARY KEY cannot be NULL"};
                         }
 
                         key.push_back({columnId, row.values.at(columnId)});
@@ -57,7 +46,7 @@ ConstraintValidationResult ConstraintValidator::validateConstraint(const HeaderP
                         return {
                             .valid = false,
                             .constraintName = constraintValue.constraintName,
-                            .message = "Primary Key already exists"};
+                            .message = "PRIMARY KEY must be unique"};
                     }
                 }
                 else if constexpr (std::is_same_v<T, BoundForeignKeyConstraintExpr>)
@@ -93,7 +82,7 @@ ConstraintValidationResult ConstraintValidator::validateConstraint(const HeaderP
                             .valid = false,
                             .constraintName = constraintValue.constraintName,
                             .message = std::format(
-                                "Foreign key '{}' has no matching row in table '{}'",
+                                "FOREIGN KEY constraint '{}' has no matching row in table '{}'",
                                 constraintValue.constraintName,
                                 constraintValue.referencedTableName)};
                     }
@@ -112,7 +101,10 @@ ConstraintValidationResult ConstraintValidator::validateConstraint(const HeaderP
                         return {
                             .valid = false,
                             .constraintName = constraintValue.constraintName,
-                            .message = "Unique Key already exists"};
+                            .message = std::format(
+                                "UNIQUE constraint '{}' failed on table '{}'\n",
+                                constraintValue.constraintName,
+                                schema.tablename)};
                     }
                 }
 
@@ -131,7 +123,7 @@ ConstraintValidationResult ConstraintValidator::validateConstraint(const HeaderP
                             .valid = false,
                             .constraintName = constraintValue.constraintName,
                             .message = std::format(
-                                "CHECK constraint '{}' failed on table '{}'",
+                                "CHECK constraint '{}' failed on table '{}'\n",
                                 constraintValue.constraintName,
                                 schema.tableName)};
                     }
@@ -169,7 +161,7 @@ bool StorageConstraintLookup::keyExists(std::string tableName,
     return false;
 }
 
-bool matchesKeys(Row &row, std::span<KeyPart> key)
+bool StorageConstraintLookup::matchesKeys(Row &row, std::span<KeyPart> key)
 {
     for (const auto &[columnId, value] : key)
     {

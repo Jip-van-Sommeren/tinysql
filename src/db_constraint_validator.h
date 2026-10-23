@@ -52,4 +52,5 @@ public:
 
 private:
     StorageEngine &storageEngine_;
+    bool matchesKeys(Row &row, std::span<KeyPart> key);
 };
