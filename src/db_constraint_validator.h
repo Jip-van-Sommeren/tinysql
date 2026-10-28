@@ -16,7 +16,7 @@ struct ConstraintValidationResult
 {
     bool valid;
     std::optional<std::string> constraintName;
-    std::string message;
+    std::optional<std::string> message;
 };
 
 class ConstraintLookup
@@ -40,6 +40,18 @@ public:
     ConstraintValidationResult validateConstraint(
         const HeaderPage &headerPage,
         const std::vector<Row> &rows);
+
+    ConstraintValidationResult validateFkConstraintForTableCreation(
+        const std::vector<BoundConstraint> &constraints,
+        const StorageEngine &storageEngine);
+
+    ConstraintValidationResult checkForDelete(
+        const std::string &targetTableName,
+        const std::vector<std::string> &tableNames,
+        const StorageEngine &storageEngine,
+        const std::vector<Row> &delRows
+
+    );
 
 private:
     ConstraintLookup &lookup_;

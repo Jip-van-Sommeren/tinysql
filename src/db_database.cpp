@@ -90,9 +90,10 @@ QueryResult Database::executeSql(const std::string &sql)
 QueryResult Database::executeInsert(const BoundInsert &insert)
 {
     storageEngine.beginStatement();
+    QueryResult queryResult{};
     try
     {
-        auto queryResult = storageEngine.insertRows(insert);
+        queryResult = storageEngine.insertRows(insert);
     }
     catch (...)
     {
@@ -102,11 +103,7 @@ QueryResult Database::executeInsert(const BoundInsert &insert)
 
     storageEngine.commitStatement();
 
-    return QueryResult{
-        .columns = {},
-        .rows = {},
-        .affectedRows = insert.rows.size(),
-        .returnsRows = false};
+    return queryResult;
 }
 
 QueryResult Database::executeSelect(const BoundSelect &select)
@@ -119,12 +116,11 @@ QueryResult Database::executeSelect(const BoundSelect &select)
 QueryResult Database::executeDelete(const BoundDelete &del)
 {
     storageEngine.beginStatement();
-    std::uint64_t deletedCount;
+    QueryResult queryResult{};
+
     try
     {
-        Table table = storageEngine.openTable(del.tableName);
-
-        deletedCount = table.deleteRows(del);
+        queryResult = storageEngine.deleteRows(del);
     }
     catch (...)
     {
@@ -134,11 +130,7 @@ QueryResult Database::executeDelete(const BoundDelete &del)
 
     storageEngine.commitStatement();
 
-    return QueryResult{
-        .columns = {},
-        .rows = {},
-        .affectedRows = deletedCount,
-        .returnsRows = false};
+    return queryResult;
 }
 
 QueryResult Database::executeCreateTable(

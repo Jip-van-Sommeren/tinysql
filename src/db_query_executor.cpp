@@ -101,8 +101,8 @@ namespace
                 const DataType resultType = function.type();
                 const auto index = static_cast<std::uint32_t>(aggregates.size());
                 Value initial = function.id == FunctionId::Count
-                    ? Value{std::int64_t{0}}
-                    : Value{std::monostate{}};
+                                    ? Value{std::int64_t{0}}
+                                    : Value{std::monostate{}};
                 aggregates.push_back({std::move(expr), std::move(initial)});
                 expr = std::make_unique<BoundColumnExpr>(index, resultType);
                 return;
@@ -282,9 +282,8 @@ QueryResult SelectExecutor::execute(
     for (const BoundSelectItem &projection : select.projections)
     {
         hasAggregate = hasAggregate || containsAggregate(*projection.expr);
-        result.columns.push_back({
-            projection.outputName,
-            projection.expr->type()});
+        result.columns.push_back({projection.outputName,
+                                  projection.expr->type()});
     }
 
     if (hasAggregate)

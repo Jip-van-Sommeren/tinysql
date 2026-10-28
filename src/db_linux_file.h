@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <span>
+#include <vector>
 
 // Owns a Linux descriptor. Writes reach the OS cache; only sync() requests
 // durable file contents. Creating/removing directory entries needs a separate
@@ -38,6 +39,8 @@ public:
     std::filesystem::path getPath() { return path_; };
     bool entryExists(
         const std::filesystem::path &fileName) const;
+
+    std::vector<std::string> listFileNames() const;
 
 private:
     std::filesystem::path path_;

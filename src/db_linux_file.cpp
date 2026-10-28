@@ -2,6 +2,10 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <array>
+#include <cstdint>
+#include <cstring>
+#include <vector>
 #include <fcntl.h>
 #include <limits>
 #include <stdexcept>
@@ -314,6 +318,73 @@ LinuxDirectory &LinuxDirectory::operator=(LinuxDirectory &&other) noexcept
         fd_ = std::exchange(other.fd_, -1);
     }
     return *this;
+}
+
+std::vector<std::string> LinuxDirectory::listFileNames() const
+{
+    ensureOpen();
+    LinuxDirectory scan{*this, "."};
+    std::vector<std::string> names;
+    constexpr std::size_t arraySize = 2 << 14;
+    std::array<char, arraySize> buffer;
+
+    // Linux getdents64 record layout:
+    // inode: 8 bytes, offset: 8, record length: 2, type: 1, name...
+    constexpr std::size_t lengthOffset = 16;
+    constexpr std::size_t nameOffset = 19;
+
+    for (;;)
+    {
+        const long count = ::syscall(
+            SYS_getdents64, scan.getFd(), buffer.data(), buffer.size());
+
+        if (count == -1)
+        {
+            if (errno == EINTR)
+                continue;
+
+            throw std::system_error(
+                errno, std::generic_category(), "getdents64");
+        }
+
+        if (count == 0)
+            return names;
+
+        const auto bytes = static_cast<std::size_t>(count);
+
+        for (std::size_t pos = 0; pos < bytes;)
+        {
+            const char *record = buffer.data() + pos;
+            const auto remaining = bytes - pos;
+
+            if (remaining < nameOffset + 1)
+                throw std::runtime_error("Truncated directory entry");
+
+            std::uint16_t recordLength;
+            std::memcpy(
+                &recordLength, record + lengthOffset,
+                sizeof(recordLength));
+
+            if (recordLength < nameOffset + 1 ||
+                recordLength > remaining)
+            {
+                throw std::runtime_error("Invalid directory entry length");
+            }
+
+            const char *name = record + nameOffset;
+
+            if (!std::memchr(name, '\0', recordLength - nameOffset))
+                throw std::runtime_error("Unterminated directory name");
+
+            if (std::strcmp(name, ".") != 0 &&
+                std::strcmp(name, "..") != 0)
+            {
+                names.emplace_back(name);
+            }
+
+            pos += recordLength;
+        }
+    }
 }
 
 void LinuxDirectory::closeDescriptor() noexcept

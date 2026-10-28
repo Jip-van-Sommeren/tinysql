@@ -51,6 +51,7 @@ public:
         statementRecovery_.rollback();
     }
     QueryResult insertRows(const BoundInsert &insert);
+    QueryResult deleteRows(const BoundDelete &del);
 
     // const std::filesystem::path &getTablesPath() const;
 

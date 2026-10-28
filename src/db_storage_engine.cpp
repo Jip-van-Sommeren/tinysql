@@ -2,6 +2,7 @@
 #include "db_linux_file.h"
 #include "db_write.h"
 #include "db_constraint_validator.h"
+#include "db_expression_evaluator.h"
 
 #include <filesystem>
 #include <stdexcept>
@@ -40,6 +41,41 @@ namespace
     constexpr std::array<char, 8> MetaMagic{
         'D', 'B', 'M', 'E', 'T', 'A', '\0', '\0'};
     constexpr std::size_t META_FILE_SIZE = 8 + 16 + 8 + 4; // magic, uuid, version, epoch, generation, checksum
+
+    std::vector<Row> getRowsFromWhereExpr(
+        const std::unique_ptr<BoundExpr> &where,
+        Table &table)
+    {
+
+        TableCursor cursor = table.scan();
+        std::vector<Row> result{};
+        while (auto row = cursor.next())
+        {
+            if (where && !evaluatePredicate(*where, *row))
+            {
+                continue;
+            }
+
+            result.push_back(row.value());
+        }
+
+        return result;
+    }
+
+    auto extractTableNames = [](const std::vector<std::string> &names)
+    {
+        std::vector<std::string> result;
+
+        for (const auto &name : names)
+        {
+            if (name.ends_with(".table"))
+            {
+                result.push_back(name.substr(0, name.size() - 6));
+            }
+        }
+
+        return result;
+    };
 
 }
 
@@ -178,7 +214,7 @@ QueryResult StorageEngine::insertRows(const BoundInsert &insert)
 
     const auto validationResult = constraintValidator.validateConstraint(schema, insert.rows);
     if (!validationResult.valid)
-        throw std::runtime_error(validationResult.message);
+        throw std::runtime_error(validationResult.message.value());
     auto table = openTable(insert.tableName);
 
     table.insertRows(insert);
@@ -187,6 +223,32 @@ QueryResult StorageEngine::insertRows(const BoundInsert &insert)
         .columns = {},
         .rows = {},
         .affectedRows = insert.rows.size(),
+        .returnsRows = false};
+}
+
+QueryResult StorageEngine::deleteRows(const BoundDelete &del)
+{
+
+    const auto schema = getTableHeader(del.tableName);
+    StorageConstraintLookup lookup{*this};
+    ConstraintValidator constraintValidator{lookup};
+
+    const auto &fileNames = tablesDirectory_.listFileNames();
+    auto tableNames = extractTableNames(fileNames);
+    auto table = openTable(del.tableName);
+
+    const auto &delRows = getRowsFromWhereExpr(del.where, table);
+
+    const auto validationResult = constraintValidator.checkForDelete(del.tableName, tableNames, *this, delRows);
+    if (!validationResult.valid)
+        throw std::runtime_error(validationResult.message.value());
+
+    const auto deletedCount = table.deleteRows(del);
+
+    return QueryResult{
+        .columns = {},
+        .rows = {},
+        .affectedRows = deletedCount,
         .returnsRows = false};
 }
 
@@ -200,7 +262,8 @@ HeaderPage StorageEngine::getTableHeader(const std::string &tableName) const
 {
     requireReadable();
 
-    const auto fileName = getTablePath(tableName).filename();
+    const auto fileName = tableName + ".table";
+
     if (!tablesDirectory_.entryExists(fileName))
     {
         throw std::runtime_error("Table does not exist: " + tableName);
@@ -219,11 +282,17 @@ Table StorageEngine::createTable(
     const std::vector<BoundConstraint> &constraints)
 {
     requireReadable();
-
-    if (tablesDirectory_.entryExists(getTablePath(tableName).filename()))
+    if (tablesDirectory_.entryExists(tableName + ".table"))
     {
         throw std::runtime_error("Table already exists: " + tableName);
     }
+
+    StorageConstraintLookup lookup{*this};
+    ConstraintValidator constraintValidator{lookup};
+
+    const auto validationResult = constraintValidator.validateFkConstraintForTableCreation(constraints, *this);
+    if (!validationResult.valid)
+        throw std::runtime_error(validationResult.message.value());
 
     return Table::create(
         tablesDirectory_,
