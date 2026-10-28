@@ -171,7 +171,7 @@ private:
     ByteWriter &writer;
 
     void writeColumn(const Column &column);
-    void writeConstraint(const Constraint &constraint);
+    void writeConstraint(const BoundConstraint &constraint);
     void writeColumnStorage(const ColumnStorage &storage);
 };
 

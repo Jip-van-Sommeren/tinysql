@@ -100,6 +100,6 @@ int main()
 
     database.reset(); // Release exclusive ownership before reopening.
     Database reopened = Database::open(path, "db_decimal_test");
-    require(reopened.selectAllRows("amounts").size() == 2,
+    require(reopened.executeSql("SELECT * FROM amounts;").rows.size() == 2,
             "Database::open did not preserve stored rows");
 }

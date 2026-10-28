@@ -1,7 +1,10 @@
 #pragma once
 
 #include "db_storage.h"
-#include "db_storage_engine.h"
+
+#include <span>
+
+class StorageEngine;
 
 struct KeyPart
 {
@@ -16,6 +19,16 @@ struct ConstraintValidationResult
     std::string message;
 };
 
+class ConstraintLookup
+{
+public:
+    virtual ~ConstraintLookup() = default;
+
+    virtual bool keyExists(
+        const std::string &tableName,
+        std::span<const KeyPart> key) = 0;
+};
+
 class ConstraintValidator final
 {
 public:
@@ -26,31 +39,20 @@ public:
 
     ConstraintValidationResult validateConstraint(
         const HeaderPage &headerPage,
-        Row &row);
+        const std::vector<Row> &rows);
 
 private:
     ConstraintLookup &lookup_;
-};
-
-class ConstraintLookup
-{
-public:
-    virtual ~ConstraintLookup() = default;
-
-    virtual bool keyExists(
-        std::string tableName,
-
-        std::span<KeyPart> key) = 0;
 };
 
 class StorageConstraintLookup final : public ConstraintLookup
 {
 public:
     explicit StorageConstraintLookup(StorageEngine &storageEngine);
-    bool keyExists(std::string tableName,
-                   std::span<KeyPart> key) override;
+    bool keyExists(const std::string &tableName,
+                   std::span<const KeyPart> key) override;
 
 private:
     StorageEngine &storageEngine_;
-    bool matchesKeys(Row &row, std::span<KeyPart> key);
+    bool matchesKeys(const Row &row, std::span<const KeyPart> key);
 };

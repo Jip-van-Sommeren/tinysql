@@ -175,12 +175,10 @@ QueryResult StorageEngine::insertRows(const BoundInsert &insert)
     const auto schema = getTableHeader(insert.tableName);
     StorageConstraintLookup lookup{*this};
     ConstraintValidator constraintValidator{lookup};
-    for (auto row : insert.rows)
-    {
-        const auto validationResult = constraintValidator.validateConstraint(schema, row);
-        if (!validationResult.valid)
-            throw std::runtime_error(validationResult.message);
-    }
+
+    const auto validationResult = constraintValidator.validateConstraint(schema, insert.rows);
+    if (!validationResult.valid)
+        throw std::runtime_error(validationResult.message);
     auto table = openTable(insert.tableName);
 
     table.insertRows(insert);
@@ -208,7 +206,7 @@ HeaderPage StorageEngine::getTableHeader(const std::string &tableName) const
         throw std::runtime_error("Table does not exist: " + tableName);
     }
 
-    RawPage rawPage = readPageFromFile(tablesDirectory_, fileName, 0);
+    RawPage rawPage = readPageFromFile(tablesDirectory_, fileName, HeaderPageId);
     Page page = decodeHeaderPage(rawPage);
 
     return std::get<HeaderPage>(page.data);

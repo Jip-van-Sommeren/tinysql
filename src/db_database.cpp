@@ -46,27 +46,6 @@ Database Database::open(
     }
 }
 
-void Database::insertRows(
-    const std::string &tableName,
-    const std::vector<Row> &rows)
-{
-    (void)executeInsert(BoundInsert{
-        .tableName = tableName,
-        .rows = rows});
-}
-
-std::vector<Row> Database::selectAllRows(const std::string &tableName)
-{
-    Table table = storageEngine.openTable(tableName);
-    TableCursor cursor = table.scan();
-    std::vector<Row> rows;
-    while (auto row = cursor.next())
-    {
-        rows.push_back(std::move(*row));
-    }
-    return rows;
-}
-
 QueryResult Database::execute(const BoundQuery &query)
 {
     storageEngine.requireReadable();

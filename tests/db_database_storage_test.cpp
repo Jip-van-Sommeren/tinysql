@@ -82,43 +82,52 @@ namespace
         {
             StorageEngine engine = StorageEngine::open(root);
             require(engine.tableExists("items"), "Catalog did not resolve the database root");
-            requireError([&] { engine.createTable("items", "test", {}, {}); }, "Table already exists");
-            requireError([&] { engine.openTable("missing"); }, "Table does not exist");
+            requireError([&]
+                         { engine.createTable("items", "test", {}, {}); }, "Table already exists");
+            requireError([&]
+                         { engine.openTable("missing"); }, "Table does not exist");
             require(!std::filesystem::exists(root / "tables/missing.table"),
                     "Opening a missing table created it");
         }
 
         database.emplace(Database::open(root, "test"));
-        database->insertRows("items", {Row{{std::int32_t{1}}}});
-        require(!std::filesystem::exists(journalPath), "Successful direct INSERT left a journal");
+        database->executeSql("INSERT INTO items VALUES (1);");
+        require(!std::filesystem::exists(journalPath), "Successful SQL INSERT left a journal");
         const auto before = readFile(tablePath);
 
-        // The first row is valid and modifies cached pages before the second
-        // row fails validation. The direct API must take the rollback path.
+        // Binding rejects the whole batch before a statement begins when a
+        // later row has the wrong type; existing table bytes stay unchanged.
         requireError([&]
-        {
-            database->insertRows("items", {
-                Row{{std::int32_t{2}}}, Row{{std::string{"not an integer"}}}});
-        }, "expects type");
-        require(readFile(tablePath) == before, "Failed direct INSERT changed the table bytes");
-        require(!std::filesystem::exists(journalPath), "Rollback left an active journal");
-        require(database->selectAllRows("items").size() == 1, "Failed INSERT retained a row");
+                     { database->executeSql("INSERT INTO items VALUES (2), ('not an int');"); }, "Expected numeric value");
+        require(readFile(tablePath) == before, "Failed SQL INSERT changed the table bytes");
+        require(!std::filesystem::exists(journalPath), "Rejected SQL INSERT left an active journal");
+        require(database->executeSql("SELECT * FROM items;").rows.size() == 1, "Failed INSERT retained a row");
 
-        requireError([&] { database->insertRows("missing", {Row{{std::int32_t{3}}}}); },
+        requireError([&]
+                     { database->executeSql("INSERT INTO missing VALUES (3);"); },
                      "Table does not exist");
         require(!std::filesystem::exists(journalPath), "Failed table lookup left an active journal");
 
-        database->insertRows("items", {});
-        require(readFile(tablePath) == before && !std::filesystem::exists(journalPath),
-                "Empty direct INSERT changed data or left a journal");
-        database->insertRows("items", {Row{{std::int32_t{2}}}});
+        // Empty batches are a storage operation, without a SQL VALUES row.
+        database.reset();
+        {
+            auto engine = StorageEngine::open(root);
+            engine.beginStatement();
+            const auto result = engine.insertRows({.tableName = "items", .rows = {}});
+            engine.commitStatement();
+            require(result.affectedRows == 0 && readFile(tablePath) == before &&
+                        !std::filesystem::exists(journalPath),
+                    "Empty storage INSERT changed data or left a journal");
+        }
+        database.emplace(Database::open(root, "test"));
+        database->executeSql("INSERT INTO items VALUES (2);");
 
         database.reset();
         Database reopened = Database::open(root, "test");
-        const auto rows = reopened.selectAllRows("items");
+        const auto rows = reopened.executeSql("SELECT * FROM items;").rows;
         require(rows.size() == 2 && std::get<std::int32_t>(rows[0].values.at(0)) == 1 &&
                     std::get<std::int32_t>(rows[1].values.at(0)) == 2,
-                "Direct INSERT did not recover for the next statement or survive reopening");
+                "SQL INSERT did not permit the next statement or survive reopening");
         require(std::filesystem::file_size(unrelated / "tables/items.table") == 0,
                 "Database modified the working-directory decoy file");
     }
@@ -127,7 +136,9 @@ namespace
     {
         TestDirectory directory{"db-meta-validation"};
         const auto root = directory.path / "db";
-        { auto engine = StorageEngine::create(root); }
+        {
+            auto engine = StorageEngine::create(root);
+        }
         const auto metaPath = root / "db.meta";
         const auto original = readFile(metaPath);
         require(original.size() == 36, "Database metadata omitted fields or checksum");
@@ -147,7 +158,8 @@ namespace
             LinuxFile meta(LinuxDirectory{metaPath.parent_path()}, metaPath.filename());
             meta.resize(0);
             meta.writeAllAt(0, bytes);
-            requireError([&] { (void)StorageEngine::open(root); }, message);
+            requireError([&]
+                         { (void)StorageEngine::open(root); }, message);
             require(readFile(metaPath) == bytes, "Failed open changed invalid metadata");
         };
         auto bytes = original;
@@ -160,12 +172,15 @@ namespace
         journal_test::setUnsigned(bytes, 24, std::uint64_t{2});
         journal_test::setUnsigned(bytes, 32, journal_test::crc(std::span<const std::byte>{bytes}.first(32)));
         reject(bytes, "version");
-        bytes = original; bytes.pop_back();
+        bytes = original;
+        bytes.pop_back();
         reject(bytes, "EOF");
         LinuxFile meta(LinuxDirectory{metaPath.parent_path()}, metaPath.filename());
         meta.resize(0);
         meta.writeAllAt(0, original);
-        { auto engine = StorageEngine::open(root); }
+        {
+            auto engine = StorageEngine::open(root);
+        }
     }
 
     void testRestartValidationBeforeReplay()
@@ -196,7 +211,8 @@ namespace
             LinuxFile journal(LinuxDirectory{journalPath.parent_path()}, journalPath.filename());
             journal.resize(0);
             journal.writeAllAt(0, bytes);
-            requireError([&] { (void)StorageEngine::open(root); }, message);
+            requireError([&]
+                         { (void)StorageEngine::open(root); }, message);
             require(readFile(tablePath) == changed, "Invalid journal partially replayed before validation finished");
             require(std::filesystem::exists(root / "tables/uncommitted.table"), "Invalid journal deleted a table");
             require(readFile(journalPath) == bytes, "Failed recovery discarded or changed its evidence");
@@ -205,12 +221,15 @@ namespace
         bytes[16] ^= std::byte{1}; // A different DB UUID with a valid header CRC.
         journal_test::setUnsigned(bytes, 56, journal_test::crc(std::span<const std::byte>{bytes}.first(56)));
         reject(bytes, "db id");
-        bytes = originalJournal; bytes.back() ^= std::byte{1};
+        bytes = originalJournal;
+        bytes.back() ^= std::byte{1};
         reject(bytes, "checksum");
-        bytes = originalJournal; bytes.pop_back();
+        bytes = originalJournal;
+        bytes.pop_back();
         reject(bytes, "endoffset");
 
-        bytes = originalJournal; bytes.resize(59);
+        bytes = originalJournal;
+        bytes.resize(59);
         reject(bytes, "EOF");
         {
             LinuxFile journal(LinuxDirectory{journalPath.parent_path()}, journalPath.filename());
@@ -254,13 +273,16 @@ namespace
             const auto publishedEnd = reader.validateJournalHeader(statement);
             const auto identity = reader.readJournalHeader();
             std::uint32_t sequence = 0;
-            while (reader.readNext(publishedEnd)) ++sequence;
+            while (reader.readNext(publishedEnd))
+                ++sequence;
             // This complete, correctly sequenced record would delete a committed
             // table if recovery accidentally included the unpublished suffix.
             auto suffix = journal_test::encode(FileBeforeImage{"victim.table", 0, true}, sequence);
             journal_test::refreshChecksum(suffix, identity);
-            if (tail == "partial") suffix.resize(7);
-            if (tail == "corrupt") suffix.back() ^= std::byte{1};
+            if (tail == "partial")
+                suffix.resize(7);
+            if (tail == "corrupt")
+                suffix.back() ^= std::byte{1};
             LinuxFile raw(journalDir, "journal.log");
             raw.writeAllAt(publishedEnd, suffix);
             raw.sync();
@@ -304,12 +326,14 @@ namespace
             const auto older = journal_test::encodeBoundary(9, journal_test::DataOffset, identity);
             std::copy(newest.begin(), newest.end(), bytes.begin() + journal_test::boundaryOffset(0));
             std::copy(older.begin(), older.end(), bytes.begin() + journal_test::boundaryOffset(1));
-            if (end == original.size()) bytes.back() ^= std::byte{1};
+            if (end == original.size())
+                bytes.back() ^= std::byte{1};
             LinuxFile raw(journalDir, "journal.log");
             raw.writeAllAt(0, bytes);
-            requireError([&] { (void)StorageEngine::open(root); },
-                         end < journal_test::DataOffset || end > original.size() ? "endoffset" :
-                         end == original.size() ? "checksum" : "Truncated");
+            requireError([&]
+                         { (void)StorageEngine::open(root); },
+                         end < journal_test::DataOffset || end > original.size() ? "endoffset" : end == original.size() ? "checksum"
+                                                                                                                        : "Truncated");
             require(readFile(target) == changed, "Invalid newest boundary caused partial undo");
             require(readFile(journalPath) == bytes, "Invalid newest boundary discarded recovery evidence");
         }
@@ -321,7 +345,9 @@ namespace
         const auto root = directory.path / "db";
         auto engine = StorageEngine::create(root);
         engine.beginStatement();
-        { auto table = engine.createTable("items", "test", {}, {}); }
+        {
+            auto table = engine.createTable("items", "test", {}, {});
+        }
         const auto journalPath = root / "journal/journal.log";
         const auto original = readFile(journalPath);
         auto changed = original;
@@ -330,7 +356,8 @@ namespace
         LinuxFile raw(LinuxDirectory{root / "journal"}, "journal.log");
         raw.writeAllAt(0, changed);
         const auto tableBefore = readFile(root / "tables/items.table");
-        requireError([&] { engine.rollbackStatement(); }, "another statement");
+        requireError([&]
+                     { engine.rollbackStatement(); }, "another statement");
         require(readFile(root / "tables/items.table") == tableBefore, "Identity mismatch modified a table");
         require(readFile(journalPath) == changed, "Identity mismatch discarded the journal");
         raw.writeAllAt(0, original);
@@ -367,30 +394,43 @@ namespace
         {
             auto bytes = encodePrefix(identity);
             std::uint32_t sequence = 0;
-            const auto append = [&](const auto &record) {
+            const auto append = [&](const auto &record)
+            {
                 auto encoded = encode(record, sequence++);
                 refreshChecksum(encoded, identity);
                 bytes.insert(bytes.end(), encoded.begin(), encoded.end());
             };
             append(metadata);
             append(page);
-            if (invalid == "conflict") append(FileBeforeImage{"items.table", 0, true});
-            if (invalid == "duplicate") append(page);
-            if (invalid == "missing") append(PageBeforeImage{"missing.table", 0, {}});
-            if (invalid == "range") append(PageBeforeImage{"items.table", static_cast<std::uint32_t>(before.size() / PAGE_SIZE), {}});
+            if (invalid == "conflict")
+                append(FileBeforeImage{"items.table", 0, true});
+            if (invalid == "duplicate")
+                append(page);
+            if (invalid == "missing")
+                append(PageBeforeImage{"missing.table", 0, {}});
+            if (invalid == "range")
+                append(PageBeforeImage{"items.table", static_cast<std::uint32_t>(before.size() / PAGE_SIZE), {}});
             if (invalid == "new-page")
             {
                 append(FileBeforeImage{"new.table", 0, true});
                 append(PageBeforeImage{"new.table", 0, {}});
             }
-            if (invalid == "unaligned") append(FileBeforeImage{"other.table", 1});
-            if (invalid == "new-size") append(FileBeforeImage{"new.table", PAGE_SIZE, true});
-            if (invalid == "nested") append(FileBeforeImage{"nested/items.table", 0, true});
-            if (invalid == "dot") append(FileBeforeImage{".", 0, true});
-            if (invalid == "symlink") append(FileBeforeImage{"link.table", before.size()});
-            if (invalid == "absolute") append(FileBeforeImage{outside, 0, true});
-            if (invalid == "parent") append(FileBeforeImage{"../outside.table", 0, true});
-            if (invalid == "nul") append(FileBeforeImage{std::string{"a\0b", 3}, 0, true});
+            if (invalid == "unaligned")
+                append(FileBeforeImage{"other.table", 1});
+            if (invalid == "new-size")
+                append(FileBeforeImage{"new.table", PAGE_SIZE, true});
+            if (invalid == "nested")
+                append(FileBeforeImage{"nested/items.table", 0, true});
+            if (invalid == "dot")
+                append(FileBeforeImage{".", 0, true});
+            if (invalid == "symlink")
+                append(FileBeforeImage{"link.table", before.size()});
+            if (invalid == "absolute")
+                append(FileBeforeImage{outside, 0, true});
+            if (invalid == "parent")
+                append(FileBeforeImage{"../outside.table", 0, true});
+            if (invalid == "nul")
+                append(FileBeforeImage{std::string{"a\0b", 3}, 0, true});
             const auto boundary = encodeBoundary(1, bytes.size(), identity);
             std::copy(boundary.begin(), boundary.end(), bytes.begin() + boundaryOffset(1));
             const auto journal = root / "journal/journal.log";
@@ -400,7 +440,8 @@ namespace
             }
             for (int retry = 0; retry < 2; ++retry)
             {
-                requireError([&] { (void)StorageEngine::open(root); }, "");
+                requireError([&]
+                             { (void)StorageEngine::open(root); }, "");
                 require(readFile(target) == before && readFile(outside) == before,
                         "Malformed recovery changed a target: " + invalid);
                 require(readFile(journal) == bytes, "Recovery discarded invalid evidence: " + invalid);

@@ -74,28 +74,9 @@ int main()
     std::filesystem::remove_all(dbPath);
 
     auto db = Database::create(dbPath, "query_test_db");
-    std::vector<Column> columns{
-        Column{
-            .name = "a",
-            .type = DataType::Int,
-            .nullable = false,
-            .columnIndex = 0,
-            .storage = FixedColumnStorage{}},
-        Column{
-            .name = "b",
-            .type = DataType::Text,
-            .nullable = false,
-            .columnIndex = 1,
-            .storage = VarColumnStorage{}},
-        Column{
-            .name = "c",
-            .type = DataType::Text,
-            .nullable = true,
-            .columnIndex = 2,
-            .storage = VarColumnStorage{}}};
-    std::vector<Constraint> constraints;
-    db.execute(BoundCreateTable{
-        .tableName = "test", .columns = columns, .constraints = constraints});
+
+    auto createDbSql = "CREATE TABLE test (a INT NOT NULL PRIMARY KEY, b TEXT NOT NULL, c TEXT NULL);";
+    db.executeSql(createDbSql);
 
     std::vector<std::string> queries{
         "INSERT INTO test (a, b, c) VALUES (1, 'Appel', 'Peer');",

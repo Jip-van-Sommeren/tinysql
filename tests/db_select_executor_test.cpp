@@ -153,7 +153,8 @@ namespace
                  "SELECT id + COUNT(*) FROM products WHERE id < 0;",
                  "SELECT ABS(id), COUNT(*) FROM products;"})
         {
-            requireThrows([&database, &sql] { database.executeSql(sql); },
+            requireThrows([&database, &sql]
+                          { database.executeSql(sql); },
                           "Ungrouped column was not rejected: " + sql, "GROUP BY");
         }
         for (const std::string sql : {
@@ -165,7 +166,8 @@ namespace
                  "CREATE TABLE invalid_default (id INT DEFAULT COUNT(*));",
                  "CREATE TABLE invalid_check (id INT, CHECK (SUM(id) > 0));"})
         {
-            requireThrows([&database, &sql] { database.executeSql(sql); },
+            requireThrows([&database, &sql]
+                          { database.executeSql(sql); },
                           "Invalid aggregate context was accepted: " + sql,
                           "Aggregate functions are not allowed");
         }
@@ -177,11 +179,13 @@ namespace
                  "SELECT SUM(label) FROM aggregate_values;",
                  "SELECT SUM(enabled) FROM aggregate_values;"})
         {
-            requireThrows([&database, &sql] { database.executeSql(sql); },
+            requireThrows([&database, &sql]
+                          { database.executeSql(sql); },
                           "Invalid aggregate argument was accepted: " + sql, "requires");
         }
         requireThrows(
-            [&database] { database.executeSql("SELECT SUM(*) FROM products;"); },
+            [&database]
+            { database.executeSql("SELECT SUM(*) FROM products;"); },
             "SUM(*) was accepted", "Only COUNT");
         for (const std::string name : {"AVG", "MIN", "MAX"})
         {
@@ -194,33 +198,36 @@ namespace
         }
 
         database.executeSql("CREATE TABLE overflow_values (number BIGINT);");
-        database.insertRows("overflow_values", {
-            Row{{std::numeric_limits<std::int64_t>::max()}}, Row{{std::int64_t{1}}}});
+        database.executeSql("INSERT INTO overflow_values VALUES (9223372036854775807), (1);");
         requireThrows(
-            [&database] { database.executeSql("SELECT SUM(number) FROM overflow_values;"); },
+            [&database]
+            { database.executeSql("SELECT SUM(number) FROM overflow_values;"); },
             "Positive SUM overflow was not detected", "overflow");
         database.executeSql("DELETE FROM overflow_values;");
-        database.insertRows("overflow_values", {
-            Row{{std::numeric_limits<std::int64_t>::min()}}, Row{{std::int64_t{-1}}}});
+        // Reach INT64_MIN through aggregation: the parser reads a numeric
+        // token's positive magnitude before applying unary minus.
+        database.executeSql("INSERT INTO overflow_values VALUES (-9223372036854775807), (-1), (-1);");
         requireThrows(
-            [&database] { database.executeSql("SELECT SUM(number) FROM overflow_values;"); },
+            [&database]
+            { database.executeSql("SELECT SUM(number) FROM overflow_values;"); },
             "Negative SUM overflow was not detected", "overflow");
 
         database.executeSql("CREATE TABLE decimal_overflow (number DECIMAL);");
-        database.insertRows("decimal_overflow", {
-            Row{{DecimalValue{std::numeric_limits<std::int64_t>::max(), 0}}},
-            Row{{DecimalValue{1, 0}}}});
+        database.executeSql("INSERT INTO decimal_overflow VALUES (9223372036854775807), (1);");
         requireThrows(
-            [&database] { database.executeSql("SELECT SUM(number) FROM decimal_overflow;"); },
+            [&database]
+            { database.executeSql("SELECT SUM(number) FROM decimal_overflow;"); },
             "Decimal SUM overflow was not detected", "overflow");
 
         database.executeSql("CREATE TABLE many_values (number INT);");
-        std::vector<Row> rows;
+        std::string insertSql = "INSERT INTO many_values VALUES ";
         for (std::int32_t number = 1; number <= 1500; ++number)
         {
-            rows.push_back(Row{{number}});
+            if (number > 1)
+                insertSql += ", ";
+            insertSql += "(" + std::to_string(number) + ")";
         }
-        database.insertRows("many_values", rows);
+        database.executeSql(insertSql + ";");
         result = database.executeSql("SELECT COUNT(*), SUM(number) FROM many_values;");
         require(std::get<std::int64_t>(result.rows[0].values[0]) == 1500 &&
                     std::get<std::int64_t>(result.rows[0].values[1]) == 1125750,
@@ -293,13 +300,12 @@ int main()
     result = database.executeSql("SELECT products.* FROM products;");
     require(result.columns.size() == 3, "Wildcard schema has the wrong size");
     require(result.columns[0].name == "id" &&
-            result.columns[1].name == "price" &&
-            result.columns[2].name == "quantity",
+                result.columns[1].name == "price" &&
+                result.columns[2].name == "quantity",
             "Wildcard schema has the wrong names");
     require(result.rows.size() == 3, "Wildcard scan has the wrong row count");
-
-    const std::vector<Row> physicalRows = database.selectAllRows("products");
-    require(physicalRows.size() == 3, "Physical-row compatibility scan failed");
+    const QueryResult qResult = database.executeSql("SELECT * FROM products;");
+    require(qResult.rows.size() == 3, "Unqualified wildcard scan has the wrong row count");
 
     testAggregates(database);
 
@@ -361,5 +367,4 @@ int main()
     require(deleted.affectedRows == 1, "DELETE affected-row count is incorrect");
     require(deleted.columns.empty(), "DELETE returned an output schema");
     require(deleted.rows.empty(), "DELETE returned result rows");
-
 }

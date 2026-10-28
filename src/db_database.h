@@ -11,15 +11,9 @@
 class Database
 {
 public:
-    static Database create(const std::filesystem::path &path,const std::string &name);
+    static Database create(const std::filesystem::path &path, const std::string &name);
     static Database open(const std::filesystem::path &path, const std::string &name);
 
-    void insertRows(
-        const std::string &tableName,
-        const std::vector<Row> &rows);
-    std::vector<Row> selectAllRows(const std::string &tableName);
-
-    QueryResult execute(const BoundQuery &query);
     QueryResult executeSql(const std::string &sql);
 
 private:
@@ -32,4 +26,5 @@ private:
     QueryResult executeSelect(const BoundSelect &select);
     QueryResult executeDelete(const BoundDelete &del);
     QueryResult executeCreateTable(const BoundCreateTable &createTable);
+    QueryResult execute(const BoundQuery &query);
 };

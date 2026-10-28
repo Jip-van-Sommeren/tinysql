@@ -715,7 +715,7 @@ void HeaderPageWriter::write(const HeaderPage &header)
     }
     writer.writeUnsigned<std::uint32_t>(static_cast<std::uint32_t>(header.constraints.size()));
 
-    for (const Constraint &constraint : header.constraints)
+    for (const BoundConstraint &constraint : header.constraints)
     {
         writeConstraint(constraint);
     }
@@ -840,7 +840,7 @@ void DataPageWriter::write(const PageHeader &pageHeader, const std::vector<Row> 
 }
 
 void HeaderPageWriter::writeConstraint(
-    const Constraint &constraint)
+    const BoundConstraint &constraint)
 {
     std::visit(
         [this](const auto &boundConstraint)

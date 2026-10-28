@@ -257,7 +257,7 @@ namespace
         for (const std::string table : {"items", "other"})
         {
             database.executeSql("CREATE TABLE " + table + " (id INT, value VARCHAR(2000));");
-            database.insertRows(table, {Row{{std::int32_t{1}, std::string(1500, 'a')}}});
+            database.executeSql("INSERT INTO " + table + " VALUES (1, '" + std::string(1500, 'a') + "');");
         }
     }
 

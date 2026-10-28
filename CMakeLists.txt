@@ -110,6 +110,11 @@ if(BUILD_TESTING)
     target_link_libraries(db_query_validator_test PRIVATE db_core)
     add_test(NAME db_query_validator_test COMMAND db_query_validator_test)
 
+    add_executable(db_constraint_validator_test tests/db_constraint_validator_test.cpp)
+    db_configure_target(db_constraint_validator_test PRIVATE)
+    target_link_libraries(db_constraint_validator_test PRIVATE db_core)
+    add_test(NAME db_constraint_validator_test COMMAND db_constraint_validator_test)
+
     add_executable(db_select_executor_test tests/db_select_executor_test.cpp)
     db_configure_target(db_select_executor_test PRIVATE)
     target_link_libraries(db_select_executor_test PRIVATE db_core)

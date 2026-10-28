@@ -25,6 +25,9 @@ static_assert(sizeof(std::float32_t) == 4);
 
 using ColumnId = std::uint32_t;
 
+constexpr std::uint32_t
+    HeaderPageId{0};
+
 enum class SqlTruth
 {
     True,

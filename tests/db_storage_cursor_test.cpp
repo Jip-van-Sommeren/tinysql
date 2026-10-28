@@ -100,7 +100,8 @@ namespace
         BufferManager manager{LinuxDirectory{path / "tables"}, relativeFile.filename(), LinuxFile::OpenMode::OpenExisting, recovery};
         {
             auto guard = manager.getDataPage(1);
-            requireThrows([&] { guard.write<DataPage>(); }, "active statement");
+            requireThrows([&]
+                          { guard.write<DataPage>(); }, "active statement");
         }
         recovery.begin();
         {
@@ -192,30 +193,29 @@ namespace
         initialize();
 
         // Both guards acquired by getDataPage must release on validation failure.
-        requireThrows([&] { pins.getDataPage(0); }, "not a data page");
+        requireThrows([&]
+                      { pins.getDataPage(0); }, "not a data page");
         initialize();
 
         BufferManager invalidHeader{LinuxDirectory{path / "tables"}, relativeFile.filename(), LinuxFile::OpenMode::OpenExisting, recovery};
-        invalidHeader.getPage(0, [](const RawPage &) { return makeEmptyDataPage(0); });
-        requireThrows([&] { invalidHeader.getHeaderPage(); }, "not a table header");
-        requireThrows([&] {
-            invalidHeader.initializeNewTable("guard_values", "test", schema.columns, schema.constraints);
-        }, "new, unwritten table");
+        invalidHeader.getPage(0, [](const RawPage &)
+                              { return makeEmptyDataPage(0); });
+        requireThrows([&]
+                      { invalidHeader.getHeaderPage(); }, "not a table header");
+        requireThrows([&]
+                      { invalidHeader.initializeNewTable("guard_values", "test", schema.columns, schema.constraints); }, "new, unwritten table");
 
         BufferManager decodeFailure{LinuxDirectory{path / "tables"}, relativeFile.filename(), LinuxFile::OpenMode::OpenExisting, recovery};
         requireThrows(
             [&]
             {
                 decodeFailure.getPage(1, [](const RawPage &) -> Page
-                {
-                    throw std::runtime_error("decode failure");
-                });
+                                      { throw std::runtime_error("decode failure"); });
             },
             "decode failure");
         decodeFailure.getDataPage(1);
-        requireThrows([&] {
-            decodeFailure.initializeNewTable("guard_values", "test", schema.columns, schema.constraints);
-        }, "new, unwritten table");
+        requireThrows([&]
+                      { decodeFailure.initializeNewTable("guard_values", "test", schema.columns, schema.constraints); }, "new, unwritten table");
         recovery.rollback();
     }
 
@@ -230,12 +230,14 @@ namespace
             require(scanIds(table).empty(), "An empty table returned rows");
         }
         const std::string label(1500, 'x');
-        std::vector<Row> rows;
+        std::string insertSql = "INSERT INTO cursor_values VALUES ";
         for (std::int32_t id = 1; id <= 6; ++id)
         {
-            rows.push_back(Row{{id, label}});
+            if (id > 1)
+                insertSql += ", ";
+            insertSql += "(" + std::to_string(id) + ", '" + label + "')";
         }
-        database.insertRows("cursor_values", rows);
+        database.executeSql(insertSql + ";");
         {
             BufferManager manager{LinuxDirectory{path / "tables"}, relativeFile.filename(), LinuxFile::OpenMode::OpenExisting, recovery};
             auto first = manager.getDataPage(1);
@@ -304,8 +306,8 @@ namespace
         std::sort(ids.begin(), ids.end());
         require(ids == std::vector<std::int32_t>{2, 5, 6, 99},
                 "Deleted and reused slots did not survive reopening");
-        require(database.selectAllRows("cursor_values").size() == 4,
-                "The vector convenience scan changed behavior");
+        require(database.executeSql("SELECT * FROM cursor_values;").rows.size() == 4,
+                "SQL SELECT disagrees with the storage cursor after slot reuse");
     }
 
     void testLazyLoading(Database &database, const std::filesystem::path &path)
@@ -332,7 +334,8 @@ namespace
         auto cursor = table.scan();
         require(nextId(cursor) == 1 && nextId(cursor) == 2,
                 "Cursor did not finish its current page before loading the next");
-        requireThrows([&] { cursor.next(); }, "read");
+        requireThrows([&]
+                      { cursor.next(); }, "read");
     }
 
     void testLargePageIds(Database &database, const std::filesystem::path &path)
@@ -347,7 +350,7 @@ namespace
             const auto page = makeEmptyDataPage(highId);
             PageFile pages{LinuxDirectory{file.parent_path()}, file.filename()};
             pages.writePage(highId, encodeDataPage(page.header,
-                           std::get<HeaderPage>(header.data), std::get<DataPage>(page.data)));
+                                                   std::get<HeaderPage>(header.data), std::get<DataPage>(page.data)));
             pages.sync();
         }
         const journal_test::DatabaseIdentity identity{path};

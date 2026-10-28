@@ -164,7 +164,7 @@ namespace
             }
             database.executeSql("CREATE TABLE items (id INT);");
             database.executeSql("INSERT INTO items VALUES (1);");
-            require(database.selectAllRows("items").size() == 1,
+            require(database.executeSql("SELECT * FROM items;").rows.size() == 1,
                     "Failed CREATE prevented the next statement");
         }
     }
@@ -336,8 +336,8 @@ namespace
         auto database = Database::create(root, "test");
         database.executeSql("CREATE TABLE items (id INT, label TEXT);");
         database.executeSql("CREATE TABLE other (id INT, label TEXT);");
-        database.insertRows("items", {Row{{std::int32_t{1}, std::string(1500, 'a')}}});
-        database.insertRows("other", {Row{{std::int32_t{1}, std::string(1500, 'a')}}});
+        database.executeSql("INSERT INTO items VALUES (1, '" + std::string(1500, 'a') + "');");
+        database.executeSql("INSERT INTO other VALUES (1, '" + std::string(1500, 'a') + "');");
     }
 
     std::size_t eventCount(const Probe &probe, const std::string &operation, const Path &path)
@@ -739,20 +739,18 @@ namespace
             probe.skipMatches = 1; // First sync persists journal creation.
             {
                 Observe observe{probe};
-                requireError([&] { database.insertRows("items", {Row{{std::int32_t{2}, std::string{"b"}}}}); }, "fsync");
+                requireError([&] { database.executeSql("INSERT INTO items VALUES (2, 'b');"); }, "fsync");
             }
             require(probe.failed && !std::filesystem::exists(root / "journal/journal.log"),
                     "Did not fail after journal unlink");
-            requireError([&] { database.selectAllRows("items"); }, "recovery is required");
             requireError([&] { database.executeSql("SELECT * FROM items;"); }, "recovery is required");
-            BoundSelect select{};
-            select.tableName = "items";
-            requireError([&] { database.execute(std::move(select)); }, "recovery is required");
+            requireError([&] { database.executeSql("INSERT INTO items VALUES (3, 'blocked');"); }, "recovery is required");
+            requireError([&] { database.executeSql("DELETE FROM items;"); }, "recovery is required");
             requireError([&] { database.executeSql("CREATE TABLE blocked (id INT);"); }, "recovery is required");
         }
         // In-process failure requires reopening; this is not a power-loss test.
         auto database = Database::open(root, "test");
-        require(database.selectAllRows("items").size() == 2, "Uncertain commit was blindly undone");
+        require(database.executeSql("SELECT * FROM items;").rows.size() == 2, "Uncertain commit was blindly undone");
     }
 
     void testDirectDirectorySyncFailures()
