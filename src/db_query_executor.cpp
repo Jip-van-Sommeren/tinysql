@@ -314,3 +314,90 @@ QueryResult SelectExecutor::execute(
 
     return result;
 }
+
+QueryResult QueryExecutor::execute(const BoundQuery &query)
+{
+    storageEngine_.requireReadable();
+
+    return std::visit(
+        [this](const auto &statement) -> QueryResult
+        {
+            return executeStatement(statement);
+        },
+        query);
+}
+
+QueryResult QueryExecutor::executeStatement(
+    const BoundSelect &select)
+{
+    auto table = storageEngine_.openTable(select.tableName);
+    return selectExecutor_.execute(select, table);
+}
+
+QueryResult QueryExecutor::executeStatement(
+    const BoundInsert &insert)
+{
+    storageEngine_.beginStatement();
+
+    QueryResult result;
+    try
+    {
+        result = storageEngine_.insertRows(insert);
+    }
+    catch (...)
+    {
+        storageEngine_.rollbackStatement();
+        throw;
+    }
+
+    storageEngine_.commitStatement();
+    return result;
+}
+
+QueryResult QueryExecutor::executeStatement(const BoundDelete &del)
+{
+    storageEngine_.beginStatement();
+    QueryResult queryResult{};
+
+    try
+    {
+        queryResult = storageEngine_.deleteRows(del);
+    }
+    catch (...)
+    {
+        storageEngine_.rollbackStatement();
+        throw;
+    }
+
+    storageEngine_.commitStatement();
+
+    return queryResult;
+}
+
+QueryResult QueryExecutor::executeStatement(
+    const BoundCreateTable &createTable)
+{
+    storageEngine_.beginStatement();
+
+    try
+    {
+        storageEngine_.createTable(
+            createTable.tableName,
+            dbName_,
+            createTable.columns,
+            createTable.constraints);
+    }
+    catch (...)
+    {
+        storageEngine_.rollbackStatement();
+        throw;
+    }
+
+    storageEngine_.commitStatement();
+
+    return QueryResult{
+        .columns = {},
+        .rows = {},
+        .affectedRows = 0,
+        .returnsRows = false};
+}

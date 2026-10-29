@@ -46,34 +46,6 @@ Database Database::open(
     }
 }
 
-QueryResult Database::execute(const BoundQuery &query)
-{
-    storageEngine.requireReadable();
-    return std::visit(
-        [this](const auto &boundQuery) -> QueryResult
-        {
-            using T = std::decay_t<decltype(boundQuery)>;
-
-            if constexpr (std::is_same_v<T, BoundInsert>)
-            {
-                return executeInsert(boundQuery);
-            }
-            else if constexpr (std::is_same_v<T, BoundSelect>)
-            {
-                return executeSelect(boundQuery);
-            }
-            else if constexpr (std::is_same_v<T, BoundDelete>)
-            {
-                return executeDelete(boundQuery);
-            }
-            else
-            {
-                return executeCreateTable(boundQuery);
-            }
-        },
-        query);
-}
-
 QueryResult Database::executeSql(const std::string &sql)
 {
     storageEngine.requireReadable();
@@ -84,79 +56,6 @@ QueryResult Database::executeSql(const std::string &sql)
     QueryValidator validator{storageEngine};
     BoundQuery query = validator.validate(*statement);
 
-    return execute(query);
-}
-
-QueryResult Database::executeInsert(const BoundInsert &insert)
-{
-    storageEngine.beginStatement();
-    QueryResult queryResult{};
-    try
-    {
-        queryResult = storageEngine.insertRows(insert);
-    }
-    catch (...)
-    {
-        storageEngine.rollbackStatement();
-        throw;
-    }
-
-    storageEngine.commitStatement();
-
-    return queryResult;
-}
-
-QueryResult Database::executeSelect(const BoundSelect &select)
-{
-    Table table = storageEngine.openTable(select.tableName);
-    SelectExecutor executor;
-    return executor.execute(select, table);
-}
-
-QueryResult Database::executeDelete(const BoundDelete &del)
-{
-    storageEngine.beginStatement();
-    QueryResult queryResult{};
-
-    try
-    {
-        queryResult = storageEngine.deleteRows(del);
-    }
-    catch (...)
-    {
-        storageEngine.rollbackStatement();
-        throw;
-    }
-
-    storageEngine.commitStatement();
-
-    return queryResult;
-}
-
-QueryResult Database::executeCreateTable(
-    const BoundCreateTable &createTable)
-{
-    storageEngine.beginStatement();
-
-    try
-    {
-        storageEngine.createTable(
-            createTable.tableName,
-            dbName,
-            createTable.columns,
-            createTable.constraints);
-    }
-    catch (...)
-    {
-        storageEngine.rollbackStatement();
-        throw;
-    }
-
-    storageEngine.commitStatement();
-
-    return QueryResult{
-        .columns = {},
-        .rows = {},
-        .affectedRows = 0,
-        .returnsRows = false};
+    QueryExecutor executor{storageEngine, dbName};
+    return executor.execute(query);
 }

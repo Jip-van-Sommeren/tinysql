@@ -255,7 +255,7 @@ QueryResult StorageEngine::deleteRows(const BoundDelete &del)
 bool StorageEngine::tableExists(const std::string &name) const
 {
     requireReadable();
-    return std::filesystem::exists(getTablePath(name));
+    return tablesDirectory_.entryExists(name + ".table");
 }
 
 HeaderPage StorageEngine::getTableHeader(const std::string &tableName) const
@@ -264,7 +264,7 @@ HeaderPage StorageEngine::getTableHeader(const std::string &tableName) const
 
     const auto fileName = tableName + ".table";
 
-    if (!tablesDirectory_.entryExists(fileName))
+    if (!tableExists(tableName))
     {
         throw std::runtime_error("Table does not exist: " + tableName);
     }

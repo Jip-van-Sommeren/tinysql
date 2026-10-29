@@ -21,10 +21,4 @@ private:
 
     std::string dbName;
     StorageEngine storageEngine;
-
-    QueryResult executeInsert(const BoundInsert &insert);
-    QueryResult executeSelect(const BoundSelect &select);
-    QueryResult executeDelete(const BoundDelete &del);
-    QueryResult executeCreateTable(const BoundCreateTable &createTable);
-    QueryResult execute(const BoundQuery &query);
 };
