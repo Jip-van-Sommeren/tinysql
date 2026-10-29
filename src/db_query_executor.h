@@ -31,4 +31,5 @@ private:
     QueryResult executeStatement(const BoundInsert &insert);
     QueryResult executeStatement(const BoundDelete &del);
     QueryResult executeStatement(const BoundCreateTable &create);
+    QueryResult executeStatement(const BoundUpdate &update);
 };

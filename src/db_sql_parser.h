@@ -351,12 +351,7 @@ struct JoinTableRef : TableRef
         std::unique_ptr<Expr> condition);
 };
 
-struct Statement
-{
-    virtual ~Statement() = default;
-};
-
-struct SelectStatement : Statement
+struct SelectStatement
 {
     std::vector<std::unique_ptr<SelectItem>> selectList;
     std::unique_ptr<TableRef> from;
@@ -368,7 +363,7 @@ struct SelectStatement : Statement
         std::unique_ptr<Expr> where);
 };
 
-struct DeleteStatement : Statement
+struct DeleteStatement
 {
     std::unique_ptr<TableRef> from;
     std::unique_ptr<Expr> where;
@@ -378,7 +373,7 @@ struct DeleteStatement : Statement
         std::unique_ptr<Expr> where);
 };
 
-struct CreateTableStatement : Statement
+struct CreateTableStatement
 {
     std::string tableName;
     std::vector<std::unique_ptr<ColumnDefExpr>> columns;      // column name and data type
@@ -390,7 +385,7 @@ struct CreateTableStatement : Statement
         std::vector<std::unique_ptr<ConstraintExpr>> constraints);
 };
 
-struct InsertStatement : Statement
+struct InsertStatement
 {
     std::string tableName;
     std::vector<std::string> columns;
@@ -412,7 +407,7 @@ struct Assignment
         std::unique_ptr<Expr> value);
 };
 
-struct UpdateStatement : Statement
+struct UpdateStatement
 {
     std::string tableName;
     std::vector<Assignment> assignments;
@@ -436,17 +431,24 @@ struct ParsedColumnDefinition
     std::vector<std::unique_ptr<ConstraintExpr>> constraints;
 };
 
+using Statement = std::variant<
+    InsertStatement,
+    SelectStatement,
+    DeleteStatement,
+    CreateTableStatement,
+    UpdateStatement>;
+
 class Parser
 {
 public:
     explicit Parser(std::vector<Token> tokens);
 
-    std::unique_ptr<Statement> parseStatement();
-    std::unique_ptr<SelectStatement> parseSelectStatement();
-    std::unique_ptr<DeleteStatement> parseDeleteStatement();
-    std::unique_ptr<InsertStatement> parseInsertStatement();
-    std::unique_ptr<UpdateStatement> parseUpdateStatement();
-    std::unique_ptr<CreateTableStatement> parseCreateTableStatement();
+    Statement parseStatement();
+    SelectStatement parseSelectStatement();
+    DeleteStatement parseDeleteStatement();
+    InsertStatement parseInsertStatement();
+    UpdateStatement parseUpdateStatement();
+    CreateTableStatement parseCreateTableStatement();
 
 private:
     std::vector<Token> tokens;

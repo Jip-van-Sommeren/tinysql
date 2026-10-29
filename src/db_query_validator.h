@@ -196,7 +196,20 @@ struct BoundCreateTable
     std::vector<BoundConstraint> constraints;
 };
 
-using BoundQuery = std::variant<BoundSelect, BoundInsert, BoundDelete, BoundCreateTable>;
+struct BoundAssignment
+{
+    ColumnId columnId;
+    std::unique_ptr<BoundExpr> expr;
+};
+
+struct BoundUpdate
+{
+    std::string tableName;
+    std::vector<BoundAssignment> assignments;
+    std::unique_ptr<BoundExpr> where;
+};
+
+using BoundQuery = std::variant<BoundSelect, BoundInsert, BoundDelete, BoundCreateTable, BoundUpdate>;
 
 enum class SerializedExprType : std::uint8_t
 {
@@ -205,52 +218,6 @@ enum class SerializedExprType : std::uint8_t
     Binary,
     Unary
 };
-
-// class FileCatalog : public Catalog
-// {
-// public:
-//     explicit FileCatalog(std::filesystem::path tablesPath)
-//         : tablesPath(std::move(tablesPath))
-//     {
-//     }
-
-//     bool tableExists(const std::string &tableName) const override
-//     {
-//         return std::filesystem::exists(tablePath(tableName));
-//     }
-
-//     HeaderPage getTableHeader(const std::string &tableName) const override
-//     {
-//         std::filesystem::path path = tablePath(tableName);
-
-//         if (!std::filesystem::exists(path))
-//         {
-//             throw std::runtime_error("Table does not exist: " + tableName);
-//         }
-
-//         RawPage rawPage = readPageFromFile(path, 0);
-//         Page page = decodeHeaderPage(rawPage);
-
-//         return std::get<HeaderPage>(page.data);
-//     }
-
-//     BindContext createBindContext(const std::string &tableName) const
-//     {
-//         HeaderPage schema = getTableHeader(tableName);
-//         return BindContext{
-//             .tableName = tableName,
-//             .columns = std::move(schema.columns),
-//             .constraints = std::move(schema.constraints)};
-//     }
-
-// private:
-//     std::filesystem::path tablesPath;
-
-//     std::filesystem::path tablePath(const std::string &tableName) const
-//     {
-//         return tablesPath / (tableName + ".table");
-//     }
-// };
 
 class QueryValidator
 {
@@ -262,10 +229,12 @@ public:
 private:
     const Catalog &catalog_;
 
-    BoundSelect validateSelect(const SelectStatement &statement);
-    BoundInsert validateInsert(const InsertStatement &statement);
-    BoundDelete validateDelete(const DeleteStatement &statement);
-    BoundCreateTable bindCreateTable(const CreateTableStatement &statement);
+    BoundSelect validateStatement(const SelectStatement &statement);
+    BoundInsert validateStatement(const InsertStatement &statement);
+    BoundDelete validateStatement(const DeleteStatement &statement);
+    BoundUpdate validateStatement(const UpdateStatement &statement);
+    BoundCreateTable validateStatement(const CreateTableStatement &statement);
+
     BoundConstraint bindConstraintExpr(const ConstraintExpr &expr, BindContext &context);
     std::unique_ptr<BoundExpr> bindExpr(
         const Expr &expr,

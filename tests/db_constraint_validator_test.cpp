@@ -29,7 +29,7 @@ namespace
 
     template <typename Function>
     void rejectBatch(Database &database, const std::filesystem::path &root,
-                     const std::string &table, Function insert,
+                     const std::string &table, Function statement,
                      const std::string &expectedError)
     {
         const auto tablePath = root / "tables" / (table + ".table");
@@ -38,7 +38,7 @@ namespace
         bool rejected = false;
         try
         {
-            insert();
+            statement();
         }
         catch (const std::runtime_error &error)
         {
@@ -46,12 +46,12 @@ namespace
                     "Unexpected error: " + std::string{error.what()});
             rejected = true;
         }
-        require(rejected, "Expected INSERT rejection: " + expectedError);
-        require(readFile(tablePath) == before, "Rejected INSERT changed table bytes");
+        require(rejected, "Expected statement rejection: " + expectedError);
+        require(readFile(tablePath) == before, "Rejected statement changed table bytes");
         require(database.executeSql("SELECT * FROM " + table + ";").rows.size() == rowCount,
-                "Rejected INSERT retained part of the batch");
+                "Rejected statement changed the row count");
         require(!std::filesystem::exists(root / "journal/journal.log"),
-                "Rejected INSERT left an active journal");
+                "Rejected statement left an active journal");
     }
 
     void testPrimaryKeysAndReopen()
@@ -224,6 +224,188 @@ namespace
         database.executeSql("INSERT INTO children (id, x, y) VALUES (5, 21, 11);");
     }
 
+    void testForeignKeyDeleteRestrictions()
+    {
+        TestDirectory directory{"db-constraint-delete-references"};
+        const auto root = directory.path / "db";
+        auto database = Database::create(root, "test");
+        database.executeSql("CREATE TABLE parents (id INT PRIMARY KEY);");
+        database.executeSql("CREATE TABLE children (id INT PRIMARY KEY, parent_id INT, "
+                            "FOREIGN KEY (parent_id) REFERENCES parents (id));");
+        database.executeSql("INSERT INTO parents VALUES (1), (2), (3);");
+
+        require(database.executeSql("DELETE FROM parents WHERE id = 1;").affectedRows == 1,
+                "An empty child table blocked parent deletion");
+        database.executeSql("INSERT INTO children VALUES (10, 3);");
+        rejectBatch(database, root, "parents", [&]
+        {
+            database.executeSql("DELETE FROM parents WHERE id = 3;");
+        }, "FOREIGN KEY");
+        require(database.executeSql("DELETE FROM parents WHERE id = 2;").affectedRows == 1,
+                "An unrelated child row blocked parent deletion");
+        require(database.executeSql("DELETE FROM parents WHERE id = 99;").affectedRows == 0,
+                "A DELETE matching no parents did not return zero affectedRows");
+
+        // Each DELETE must enumerate incoming FKs, even after earlier scans.
+        rejectBatch(database, root, "parents", [&]
+        {
+            database.executeSql("DELETE FROM parents WHERE id = 3;");
+        }, "FOREIGN KEY");
+        require(database.executeSql("DELETE FROM children WHERE id = 10;").affectedRows == 1,
+                "An outgoing FK blocked child deletion");
+        require(database.executeSql("DELETE FROM parents WHERE id = 3;").affectedRows == 1,
+                "Removing the child did not unblock parent deletion");
+        require(database.executeSql("SELECT * FROM parents;").rows.empty(),
+                "Successful DELETE statements left parent rows behind");
+    }
+
+    void testForeignKeyDeleteCompositeKeys()
+    {
+        TestDirectory directory{"db-constraint-delete-composite"};
+        const auto root = directory.path / "db";
+        auto database = Database::create(root, "test");
+        database.executeSql("CREATE TABLE parents (label TEXT, a INT, b INT, PRIMARY KEY (a, b));");
+        database.executeSql("INSERT INTO parents VALUES "
+                            "('referenced', 10, 20), ('same_a', 10, 21), "
+                            "('same_b', 11, 20), ('reversed', 20, 10);");
+        // Local positions differ from parent positions, and REFERENCES reverses
+        // the primary key order. A match must compare the entire mapped tuple.
+        database.executeSql("CREATE TABLE children (id INT PRIMARY KEY, label TEXT, y INT, x INT, "
+                            "FOREIGN KEY (x, y) REFERENCES parents (b, a));");
+        database.executeSql("INSERT INTO children VALUES (1, 'child', 10, 20);");
+        rejectBatch(database, root, "parents", [&]
+        {
+            database.executeSql("DELETE FROM parents WHERE a = 10 AND b = 20;");
+        }, "FOREIGN KEY");
+        require(database.executeSql("DELETE FROM parents WHERE b = 21 OR a = 11 OR a = 20;")
+                    .affectedRows == 3,
+                "Partial or reversed composite keys incorrectly blocked deletion");
+        const auto rows = database.executeSql("SELECT * FROM parents;").rows;
+        require(rows.size() == 1 && std::get<std::string>(rows[0].values[0]) == "referenced",
+                "Composite-key deletion retained the wrong parent");
+    }
+
+    void testForeignKeyDeleteNulls()
+    {
+        TestDirectory directory{"db-constraint-delete-nulls"};
+        const auto root = directory.path / "db";
+        auto database = Database::create(root, "test");
+        database.executeSql("CREATE TABLE parents (id INT PRIMARY KEY, a INT, b INT, UNIQUE (a, b));");
+        database.executeSql("INSERT INTO parents VALUES "
+                            "(1, NULL, 7), (2, 7, NULL), (3, NULL, NULL), (4, 7, 8), (5, 9, 10);");
+        database.executeSql("CREATE TABLE children (id INT PRIMARY KEY, x INT, y INT, "
+                            "FOREIGN KEY (x, y) REFERENCES parents (a, b));");
+        database.executeSql("INSERT INTO children VALUES "
+                            "(10, NULL, 7), (11, 7, NULL), (12, NULL, NULL), "
+                            "(13, 7, 8), (14, NULL, 10), (15, 9, NULL);");
+
+        // Skipping a NULL-containing parent key must not skip later parents.
+        rejectBatch(database, root, "parents", [&]
+        {
+            database.executeSql("DELETE FROM parents WHERE id <= 4;");
+        }, "FOREIGN KEY");
+        require(database.executeSql("DELETE FROM parents WHERE id <= 3;").affectedRows == 3,
+                "NULL-containing parent keys incorrectly matched child NULLs");
+        require(database.executeSql("DELETE FROM parents WHERE id = 5;").affectedRows == 1,
+                "A NULL-containing child key incorrectly referenced a non-NULL parent");
+        rejectBatch(database, root, "parents", [&]
+        {
+            database.executeSql("DELETE FROM parents WHERE id = 4;");
+        }, "FOREIGN KEY");
+        require(database.executeSql("SELECT * FROM children;").rows.size() == 6,
+                "Parent deletion changed child rows");
+    }
+
+    void testForeignKeyDeleteIndependentReferences()
+    {
+        TestDirectory directory{"db-constraint-delete-independent"};
+        const auto root = directory.path / "db";
+        auto database = Database::create(root, "test");
+        database.executeSql("CREATE TABLE parents (id INT PRIMARY KEY, code INT UNIQUE);");
+        database.executeSql("INSERT INTO parents VALUES (1, NULL), (2, 20), (3, 30), (4, 40);");
+        database.executeSql("CREATE TABLE children (id INT PRIMARY KEY, parent_code INT, parent_id INT, "
+                            "FOREIGN KEY (parent_code) REFERENCES parents (code), "
+                            "FOREIGN KEY (parent_id) REFERENCES parents (id));");
+        database.executeSql("INSERT INTO children VALUES (10, NULL, 1), (11, 20, NULL);");
+        database.executeSql("CREATE TABLE other_children (id INT PRIMARY KEY, parent_id INT, "
+                            "FOREIGN KEY (parent_id) REFERENCES parents (id));");
+        database.executeSql("INSERT INTO other_children VALUES (12, 3);");
+
+        // A NULL in one referenced key must not skip another incoming FK.
+        // References through either key or either child table block deletion.
+        for (const std::string id : {"1", "2", "3"})
+        {
+            rejectBatch(database, root, "parents", [&]
+            {
+                database.executeSql("DELETE FROM parents WHERE id = " + id + ";");
+            }, "FOREIGN KEY");
+        }
+
+        database.executeSql("CREATE TABLE unrelated_parents (id INT PRIMARY KEY);");
+        database.executeSql("INSERT INTO unrelated_parents VALUES (4);");
+        database.executeSql("CREATE TABLE unrelated_children (parent_id INT, "
+                            "FOREIGN KEY (parent_id) REFERENCES unrelated_parents (id));");
+        database.executeSql("INSERT INTO unrelated_children VALUES (4);");
+        require(database.executeSql("DELETE FROM parents WHERE id = 4;").affectedRows == 1,
+                "An FK referencing another table incorrectly blocked deletion");
+    }
+
+    void testForeignKeyDeleteBatchAndReopen()
+    {
+        TestDirectory directory{"db-constraint-delete-batch"};
+        const auto root = directory.path / "db";
+        std::vector<std::byte> parentBytes;
+        std::vector<std::byte> childBytes;
+        {
+            auto database = Database::create(root, "test");
+            database.executeSql("CREATE TABLE parents (id INT PRIMARY KEY, label TEXT);");
+            database.executeSql("INSERT INTO parents VALUES "
+                                "(1, 'unreferenced first'), (2, 'referenced'), (3, 'unreferenced last');");
+            database.executeSql("CREATE TABLE children (id INT PRIMARY KEY, parent_id INT, "
+                                "FOREIGN KEY (parent_id) REFERENCES parents (id));");
+            database.executeSql("INSERT INTO children VALUES (10, 2), (11, 2);");
+            parentBytes = readFile(root / "tables/parents.table");
+            childBytes = readFile(root / "tables/children.table");
+
+            rejectBatch(database, root, "parents", [&]
+            {
+                database.executeSql("DELETE FROM parents;");
+            }, "FOREIGN KEY");
+            require(readFile(root / "tables/children.table") == childBytes,
+                    "Rejected multi-row DELETE changed child table bytes");
+        }
+        {
+            auto database = Database::open(root, "test");
+            require(readFile(root / "tables/parents.table") == parentBytes &&
+                        readFile(root / "tables/children.table") == childBytes,
+                    "Rejected multi-row DELETE changed persisted table bytes");
+            require(database.executeSql("SELECT * FROM parents;").rows.size() == 3 &&
+                        database.executeSql("SELECT * FROM children;").rows.size() == 2,
+                    "Rejected multi-row DELETE lost rows after reopening");
+            rejectBatch(database, root, "parents", [&]
+            {
+                database.executeSql("DELETE FROM parents;");
+            }, "FOREIGN KEY");
+
+            require(database.executeSql("DELETE FROM children WHERE id = 10;").affectedRows == 1,
+                    "Child deletion after reopening returned incorrect affectedRows");
+            rejectBatch(database, root, "parents", [&]
+            {
+                database.executeSql("DELETE FROM parents WHERE id = 2;");
+            }, "FOREIGN KEY");
+            require(database.executeSql("DELETE FROM children;").affectedRows == 1,
+                    "Deleting the remaining child returned incorrect affectedRows");
+            require(database.executeSql("DELETE FROM parents;").affectedRows == 3,
+                    "Removing all children did not allow the complete parent batch");
+        }
+        auto reopened = Database::open(root, "test");
+        require(reopened.executeSql("SELECT * FROM parents;").rows.empty() &&
+                    reopened.executeSql("SELECT * FROM children;").rows.empty(),
+                "Successful deletes did not survive reopening");
+        require(!std::filesystem::exists(root / "journal/journal.log"),
+                "Successful deletes left an active journal");
+    }
+
     void testNumericKeyEquality()
     {
         TestDirectory directory{"db-constraint-numeric"};
@@ -308,6 +490,11 @@ int main()
         testUniqueNulls();
         testInvalidSqlRows();
         testOtherConstraints();
+        testForeignKeyDeleteRestrictions();
+        testForeignKeyDeleteCompositeKeys();
+        testForeignKeyDeleteNulls();
+        testForeignKeyDeleteIndependentReferences();
+        testForeignKeyDeleteBatchAndReopen();
         testNumericKeyEquality();
         testNonSqlNumericKeys();
     }

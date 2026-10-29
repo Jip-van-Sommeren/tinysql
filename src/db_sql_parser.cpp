@@ -183,7 +183,7 @@ UpdateStatement::UpdateStatement(
 Parser::Parser(std::vector<Token> tokens)
     : tokens(std::move(tokens)), pos(0) {}
 
-std::unique_ptr<Statement> Parser::parseStatement()
+Statement Parser::parseStatement()
 {
     if (checkKeyword("SELECT"))
     {
@@ -209,7 +209,7 @@ std::unique_ptr<Statement> Parser::parseStatement()
     throw std::runtime_error("Expected SQL statement, got: " + peek().text);
 }
 
-std::unique_ptr<CreateTableStatement> Parser::parseCreateTableStatement()
+CreateTableStatement Parser::parseCreateTableStatement()
 {
     expectKeyword("CREATE");
     expectKeyword("TABLE");
@@ -221,10 +221,10 @@ std::unique_ptr<CreateTableStatement> Parser::parseCreateTableStatement()
 
     finishStatement();
 
-    return std::make_unique<CreateTableStatement>(
+    return CreateTableStatement{
         std::move(tableName),
         std::move(elements.columns),
-        std::move(elements.constraints));
+        std::move(elements.constraints)};
 }
 
 std::vector<std::unique_ptr<ConstraintExpr>> Parser::parseTableConstraints()
@@ -626,7 +626,7 @@ std::unique_ptr<ConstraintExpr> Parser::parseTableConstraintBody()
 //         "Expected column constraint, found: " + peek().text);
 // }
 
-std::unique_ptr<SelectStatement> Parser::parseSelectStatement()
+SelectStatement Parser::parseSelectStatement()
 {
     expectKeyword("SELECT");
 
@@ -635,13 +635,13 @@ std::unique_ptr<SelectStatement> Parser::parseSelectStatement()
     auto where = parseOptionalWhere();
     finishStatement();
 
-    return std::make_unique<SelectStatement>(
+    return SelectStatement{
         std::move(selectList),
         std::move(from),
-        std::move(where));
+        std::move(where)};
 }
 
-std::unique_ptr<DeleteStatement> Parser::parseDeleteStatement()
+DeleteStatement Parser::parseDeleteStatement()
 {
     expectKeyword("DELETE");
 
@@ -649,12 +649,12 @@ std::unique_ptr<DeleteStatement> Parser::parseDeleteStatement()
     auto where = parseOptionalWhere();
     finishStatement();
 
-    return std::make_unique<DeleteStatement>(
+    return DeleteStatement{
         std::move(from),
-        std::move(where));
+        std::move(where)};
 }
 
-std::unique_ptr<InsertStatement> Parser::parseInsertStatement()
+InsertStatement Parser::parseInsertStatement()
 {
     expectKeyword("INSERT");
     expectKeyword("INTO");
@@ -687,13 +687,13 @@ std::unique_ptr<InsertStatement> Parser::parseInsertStatement()
 
     finishStatement();
 
-    return std::make_unique<InsertStatement>(
+    return InsertStatement{
         std::move(tableName),
         std::move(columns),
-        std::move(valuesList));
+        std::move(valuesList)};
 }
 
-std::unique_ptr<UpdateStatement> Parser::parseUpdateStatement()
+UpdateStatement Parser::parseUpdateStatement()
 {
     expectKeyword("UPDATE");
 
@@ -711,10 +711,10 @@ std::unique_ptr<UpdateStatement> Parser::parseUpdateStatement()
     auto where = parseOptionalWhere();
     finishStatement();
 
-    return std::make_unique<UpdateStatement>(
+    return UpdateStatement{
         std::move(tableName),
         std::move(assignments),
-        std::move(where));
+        std::move(where)};
 }
 
 const Token &Parser::peek() const

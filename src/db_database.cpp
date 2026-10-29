@@ -51,10 +51,10 @@ QueryResult Database::executeSql(const std::string &sql)
     storageEngine.requireReadable();
     Lexer lexer(sql);
     Parser parser(lexer.tokenize());
-    std::unique_ptr<Statement> statement = parser.parseStatement();
+    Statement statement = parser.parseStatement();
 
     QueryValidator validator{storageEngine};
-    BoundQuery query = validator.validate(*statement);
+    BoundQuery query = validator.validate(statement);
 
     QueryExecutor executor{storageEngine, dbName};
     return executor.execute(query);

@@ -401,3 +401,24 @@ QueryResult QueryExecutor::executeStatement(
         .affectedRows = 0,
         .returnsRows = false};
 }
+
+QueryResult QueryExecutor::executeStatement(const BoundUpdate &update)
+{
+    storageEngine_.beginStatement();
+    QueryResult queryResult{};
+    (void)update;
+
+    // try
+    // {
+    //     queryResult = storageEngine_.deleteRows(del);
+    // }
+    // catch (...)
+    // {
+    //     storageEngine_.rollbackStatement();
+    //     throw;
+    // }
+
+    storageEngine_.commitStatement();
+
+    return queryResult;
+}

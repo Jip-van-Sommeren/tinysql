@@ -790,30 +790,82 @@ QueryValidator::QueryValidator(const Catalog &catalog)
 
 BoundQuery QueryValidator::validate(const Statement &statement)
 {
-    if (const auto *insert = dynamic_cast<const InsertStatement *>(&statement))
-    {
-        return validateInsert(*insert);
-    }
 
-    if (const auto *select = dynamic_cast<const SelectStatement *>(&statement))
-    {
-        return validateSelect(*select);
-    }
+    auto result = std::visit(
+        [&](const auto &value) -> BoundQuery
+        {
+            using T = std::decay_t<decltype(value)>;
 
-    if (const auto *deleteStmt = dynamic_cast<const DeleteStatement *>(&statement))
-    {
-        return validateDelete(*deleteStmt);
-    }
+            if constexpr (std::is_same_v<T, InsertStatement>)
+            {
+                return validateStatement(value);
+            }
 
-    if (const auto *createTable = dynamic_cast<const CreateTableStatement *>(&statement))
-    {
-        return bindCreateTable(*createTable);
-    }
+            else if constexpr (std::is_same_v<T, SelectStatement>)
+            {
+                return validateStatement(value);
+            }
 
-    throw std::runtime_error("Unsupported statement type");
+            else if constexpr (std::is_same_v<T, DeleteStatement>)
+            {
+                return validateStatement(value);
+            }
+
+            else if constexpr (std::is_same_v<T, CreateTableStatement>)
+            {
+                return validateStatement(value);
+            }
+
+            else if constexpr (std::is_same_v<T, UpdateStatement>)
+            {
+                return validateStatement(value);
+            }
+            else
+            {
+                throw std::runtime_error("Unknown Statement Type");
+            }
+        },
+        statement
+
+    );
+    return result;
 }
 
-BoundDelete QueryValidator::validateDelete(const DeleteStatement &statement)
+BoundUpdate QueryValidator::validateStatement(const UpdateStatement &statement)
+{
+
+    const auto &tableName = statement.tableName;
+    if (!catalog_.tableExists(tableName))
+    {
+        throw std::runtime_error("Table does not exist: " + tableName);
+    }
+    BindContext context = createBindContext(tableName);
+
+    std::vector<BoundAssignment> boundAssignments{};
+    boundAssignments.reserve(statement.assignments.size());
+
+    for (const auto &assignment : statement.assignments)
+    {
+        const auto &colName = resolveColumnName(assignment.target->parts, tableName);
+        const auto &column = context.resolveColumn(colName);
+
+        boundAssignments.push_back({.columnId = column.columnIndex, .expr = bindExpr(*assignment.value, context)});
+    }
+
+    std::unique_ptr<BoundExpr> where;
+
+    if (statement.where)
+    {
+        where = bindExpr(*statement.where, context);
+    }
+
+    return BoundUpdate{
+        .tableName = tableName,
+        .assignments = std::move(boundAssignments),
+        .where = std::move(where)};
+}
+
+BoundDelete QueryValidator::validateStatement(const DeleteStatement &statement)
 {
     if (!statement.from)
     {
@@ -842,7 +894,7 @@ BoundDelete QueryValidator::validateDelete(const DeleteStatement &statement)
         .where = std::move(where)};
 }
 
-BoundSelect QueryValidator::validateSelect(const SelectStatement &statement)
+BoundSelect QueryValidator::validateStatement(const SelectStatement &statement)
 {
     if (!statement.from)
     {
@@ -950,7 +1002,7 @@ Column QueryValidator::bindColumnDefinition(
     return column;
 }
 
-BoundCreateTable QueryValidator::bindCreateTable(
+BoundCreateTable QueryValidator::validateStatement(
     const CreateTableStatement &statement)
 {
     BoundCreateTable result;
@@ -1233,7 +1285,7 @@ BoundConstraint QueryValidator::bindConstraintExpr(
     }
 }
 
-BoundInsert QueryValidator::validateInsert(const InsertStatement &statement)
+BoundInsert QueryValidator::validateStatement(const InsertStatement &statement)
 {
     if (!catalog_.tableExists(statement.tableName))
     {
