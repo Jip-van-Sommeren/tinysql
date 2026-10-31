@@ -73,7 +73,7 @@ namespace
     {
         Lexer lexer{sql};
         Parser parser{lexer.tokenize()};
-        return validator.validate(*parser.parseStatement());
+        return validator.validate(parser.parseStatement());
     }
 
     void create(MemoryCatalog &catalog, QueryValidator &validator, const std::string &sql)
@@ -281,7 +281,7 @@ namespace
             values.push_back(std::make_unique<NumberExpr>(std::move(number)));
             std::vector<std::vector<std::unique_ptr<Expr>>> rows;
             rows.push_back(std::move(values));
-            const InsertStatement statement{"numbers", {column}, std::move(rows)};
+            const Statement statement = InsertStatement{"numbers", {column}, std::move(rows)};
             return std::get<BoundInsert>(validator.validate(statement));
         };
         require(std::get<std::int64_t>(bindNumber("big", std::float64_t{42}).rows[0].values[1]) == 42,

@@ -548,7 +548,7 @@ namespace
             require(cursor.next().has_value(), "Cursor fixture is empty");
             recovery.begin();
             // Force file growth and changes to existing page links and header.
-            manager.insertAllRows({Row{{std::int32_t{2}, std::string(1500, 'b')}},
+            manager.insertRows({Row{{std::int32_t{2}, std::string(1500, 'b')}},
                                    Row{{std::int32_t{3}, std::string(1500, 'c')}}});
             Probe probe{};
             probe.root = root;
@@ -593,6 +593,112 @@ namespace
             auto scan = restored.scan();
             require(scan.next().has_value() && !scan.next(), "Fresh handle did not see restored contents");
         }
+    }
+
+    void testDeleteRollback()
+    {
+        TestDirectory directory{"db-delete-rollback"};
+        const Path root = directory.path / "db";
+        {
+            auto database = Database::create(root, "test");
+            database.executeSql("CREATE TABLE items (id INT, label TEXT);");
+            database.executeSql("INSERT INTO items VALUES (1, 'first'), (2, 'second'), (3, 'third');");
+        }
+        const auto target = root / "tables/items.table";
+        const auto before = readFile(target);
+        {
+            auto engine = StorageEngine::open(root);
+            // Exercise recovery after successful writeback and after a partial
+            // writeback fails. Both must restore the row payloads and metadata.
+            for (const bool failWrite : {false, true})
+            {
+                engine.beginStatement();
+                {
+                    auto table = engine.openTable("items");
+                    std::vector<LocatedRow> rows;
+                    {
+                        auto cursor = table.scan();
+                        while (auto row = cursor.nextLocated())
+                            rows.push_back(std::move(*row));
+                    }
+                    Probe probe{};
+                    probe.root = root;
+                    probe.target = target;
+                    probe.failOperation = "write";
+                    probe.failPath = target;
+                    probe.skipMatches = 1;
+                    if (failWrite)
+                    {
+                        Observe observe{probe};
+                        requireError([&] { table.deleteRows(rows); }, "Input/output error");
+                        require(probe.failed, "DELETE write failure was not reached");
+                    }
+                    else
+                    {
+                        require(table.deleteRows(rows) == 3, "DELETE returned the wrong row count");
+                        require(readFile(target) != before, "DELETE did not write back its changes");
+                    }
+                }
+                engine.rollbackStatement();
+                require(readFile(target) == before, "DELETE rollback did not restore exact table bytes");
+                require(!std::filesystem::exists(root / "journal/journal.log"),
+                        "DELETE rollback left an active journal");
+                auto table = engine.openTable("items");
+                auto cursor = table.scan();
+                for (std::int32_t id : {1, 2, 3})
+                {
+                    const auto row = cursor.next();
+                    require(row && std::get<std::int32_t>(row->values[0]) == id,
+                            "DELETE rollback did not restore the original rows");
+                }
+                require(!cursor.next(), "DELETE rollback duplicated rows");
+                require(engine.getTableHeader("items").totalRowCount == 3,
+                        "DELETE rollback did not restore the row count");
+            }
+        }
+        auto database = Database::open(root, "test");
+        require(database.executeSql("SELECT * FROM items;").rows.size() == 3,
+                "Restored DELETE rows did not survive reopening");
+    }
+
+    void testUpdateFailureAfterDeletion()
+    {
+        TestDirectory directory{"db-update-delete-rollback"};
+        const Path root = directory.path / "db";
+        {
+            auto database = Database::create(root, "test");
+            database.executeSql("CREATE TABLE items (id INT, label TEXT);");
+            database.executeSql("INSERT INTO items VALUES (1, 'first'), (2, 'second');");
+        }
+        const auto target = root / "tables/items.table";
+        const auto before = readFile(target);
+        {
+            auto engine = StorageEngine::open(root);
+            engine.beginStatement();
+            {
+                auto table = engine.openTable("items");
+                std::vector<LocatedRow> replacements;
+                {
+                    auto cursor = table.scan();
+                    while (auto row = cursor.nextLocated())
+                        replacements.push_back(std::move(*row));
+                }
+                replacements[0].row.values[1] = std::string{"changed"};
+                replacements[1].row.values[1] = std::string(PAGE_SIZE, 'x');
+                requireError([&] { table.updateRows(replacements); }, "too large");
+            }
+            engine.rollbackStatement();
+            require(readFile(target) == before, "Failed UPDATE did not restore its deleted originals");
+            require(engine.getTableHeader("items").totalRowCount == 2,
+                    "Failed UPDATE changed the original row count");
+            require(!std::filesystem::exists(root / "journal/journal.log"),
+                    "Failed UPDATE left an active journal");
+        }
+        auto database = Database::open(root, "test");
+        const auto rows = database.executeSql("SELECT * FROM items;").rows;
+        require(rows.size() == 2 && std::get<std::string>(rows[0].values[1]) == "first" &&
+                    std::get<std::string>(rows[1].values[1]) == "second",
+                "Failed UPDATE lost original values after reopening");
     }
 
     void testMultipleFileFailureAndReadGating()
@@ -972,6 +1078,8 @@ int main()
         testPublicationFailuresBlockDatabaseWrites();
         testCommitChecksEveryHandle();
         testExistingWriteFailuresAndGrowth();
+        testDeleteRollback();
+        testUpdateFailureAfterDeletion();
         testMultipleFileFailureAndReadGating();
         testAppendFailureAfterWriteback();
         testRetirementFailures();

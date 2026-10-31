@@ -64,15 +64,17 @@ namespace
 
     void deleteId(Table &table, StatementRecovery &recovery, std::int32_t id)
     {
-        BoundDelete query{
-            .tableName = "cursor_values",
-            .where = std::make_unique<BoundBinaryExpr>(
-                BinaryOperator::Eq,
-                std::make_unique<BoundColumnExpr>(0, DataType::Int),
-                std::make_unique<BoundLiteralExpr>(Value{id}, DataType::Int),
-                DataType::Boolean)};
+        std::vector<LocatedRow> rows;
+        {
+            auto cursor = table.scan();
+            while (auto row = cursor.nextLocated())
+            {
+                if (std::get<std::int32_t>(row->row.values.at(0)) == id)
+                    rows.push_back(std::move(*row));
+            }
+        }
         recovery.begin();
-        require(table.deleteRows(query) == 1, "DELETE did not remove the expected row");
+        require(table.deleteRows(rows) == 1, "DELETE did not remove the expected row");
         recovery.commit();
     }
 
@@ -310,6 +312,104 @@ namespace
                 "SQL SELECT disagrees with the storage cursor after slot reuse");
     }
 
+    void testLocatedDeletes(Database &database, const std::filesystem::path &path)
+    {
+        database.executeSql("CREATE TABLE delete_values (id INT);");
+        database.executeSql("INSERT INTO delete_values VALUES (1), (2), (3);");
+        const journal_test::DatabaseIdentity identity{path};
+        StatementRecovery recovery{LinuxDirectory{path}, identity.bytes};
+        std::vector<LocatedRow> rows;
+        {
+            auto table = Table::open(LinuxDirectory{path / "tables"}, "delete_values.table", recovery);
+            auto cursor = table.scan();
+            while (auto row = cursor.nextLocated())
+                rows.push_back(std::move(*row));
+        }
+
+        recovery.begin();
+        {
+            BufferManager manager{LinuxDirectory{path / "tables"}, "delete_values.table",
+                                  LinuxFile::OpenMode::OpenExisting, recovery};
+            require(manager.deleteRow(rows[0].id) == 1, "Single-row deletion returned the wrong count");
+            require(manager.getHeaderPage().as<HeaderPage>().totalRowCount == 2,
+                    "Single-row deletion did not decrement totalRowCount");
+            // Slot 2 is no longer at vector index 2 after deleting slot 0.
+            const std::vector<RowId> ids{rows[2].id, rows[2].id, rows[0].id};
+            require(manager.deleteRows(ids) == 1, "Duplicate/deleted IDs were counted more than once");
+            require(manager.getHeaderPage().as<HeaderPage>().totalRowCount == 1,
+                    "Batch deletion decremented totalRowCount incorrectly");
+            require(manager.deleteRows(std::vector<RowId>{}) == 0,
+                    "Empty buffer-manager deletion returned a nonzero count");
+            manager.flushAll();
+            manager.sync();
+        }
+        recovery.commit();
+
+        recovery.begin();
+        {
+            auto table = Table::open(LinuxDirectory{path / "tables"}, "delete_values.table", recovery);
+            require(scanIds(table) == std::vector<std::int32_t>{2},
+                    "Deleted rows remained visible after reopening");
+            require(table.deleteRows({}) == 0, "Empty table deletion returned a nonzero count");
+            require(table.deleteRows({rows[0], rows[0], rows[2]}) == 0,
+                    "Repeated table deletion removed or counted another row");
+            table.insertRows({.tableName = "delete_values", .rows = {Row{{std::int32_t{4}}}}});
+        }
+        recovery.commit();
+
+        auto reopened = Table::open(LinuxDirectory{path / "tables"}, "delete_values.table", recovery);
+        auto remaining = scanIds(reopened);
+        std::sort(remaining.begin(), remaining.end());
+        require(remaining == std::vector<std::int32_t>{2, 4},
+                "Slot reuse after deletion lost or duplicated rows");
+        const auto header = decodeHeaderPage(readPageFromFile(
+            LinuxDirectory{path / "tables"}, "delete_values.table", HeaderPageId));
+        require(std::get<HeaderPage>(header.data).totalRowCount == 2,
+                "Row count after deletion and slot reuse did not persist");
+    }
+
+    void testLocatedUpdates(Database &database, const std::filesystem::path &path)
+    {
+        database.executeSql("CREATE TABLE update_values (id INT, label TEXT);");
+        database.executeSql("INSERT INTO update_values VALUES (1, 'old1'), (2, 'old2'), (3, 'unaffected');");
+        const journal_test::DatabaseIdentity identity{path};
+        StatementRecovery recovery{LinuxDirectory{path}, identity.bytes};
+        recovery.begin();
+        {
+            auto table = Table::open(LinuxDirectory{path / "tables"}, "update_values.table", recovery);
+            std::vector<LocatedRow> replacements;
+            {
+                auto cursor = table.scan();
+                while (auto row = cursor.nextLocated())
+                {
+                    if (std::get<std::int32_t>(row->row.values[0]) <= 2)
+                        replacements.push_back(std::move(*row));
+                }
+            }
+            replacements[0].row.values[1] = std::string(3000, 'a');
+            replacements[1].row.values[1] = std::string(1500, 'b');
+            table.updateRows(replacements);
+        }
+        recovery.commit();
+
+        const auto rows = database.executeSql("SELECT * FROM update_values;").rows;
+        require(rows.size() == 3, "UPDATE inserted duplicates instead of replacing rows");
+        for (const auto &row : rows)
+        {
+            const auto id = std::get<std::int32_t>(row.values[0]);
+            const auto &label = std::get<std::string>(row.values[1]);
+            require((id == 1 && label == std::string(3000, 'a')) ||
+                        (id == 2 && label == std::string(1500, 'b')) ||
+                        (id == 3 && label == "unaffected"),
+                    "UPDATE changed the wrong row or retained an original value");
+        }
+        const auto header = decodeHeaderPage(readPageFromFile(
+            LinuxDirectory{path / "tables"}, "update_values.table", HeaderPageId));
+        const auto &schema = std::get<HeaderPage>(header.data);
+        require(schema.totalRowCount == 3 && schema.firstDataPageId != schema.lastDataPageId,
+                "Growing UPDATE lost row count or did not span multiple pages");
+    }
+
     void testLazyLoading(Database &database, const std::filesystem::path &path)
     {
         database.executeSql("CREATE TABLE lazy_values (id INT);");
@@ -363,7 +463,7 @@ namespace
             metadata.firstDataPageId = highId;
             metadata.lastDataPageId = highId;
             metadata.nextUnusedPageId = highId + 1;
-            manager.insertAllRows({Row{{std::int32_t{42}}}});
+            manager.insertRows({Row{{std::int32_t{42}}}});
             metadata.firstDataPageId = 1;
             auto first = manager.getDataPage(1);
             first.writePage().header.nextPageId = highId;
@@ -397,6 +497,8 @@ int main()
     Database database = Database::create(path, "db_storage_cursor_test");
     testPageGuards(database, path);
     testCursors(database, path);
+    testLocatedDeletes(database, path);
+    testLocatedUpdates(database, path);
     testLazyLoading(database, path);
     testLargePageIds(database, path);
 }

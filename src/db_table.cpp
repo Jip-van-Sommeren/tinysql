@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <filesystem>
+#include <ranges>
 #include <stdexcept>
 #include <utility>
 #include <variant>
@@ -42,6 +43,42 @@ TableCursor &TableCursor::operator=(TableCursor &&other) noexcept
         seenPageIds_ = std::move(other.seenPageIds_);
     }
     return *this;
+}
+
+std::optional<LocatedRow> TableCursor::nextLocated()
+{
+    if (table_)
+        table_->bufferManager.requireReadable();
+    while (pageId_ != 0)
+    {
+        if (!currentPage_)
+        {
+            if (!seenPageIds_.insert(pageId_).second)
+            {
+                throw std::runtime_error(
+                    "Detected a cycle at page " + std::to_string(pageId_));
+            }
+            currentPage_.emplace(table_->bufferManager.getDataPage(pageId_));
+        }
+
+        const DataPage &dataPage = currentPage_->as<DataPage>();
+        if (rowIndex_ < dataPage.rows.size())
+        {
+            Row row = dataPage.rows[rowIndex_].row;
+            auto slotIndex = dataPage.rows[rowIndex_].slotIndex;
+            ++rowIndex_;
+            RowId rowId{.pageId = pageId_, .slotIndex = slotIndex};
+            return LocatedRow{
+                .id = rowId,
+                .row = row};
+        }
+
+        pageId_ = currentPage_->page().nextPageId();
+        rowIndex_ = 0;
+        currentPage_.reset();
+    }
+
+    return std::nullopt;
 }
 
 std::optional<Row> TableCursor::next()
@@ -104,7 +141,19 @@ void Table::insertRows(const BoundInsert &insert)
     {
         return;
     }
-    bufferManager.insertAllRows(insert.rows);
+    bufferManager.insertRows(insert.rows);
+    bufferManager.flushAll();
+    bufferManager.sync();
+}
+
+void Table::updateRows(const std::vector<LocatedRow> &updateRows)
+{
+    bufferManager.requireReadable();
+    if (updateRows.empty())
+    {
+        return;
+    }
+    bufferManager.updateRows(updateRows);
     bufferManager.flushAll();
     bufferManager.sync();
 }
@@ -114,53 +163,15 @@ TableCursor Table::scan() &
     return TableCursor(*this);
 }
 
-std::uint64_t Table::deleteRows(const BoundDelete &del)
+std::uint64_t Table::deleteRows(const std::vector<LocatedRow> &delRows)
 {
-
-    PageGuard header = bufferManager.getHeaderPage();
-    HeaderPage &headerPage = header.write<HeaderPage>();
-    std::uint64_t deletedCount = 0;
-
-    PageId pageId = headerPage.firstDataPageId;
-    while (pageId != 0)
+    bufferManager.requireReadable();
+    if (delRows.empty())
     {
-        PageGuard data = bufferManager.getDataPage(pageId);
-        DataPage &dataPage = data.write<DataPage>();
-
-        const std::size_t previousRowCount = dataPage.rows.size();
-        std::erase_if(
-            dataPage.rows,
-            [&del, &dataPage, &deletedCount](const RowEntry &entry)
-            {
-                if (del.where && !evaluatePredicate(*del.where, entry.row))
-                {
-                    return false;
-                }
-
-                dataPage.slots.at(entry.slotIndex).set(SlotFlag::Deleted);
-                ++deletedCount;
-                return true;
-            });
-
-        if (dataPage.rows.size() != previousRowCount)
-        {
-            data.markDirty();
-        }
-
-        pageId = data.page().nextPageId();
+        return 0;
     }
-
-    if (deletedCount > headerPage.totalRowCount)
-    {
-        throw std::runtime_error("Deleted row count exceeds table row count");
-    }
-
-    if (deletedCount != 0)
-    {
-        headerPage.totalRowCount -= deletedCount;
-        header.markDirty();
-    }
-
+    auto rowIds = delRows | std::views::transform(&LocatedRow::id);
+    const auto deletedCount = bufferManager.deleteRows(rowIds);
     bufferManager.flushAll();
     bufferManager.sync();
 

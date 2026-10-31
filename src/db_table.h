@@ -11,7 +11,6 @@
 #include <unordered_set>
 
 struct BoundInsert;
-struct BoundDelete;
 class Table;
 
 // Borrows a table, which must remain alive and unmoved. Mutating the table
@@ -25,6 +24,7 @@ public:
     TableCursor &operator=(TableCursor &&other) noexcept;
 
     std::optional<Row> next();
+    std::optional<LocatedRow> nextLocated();
 
 private:
     friend class Table;
@@ -51,8 +51,10 @@ public:
     static Table open(const LinuxDirectory &dbRoot, const std::filesystem::path &relTablePath, StatementRecovery &statementRecovery);
 
     void insertRows(const BoundInsert &insert);
+    void updateRows(const std::vector<LocatedRow> &updateRows);
+
     TableCursor scan() &;
-    std::uint64_t deleteRows(const BoundDelete &del);
+    std::uint64_t deleteRows(const std::vector<LocatedRow> &delRows);
     std::vector<BoundConstraint> getConstraints();
 
 private:

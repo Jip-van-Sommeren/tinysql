@@ -484,7 +484,7 @@ std::unique_ptr<ConstraintExpr> Parser::parseColumnConstraintBody(const std::str
         "Expected column constraint, found: " + peek().text);
 }
 
-ForeignKeyTableRef Parser::parseReferenceClause()
+ForeignKeyReference Parser::parseReferenceClause()
 {
 
     Token tableToken = expect(TokenType::Identifier);
@@ -497,7 +497,7 @@ ForeignKeyTableRef Parser::parseReferenceClause()
         expect(TokenType::RightParen);
     }
 
-    return ForeignKeyTableRef{std::move(tableName), std::move(columns)};
+    return ForeignKeyReference{std::move(tableName), std::move(columns)};
 }
 
 std::unique_ptr<ConstraintExpr> Parser::parseTableConstraint()

@@ -15,18 +15,11 @@
 #include <cctype>
 #include <string>
 #include <uuid/uuid.h>
+#include <algorithm>
+#include <variant>
 
 namespace
 {
-    const NamedTableRef &requireNamedTableRef(const TableRef &tableRef)
-    {
-        if (const auto *namedTable = dynamic_cast<const NamedTableRef *>(&tableRef))
-        {
-            return *namedTable;
-        }
-
-        throw std::runtime_error("Only single-table queries are supported");
-    }
 
     std::string uuidToString(const uuid_t &id)
     {
@@ -892,6 +885,44 @@ BoundDelete QueryValidator::validateStatement(const DeleteStatement &statement)
     return BoundDelete{
         .tableName = tableRef.name,
         .where = std::move(where)};
+}
+
+BoundTableRef QueryValidator::bindTableRef(const TableRef &tableRef)
+{
+    auto result = std::visit(
+        [&](const auto &value) -> BoundTableRef
+        {
+            using T = std::decay_t<decltype(value)>;
+            if constexpr (std::is_same_v<T, NamedTableRef>)
+            {
+                return BoundTableRef{.value = BoundNamedTableRef{value.name}};
+            }
+            else if constexpr (std::is_same_v<T, JoinTableRef>)
+            {
+                BindContext context = createBindContext(tableRef.name);
+                auto left = std::make_unique<BoundTableRef>(
+                    bindTableRef(*value.left));
+
+                auto right = std::make_unique<BoundTableRef>(
+                    bindTableRef(*value.right));
+                const auto joinType = value.type;
+                std::unique_ptr<BoundExpr> expr;
+                if (value.condition) // CROSS JOIN has no ON condition.
+                {
+                    expr = bindExpr(*value.condition, context);
+                }
+
+                return BoundTableRef{
+                    .value = BoundJoinTableRef{
+                        std::move(left),
+                        std::move(right),
+                        value.type,
+                        std::move(expr)}};
+            }
+        },
+        tableRef.value);
+
+    throw std::runtime_error("Only single-table queries are supported");
 }
 
 BoundSelect QueryValidator::validateStatement(const SelectStatement &statement)

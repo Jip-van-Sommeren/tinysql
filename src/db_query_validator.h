@@ -148,6 +148,7 @@ struct BindContext
     }
 };
 
+struct BoundTableRef;
 struct BoundNamedTableRef
 {
     std::string tableName;
@@ -156,6 +157,45 @@ struct BoundNamedTableRef
         : tableName(std::move(tableName))
     {
     }
+};
+
+struct BoundForeignKeyReference
+{
+    std::unique_ptr<BoundTableRef> tableName;
+    std::vector<ColumnId> columns;
+    explicit BoundForeignKeyReference(std::unique_ptr<BoundTableRef> tableName, std::vector<ColumnId> columns)
+        : tableName(std::move(tableName)),
+          columns(std::move(columns))
+    {
+    }
+};
+
+struct BoundJoinTableRef
+{
+    std::unique_ptr<BoundTableRef> left;
+    std::unique_ptr<BoundTableRef> right;
+    JoinType type;
+    std::unique_ptr<BoundExpr> condition;
+
+    BoundJoinTableRef(
+        std::unique_ptr<BoundTableRef> left,
+        std::unique_ptr<BoundTableRef> right,
+        JoinType type,
+        std::unique_ptr<BoundExpr> condition) :
+
+                                                left(std::move(left)),
+                                                right(std::move(right)),
+                                                type(type),
+                                                condition(std::move(condition))
+    {
+    }
+};
+struct BoundTableRef
+{
+    std::variant<
+        BoundNamedTableRef,
+        BoundJoinTableRef>
+        value;
 };
 
 struct BoundInsert
@@ -172,9 +212,11 @@ struct BoundSelectItem
 
 struct BoundSelect
 {
-    std::string tableName;
+    // std::string tableName;
 
     std::vector<BoundSelectItem> projections;
+
+    std::unique_ptr<BoundTableRef> from;
 
     std::unique_ptr<BoundExpr> where;
 
@@ -235,6 +277,7 @@ private:
     BoundUpdate validateStatement(const UpdateStatement &statement);
     BoundCreateTable validateStatement(const CreateTableStatement &statement);
 
+    BoundTableRef bindTableRef(const TableRef &tableRef);
     BoundConstraint bindConstraintExpr(const ConstraintExpr &expr, BindContext &context);
     std::unique_ptr<BoundExpr> bindExpr(
         const Expr &expr,

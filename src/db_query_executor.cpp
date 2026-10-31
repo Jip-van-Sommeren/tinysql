@@ -406,17 +406,16 @@ QueryResult QueryExecutor::executeStatement(const BoundUpdate &update)
 {
     storageEngine_.beginStatement();
     QueryResult queryResult{};
-    (void)update;
 
-    // try
-    // {
-    //     queryResult = storageEngine_.deleteRows(del);
-    // }
-    // catch (...)
-    // {
-    //     storageEngine_.rollbackStatement();
-    //     throw;
-    // }
+    try
+    {
+        queryResult = storageEngine_.updateRows(update);
+    }
+    catch (...)
+    {
+        storageEngine_.rollbackStatement();
+        throw;
+    }
 
     storageEngine_.commitStatement();
 

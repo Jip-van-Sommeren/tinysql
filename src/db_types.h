@@ -24,6 +24,7 @@ static_assert(sizeof(std::float32_t) == 4);
 #endif
 
 using ColumnId = std::uint32_t;
+using PageId = std::uint32_t;
 
 constexpr std::uint32_t
     HeaderPageId{0};

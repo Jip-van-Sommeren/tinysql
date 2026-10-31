@@ -61,16 +61,8 @@ add_executable(db src/main.cpp)
 db_configure_target(db PRIVATE)
 target_link_libraries(db PRIVATE db_core)
 
-add_executable(db_sql_parser_demo
-    src/db_sql_lexer_parser.cpp
-)
-db_configure_target(db_sql_parser_demo PRIVATE)
-target_link_libraries(db_sql_parser_demo PRIVATE db_sql)
-
 include(CTest)
 if(BUILD_TESTING)
-    add_test(NAME db_sql_parser_demo COMMAND db_sql_parser_demo)
-
     add_executable(db_byte_io_test tests/db_byte_io_test.cpp)
     db_configure_target(db_byte_io_test PRIVATE)
     target_link_libraries(db_byte_io_test PRIVATE db_core)
@@ -114,6 +106,11 @@ if(BUILD_TESTING)
     db_configure_target(db_constraint_validator_test PRIVATE)
     target_link_libraries(db_constraint_validator_test PRIVATE db_core)
     add_test(NAME db_constraint_validator_test COMMAND db_constraint_validator_test)
+
+    add_executable(db_update_constraint_test tests/db_update_constraint_test.cpp)
+    db_configure_target(db_update_constraint_test PRIVATE)
+    target_link_libraries(db_update_constraint_test PRIVATE db_core)
+    add_test(NAME db_update_constraint_test COMMAND db_update_constraint_test)
 
     add_executable(db_select_executor_test tests/db_select_executor_test.cpp)
     db_configure_target(db_select_executor_test PRIVATE)

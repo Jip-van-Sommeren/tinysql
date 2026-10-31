@@ -5,6 +5,7 @@
 #include "db_row_validator.h"
 #include "db_write.h"
 
+#include <algorithm>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -17,6 +18,8 @@
 #include <utility>
 #include <variant>
 #include <vector>
+#include <ranges>
+#include <span>
 
 namespace
 {
@@ -251,55 +254,101 @@ void BufferManager::markDirty(PageId pageId)
     frame.dirty = true;
 }
 
-void BufferManager::insertAllRows(const std::vector<Row> &rows)
+std::uint64_t BufferManager::deleteRow(const RowId &rowId)
 {
     requireReadable();
-    if (rows.empty())
-    {
+    PageGuard data = getDataPage(rowId.pageId);
+    const DataPage &stored = data.as<DataPage>();
+    if (stored.slots.at(rowId.slotIndex).has(SlotFlag::Deleted))
+        return 0;
+    const auto entry = std::ranges::find(stored.rows, rowId.slotIndex, &RowEntry::slotIndex);
+    if (entry == stored.rows.end())
+        throw std::runtime_error("Active slot has no row");
+
+    PageGuard header = getHeaderPage();
+    if (header.as<HeaderPage>().totalRowCount == 0)
+        throw std::runtime_error("Deleted row count exceeds table row count");
+
+    // Capture both before-images before changing either page. Vector positions
+    // shift after erase; the slot index remains the row's address.
+    HeaderPage &headerPage = header.write<HeaderPage>();
+    DataPage &dataPage = data.write<DataPage>();
+    dataPage.rows.erase(entry);
+    dataPage.slots.at(rowId.slotIndex).set(SlotFlag::Deleted);
+    --headerPage.totalRowCount;
+    data.markDirty();
+    header.markDirty();
+    return 1;
+}
+
+void BufferManager::updateRows(const std::vector<LocatedRow> &rows)
+{
+    auto delRowIds = rows | std::views::transform(
+                                [](const LocatedRow &located) -> const RowId &
+                                {
+                                    return located.id;
+                                });
+    deleteRows(delRowIds);
+
+    auto replacements = rows | std::views::transform(
+                                   [](const LocatedRow &located) -> const Row &
+                                   {
+                                       return located.row;
+                                   });
+
+    insertRowsImpl(replacements);
+}
+
+void BufferManager::insertRow(const Row &row)
+{
+    insertRowsImpl(std::span<const Row>{&row, 1});
+}
+
+void BufferManager::insertRows(const std::vector<Row> &rows)
+{
+    insertRowsImpl(rows);
+}
+
+template <std::ranges::input_range Rows>
+void BufferManager::insertRowsImpl(Rows &&rows)
+{
+    requireReadable();
+    auto current = std::ranges::begin(rows);
+    const auto end = std::ranges::end(rows);
+    if (current == end)
         return;
-    }
 
     PageGuard header = getHeaderPage();
     const HeaderPage &headerPage = header.as<HeaderPage>();
-
-    if (headerPage.lastDataPageId == 0)
-    {
-        createDataPage(header);
-    }
-
     PageId currentPageId = headerPage.firstDataPageId;
-    std::size_t rowIndex = 0;
 
-    while (rowIndex < rows.size())
+    for (; current != end; ++current)
     {
-        const Row &row = rows[rowIndex];
-        RowValidationResult rowValidation =
-            validateRowAgainstSchema(headerPage.columns, row);
-        if (!rowValidation.valid)
-        {
-            throw std::runtime_error(rowValidation.message);
-        }
+        const Row &row = *current;
+        const auto validation = validateRowAgainstSchema(headerPage.columns, row);
+        if (!validation.valid)
+            throw std::runtime_error(validation.message);
 
-        PageGuard data = getDataPage(currentPageId);
+        const auto rowSize = encodedRowSize(headerPage, row);
+        const auto maxRowSize = PAGE_SIZE - PageHeaderLayout::Size - encodedSlotSize();
+        if (rowSize > maxRowSize)
+            throw std::runtime_error("Row is too large to fit on a page");
 
-        if (enoughSpaceForInsert(
-                data.page(),
-                encodedRowSize(headerPage, row)))
-        {
-
-            appendRowToExistingDataPage(
-                header,
-                data,
-                row);
-            ++rowIndex;
-        }
-        else if (data.page().nextPageId() != 0)
-        {
-            currentPageId = data.page().nextPageId();
-        }
-        else
-        {
+        if (headerPage.lastDataPageId == 0)
             currentPageId = createDataPage(header);
+
+        while (true)
+        {
+            PageGuard data = getDataPage(currentPageId);
+            if (enoughSpaceForInsert(data.page(), rowSize))
+            {
+                appendRowToExistingDataPage(header, data, row);
+                break;
+            }
+            if (data.page().nextPageId() != 0)
+                currentPageId = data.page().nextPageId();
+            else
+                currentPageId = createDataPage(header);
         }
     }
 }

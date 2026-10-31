@@ -9,6 +9,7 @@
 #include <optional>
 #include <filesystem>
 #include <fstream>
+#include <compare>
 #include <format>
 #include "db_types.h"
 
@@ -46,6 +47,20 @@ struct Column
 struct Row
 {
     std::vector<Value> values;
+};
+
+struct RowId
+{
+    PageId pageId;
+    std::uint16_t slotIndex;
+
+    auto operator<=>(const RowId &) const = default;
+};
+
+struct LocatedRow
+{
+    RowId id;
+    Row row;
 };
 
 enum class PageType : uint8_t

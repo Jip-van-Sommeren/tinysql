@@ -9,11 +9,10 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <ranges>
 #include <unordered_map>
 #include <variant>
 #include <vector>
-
-using PageId = std::uint32_t;
 
 class BufferManager;
 
@@ -79,7 +78,21 @@ public:
                             const std::string &magic,
                             const std::vector<Column> &columns,
                             const std::vector<BoundConstraint> &constraints);
-    void insertAllRows(const std::vector<Row> &rows);
+
+    void insertRows(const std::vector<Row> &rows);
+    void insertRow(const Row &row);
+    void updateRows(const std::vector<LocatedRow> &rows);
+    std::uint64_t deleteRow(const RowId &rowId);
+
+    template <std::ranges::input_range Rows>
+    std::uint64_t deleteRows(Rows &&rowIds)
+    {
+        requireReadable();
+        std::uint64_t deletedCount = 0;
+        for (const RowId &rowId : rowIds)
+            deletedCount += deleteRow(rowId);
+        return deletedCount;
+    }
     void flushPage(PageId pageId);
     void flushAll();
     void sync();
@@ -87,6 +100,10 @@ public:
 
 private:
     friend class PageGuard;
+
+    // Instantiated only by the concrete insertion/update methods in the .cpp.
+    template <std::ranges::input_range Rows>
+    void insertRowsImpl(Rows &&rows);
 
     PageFile pageFile_;
     StatementRecovery &statementRecovery_;

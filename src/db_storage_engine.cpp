@@ -9,7 +9,7 @@
 #include <string>
 #include <utility>
 #include <vector>
-
+#include <ranges>
 #include <algorithm>
 #include <cerrno>
 #include <fcntl.h>
@@ -42,26 +42,6 @@ namespace
         'D', 'B', 'M', 'E', 'T', 'A', '\0', '\0'};
     constexpr std::size_t META_FILE_SIZE = 8 + 16 + 8 + 4; // magic, uuid, version, epoch, generation, checksum
 
-    std::vector<Row> getRowsFromWhereExpr(
-        const std::unique_ptr<BoundExpr> &where,
-        Table &table)
-    {
-
-        TableCursor cursor = table.scan();
-        std::vector<Row> result{};
-        while (auto row = cursor.next())
-        {
-            if (where && !evaluatePredicate(*where, *row))
-            {
-                continue;
-            }
-
-            result.push_back(row.value());
-        }
-
-        return result;
-    }
-
     auto extractTableNames = [](const std::vector<std::string> &names)
     {
         std::vector<std::string> result;
@@ -76,6 +56,40 @@ namespace
 
         return result;
     };
+
+    std::vector<LocatedRow> getLocatedRowsFromWhereExpr(
+        const std::unique_ptr<BoundExpr> &where, Table &table)
+    {
+        auto cursor = table.scan();
+        std::vector<LocatedRow> result;
+        while (auto row = cursor.nextLocated())
+        {
+            if (!where || evaluatePredicate(*where, row->row))
+                result.push_back(std::move(*row));
+        }
+        return result;
+    }
+
+    auto buildRowsToUpdate(const BoundUpdate &update, const std::vector<LocatedRow> &originalRows)
+    {
+        std::vector<LocatedRow> updatedRows{};
+        updatedRows.reserve(originalRows.size());
+        for (const auto &located : originalRows)
+        {
+            const Row &original = located.row;
+            Row updated = original;
+
+            for (const auto &assignment : update.assignments)
+            {
+                auto value = evaluateValue(*assignment.expr, original);
+
+                // Convert value to the target column's type here.
+                updated.values.at(assignment.columnId) = std::move(value);
+            }
+            updatedRows.push_back({located.id, std::move(updated)});
+        }
+        return updatedRows;
+    }
 
 }
 
@@ -226,6 +240,38 @@ QueryResult StorageEngine::insertRows(const BoundInsert &insert)
         .returnsRows = false};
 }
 
+QueryResult StorageEngine::updateRows(const BoundUpdate &update)
+{
+    const auto schema = getTableHeader(update.tableName);
+    StorageConstraintLookup lookup{*this};
+    ConstraintValidator constraintValidator{lookup};
+    auto table = openTable(update.tableName);
+
+    const auto rowsToUpdate = getLocatedRowsFromWhereExpr(update.where, table);
+    const auto updatedLocatedRows = buildRowsToUpdate(update, rowsToUpdate);
+    std::set<RowId> excludedRows;
+    for (const auto &row : rowsToUpdate)
+        excludedRows.insert(row.id);
+    const auto tableNames = extractTableNames(tablesDirectory_.listFileNames());
+
+    auto updatedRows = updatedLocatedRows | std::views::transform(
+                                                [](const LocatedRow &located) -> const Row &
+                                                {
+                                                    return located.row;
+                                                });
+    const auto validationResult = constraintValidator.validateUpdateConstraint(
+        schema, updatedRows, excludedRows, tableNames, *this);
+    if (!validationResult.valid)
+        throw std::runtime_error(validationResult.message.value());
+    table.updateRows(updatedLocatedRows);
+
+    return QueryResult{
+        .columns = {},
+        .rows = {},
+        .affectedRows = updatedRows.size(),
+        .returnsRows = false};
+}
+
 QueryResult StorageEngine::deleteRows(const BoundDelete &del)
 {
 
@@ -237,13 +283,13 @@ QueryResult StorageEngine::deleteRows(const BoundDelete &del)
     auto tableNames = extractTableNames(fileNames);
     auto table = openTable(del.tableName);
 
-    const auto &delRows = getRowsFromWhereExpr(del.where, table);
+    const auto &delRows = getLocatedRowsFromWhereExpr(del.where, table);
 
-    const auto validationResult = constraintValidator.checkForDelete(del.tableName, tableNames, *this, delRows);
+    const auto validationResult = constraintValidator.validateFkConstraintForDelete(del.tableName, tableNames, *this, delRows);
     if (!validationResult.valid)
         throw std::runtime_error(validationResult.message.value());
 
-    const auto deletedCount = table.deleteRows(del);
+    const auto deletedCount = table.deleteRows(delRows);
 
     return QueryResult{
         .columns = {},

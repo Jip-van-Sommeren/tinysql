@@ -305,23 +305,20 @@ struct ExprSelectItem : SelectItem
         std::string alias = {});
 };
 
-struct TableRef
-{
-    virtual ~TableRef() = default;
-};
+struct TableRef;
 
-struct NamedTableRef : TableRef
+struct NamedTableRef
 {
     std::string name;
 
     explicit NamedTableRef(std::string name);
 };
 
-struct ForeignKeyTableRef : TableRef
+struct ForeignKeyReference
 {
     std::string tableName;
     std::vector<std::string> columns;
-    explicit ForeignKeyTableRef(std::string tableName, std::vector<std::string> columns)
+    explicit ForeignKeyReference(std::string tableName, std::vector<std::string> columns)
         : tableName(std::move(tableName)),
           columns(std::move(columns))
     {
@@ -337,7 +334,7 @@ enum class JoinType
     Cross
 };
 
-struct JoinTableRef : TableRef
+struct JoinTableRef
 {
     std::unique_ptr<TableRef> left;
     std::unique_ptr<TableRef> right;
@@ -349,6 +346,10 @@ struct JoinTableRef : TableRef
         std::unique_ptr<TableRef> right,
         JoinType type,
         std::unique_ptr<Expr> condition);
+};
+struct TableRef
+{
+    std::variant<NamedTableRef, JoinTableRef> value;
 };
 
 struct SelectStatement
@@ -528,5 +529,5 @@ private:
     std::unique_ptr<ConstraintExpr> parseTableConstraint();
 
     std::unique_ptr<ConstraintExpr> parseTableConstraintBody();
-    ForeignKeyTableRef parseReferenceClause();
+    ForeignKeyReference parseReferenceClause();
 };

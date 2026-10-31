@@ -11,6 +11,10 @@
 #include <string>
 #include <vector>
 
+struct BoundInsert;
+struct BoundDelete;
+struct BoundUpdate;
+
 class StorageEngine final : public Catalog
 {
 public:
@@ -52,6 +56,7 @@ public:
     }
     QueryResult insertRows(const BoundInsert &insert);
     QueryResult deleteRows(const BoundDelete &del);
+    QueryResult updateRows(const BoundUpdate &update);
 
     // const std::filesystem::path &getTablesPath() const;
 
