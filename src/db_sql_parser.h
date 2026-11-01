@@ -305,15 +305,6 @@ struct ExprSelectItem : SelectItem
         std::string alias = {});
 };
 
-struct TableRef;
-
-struct NamedTableRef
-{
-    std::string name;
-
-    explicit NamedTableRef(std::string name);
-};
-
 struct ForeignKeyReference
 {
     std::string tableName;
@@ -334,6 +325,20 @@ enum class JoinType
     Cross
 };
 
+struct TableRef;
+
+struct EmptyTableRef
+{
+};
+
+struct NamedTableRef
+{
+    std::string name;
+    std::optional<std::string> alias;
+
+    explicit NamedTableRef(std::string name, std::optional<std::string> alias);
+};
+
 struct JoinTableRef
 {
     std::unique_ptr<TableRef> left;
@@ -349,7 +354,7 @@ struct JoinTableRef
 };
 struct TableRef
 {
-    std::variant<NamedTableRef, JoinTableRef> value;
+    std::variant<NamedTableRef, JoinTableRef, EmptyTableRef> value;
 };
 
 struct SelectStatement
@@ -481,10 +486,10 @@ private:
     std::unique_ptr<SelectItem> parseSelectItem();
     std::vector<std::unique_ptr<SelectItem>> parseSelectList();
     JoinType parseJoinType();
-    std::unique_ptr<TableRef> parseOptionalFrom();
-    std::unique_ptr<TableRef> parseRequiredFrom();
-    std::unique_ptr<TableRef> parseNamedTableRef();
-    std::unique_ptr<TableRef> parseTableRef();
+    TableRef parseOptionalFrom();
+    TableRef parseRequiredFrom();
+    TableRef parseNamedTableRef();
+    TableRef parseTableRef();
     bool isComparisonOperator(const Token &token);
     bool isArithmeticOperator(const Token &token);
     bool isBinaryOperator(const Token &token);

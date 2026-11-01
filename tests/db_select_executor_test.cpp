@@ -307,6 +307,21 @@ int main()
     const QueryResult qResult = database.executeSql("SELECT * FROM products;");
     require(qResult.rows.size() == 3, "Unqualified wildcard scan has the wrong row count");
 
+    result = database.executeSql("SELECT p.* FROM products AS p WHERE p.id = 10;");
+    require(result.columns.size() == 3 && result.rows.size() == 1 &&
+                std::get<std::int32_t>(result.rows[0].values[0]) == 10,
+            "Aliased SELECT did not open or bind the correct table");
+    database.executeSql("CREATE TABLE extras (product_id INT);");
+    requireThrows([&database] { database.executeSql("SELECT * FROM products CROSS JOIN extras;"); },
+                  "JOIN execution must be rejected until it is implemented",
+                  "JOIN execution is not supported yet");
+    database.executeSql("INSERT INTO extras VALUES (10), (11);");
+    result = database.executeSql("DELETE FROM extras AS e WHERE e.product_id = 10;");
+    require(result.affectedRows == 1, "Aliased DELETE removed the wrong number of rows");
+    result = database.executeSql("SELECT * FROM extras;");
+    require(result.rows.size() == 1 && std::get<std::int32_t>(result.rows[0].values[0]) == 11,
+            "Aliased DELETE removed the wrong row");
+
     testAggregates(database);
 
     requireThrows(
@@ -320,8 +335,8 @@ int main()
     StatementRecovery recovery{LinuxDirectory{path}, identity.bytes};
     Table table = Table::open(LinuxDirectory{path / "tables"}, "products.table", recovery);
     BoundSelect grouped{
-        .tableName = "products",
         .projections = {},
+        .from = std::make_unique<BoundTableRef>(BoundTableRef{.value = BoundNamedTableRef{"products"}}),
         .where = nullptr,
         .groupBy = {},
         .having = nullptr};
@@ -333,8 +348,8 @@ int main()
 
     SelectExecutor executor;
     BoundSelect floatingSum{
-        .tableName = "products",
         .projections = {},
+        .from = std::make_unique<BoundTableRef>(BoundTableRef{.value = BoundNamedTableRef{"products"}}),
         .where = nullptr,
         .groupBy = {},
         .having = nullptr};

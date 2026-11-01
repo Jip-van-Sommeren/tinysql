@@ -112,8 +112,8 @@ ExprSelectItem::ExprSelectItem(
     : expr(std::move(expr)),
       alias(std::move(alias)) {}
 
-NamedTableRef::NamedTableRef(std::string name)
-    : name(std::move(name)) {}
+NamedTableRef::NamedTableRef(std::string name, std::optional<std::string> alias)
+    : name(std::move(name)), alias(std::move(alias)) {}
 
 JoinTableRef::JoinTableRef(
     std::unique_ptr<TableRef> left,
@@ -637,7 +637,7 @@ SelectStatement Parser::parseSelectStatement()
 
     return SelectStatement{
         std::move(selectList),
-        std::move(from),
+        std::make_unique<TableRef>(std::move(from)),
         std::move(where)};
 }
 
@@ -650,7 +650,7 @@ DeleteStatement Parser::parseDeleteStatement()
     finishStatement();
 
     return DeleteStatement{
-        std::move(from),
+        std::make_unique<TableRef>(std::move(from)),
         std::move(where)};
 }
 
@@ -1035,29 +1035,34 @@ JoinType Parser::parseJoinType()
     throw std::runtime_error("Expected join type");
 }
 
-std::unique_ptr<TableRef> Parser::parseOptionalFrom()
+TableRef Parser::parseOptionalFrom()
 {
     if (!matchKeyword("FROM"))
     {
-        return nullptr;
+        return TableRef{.value = EmptyTableRef{}};
     }
 
     return parseTableRef();
 }
 
-std::unique_ptr<TableRef> Parser::parseRequiredFrom()
+TableRef Parser::parseRequiredFrom()
 {
     expectKeyword("FROM");
     return parseTableRef();
 }
 
-std::unique_ptr<TableRef> Parser::parseNamedTableRef()
+TableRef Parser::parseNamedTableRef()
 {
     Token name = expect(TokenType::Identifier);
-    return std::make_unique<NamedTableRef>(std::move(name.text));
+    if (matchKeyword("AS"))
+    {
+        Token alias = expect(TokenType::Identifier);
+        return TableRef{.value = NamedTableRef{name.text, alias.text}};
+    }
+    return TableRef{.value = NamedTableRef{name.text, std::nullopt}};
 }
 
-std::unique_ptr<TableRef> Parser::parseTableRef()
+TableRef Parser::parseTableRef()
 {
     auto left = parseNamedTableRef();
 
@@ -1078,11 +1083,11 @@ std::unique_ptr<TableRef> Parser::parseTableRef()
             condition = parseExpression();
         }
 
-        left = std::make_unique<JoinTableRef>(
-            std::move(left),
-            std::move(right),
-            type,
-            std::move(condition));
+        left = TableRef{.value = JoinTableRef{
+                            std::make_unique<TableRef>(std::move(left)),
+                            std::make_unique<TableRef>(std::move(right)),
+                            type,
+                            std::move(condition)}};
     }
 
     return left;

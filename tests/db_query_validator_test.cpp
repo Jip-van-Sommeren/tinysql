@@ -1,6 +1,7 @@
 #include "db_query_validator.h"
 
 #include "db_decimal.h"
+#include "db_expression_evaluator.h"
 #include "db_page_factory.h"
 #include "db_row_validator.h"
 #include "db_write.h"
@@ -96,18 +97,18 @@ namespace
                "computed INT DEFAULT 3 + 4, unknown_flag BOOLEAN DEFAULT 1 = NULL);");
 
         const HeaderPage schema = catalog.getTableHeader("defaults");
-        const BindContext context{
-            .tableName = "defaults",
-            .columns = schema.columns,
-            .constraints = schema.constraints};
+        BindContext context;
+        context.insertTableName("defaults");
+        context.insertCols(schema.columns, "defaults");
+        context.insertConstraints(schema.constraints, "defaults");
         static_assert(std::is_same_v<
-                      decltype(context.getDefaultConstraint(1)),
+                      decltype(context.getDefaultConstraint(1, "defaults")),
                       const BoundDefaultConstraintExpr &>);
-        require(!context.hasDefaultConstraint(0) && context.findDefaultConstraint(0) == nullptr,
+        require(!context.hasDefaultConstraint(0, "defaults") && context.findDefaultConstraint(0, "defaults") == nullptr,
                 "An absent default must not be found");
-        require(context.getDefaultConstraint(1).columnId == 1,
+        require(context.getDefaultConstraint(1, "defaults").columnId == 1,
                 "Default lookup returned the wrong column");
-        requireThrows([&] { context.getDefaultConstraint(0); }, "No default constraint");
+        requireThrows([&] { context.getDefaultConstraint(0, "defaults"); }, "No default constraint");
 
         for (int repetition = 0; repetition < 2; ++repetition)
         {
@@ -116,7 +117,7 @@ namespace
             require(result.rows.size() == 2, "INSERT batch has the wrong number of rows");
             for (const Row &row : result.rows)
             {
-                const auto validation = validateRowAgainstSchema(context.columns, row);
+                const auto validation = validateRowAgainstSchema(schema.columns, row);
                 require(validation.valid, "Default produced an invalid physical row: " + validation.message);
                 require(std::get<std::int32_t>(row.values[1]) == 7,
                         "Omitted NOT NULL column did not receive its default");
@@ -301,6 +302,82 @@ namespace
                 "FLOAT input was not widened to DOUBLE");
         requireThrows([&] { bindNumber("amount", std::float64_t{1.5}); }, "Expected an integer value");
     }
+
+    void testTableReferences(MemoryCatalog &catalog, QueryValidator &validator)
+    {
+        create(catalog, validator, "CREATE TABLE authors (id INT PRIMARY KEY, author_name TEXT);");
+        create(catalog, validator, "CREATE TABLE books (id INT, author_id INT, title TEXT);");
+        create(catalog, validator, "CREATE TABLE ratings (book_id INT, score INT);");
+
+        auto select = std::get<BoundSelect>(bind(validator,
+            "SELECT a.author_name, b.title FROM authors AS a "
+            "JOIN books AS b ON a.id = b.author_id WHERE b.id = 10;"));
+        const auto &join = std::get<BoundJoinTableRef>(select.from->value);
+        require(join.type == JoinType::Inner && join.condition,
+                "JOIN type or ON condition was lost");
+        require(std::get<BoundNamedTableRef>(join.left->value).alias == "a" &&
+                    std::get<BoundNamedTableRef>(join.right->value).alias == "b",
+                "Table aliases were lost during binding");
+        const Row joinedRow{.values = {
+            std::int32_t{7}, std::string{"Ada"},
+            std::int32_t{10}, std::int32_t{7}, std::string{"Book"}}};
+        require(evaluatePredicate(*join.condition, joinedRow) &&
+                    evaluatePredicate(*select.where, joinedRow),
+                "JOIN or WHERE bound a right-hand column to its local table position");
+        require(std::get<std::string>(evaluateValue(*select.projections[0].expr, joinedRow)) == "Ada" &&
+                    std::get<std::string>(evaluateValue(*select.projections[1].expr, joinedRow)) == "Book",
+                "Qualified projections resolved the wrong columns");
+
+        select = std::get<BoundSelect>(bind(validator,
+            "SELECT *, b.*, author_name, title FROM authors AS a "
+            "CROSS JOIN books AS b;"));
+        require(!std::get<BoundJoinTableRef>(select.from->value).condition,
+                "CROSS JOIN should have no ON condition");
+        require(select.projections.size() == 10, "Wildcard expanded the wrong tables");
+        for (std::size_t i = 0; i < joinedRow.values.size(); ++i)
+            require(evaluateValue(*select.projections[i].expr, joinedRow) == joinedRow.values[i],
+                    "Wildcard columns must follow left-to-right table order");
+        for (std::size_t i = 0; i < 3; ++i)
+            require(evaluateValue(*select.projections[i + 5].expr, joinedRow) == joinedRow.values[i + 2],
+                    "Qualified wildcard must select only its table's columns");
+        require(evaluateValue(*select.projections[8].expr, joinedRow) == joinedRow.values[1] &&
+                    evaluateValue(*select.projections[9].expr, joinedRow) == joinedRow.values[4],
+                "Unqualified columns must be searched in every table");
+
+        select = std::get<BoundSelect>(bind(validator,
+            "SELECT r.score FROM authors AS a JOIN books AS b ON a.id = b.author_id "
+            "LEFT JOIN ratings AS r ON b.id = r.book_id;"));
+        const auto &outerJoin = std::get<BoundJoinTableRef>(select.from->value);
+        require(outerJoin.type == JoinType::LeftOuter &&
+                    std::holds_alternative<BoundJoinTableRef>(outerJoin.left->value),
+                "Chained JOINs lost their left subtree");
+        Row ratedRow = joinedRow;
+        ratedRow.values.push_back(std::int32_t{10});
+        ratedRow.values.push_back(std::int32_t{5});
+        require(evaluatePredicate(*outerJoin.condition, ratedRow) &&
+                    std::get<std::int32_t>(evaluateValue(*select.projections[0].expr, ratedRow)) == 5,
+                "Chained JOIN column positions are incorrect");
+
+        requireThrows([&] { bind(validator, "SELECT id FROM authors CROSS JOIN books;"); },
+                      "Ambiguous column");
+        requireThrows([&] { bind(validator, "SELECT missing FROM authors CROSS JOIN books;"); },
+                      "Unknown column");
+        requireThrows([&] { bind(validator, "SELECT * FROM authors AS x CROSS JOIN books AS x;"); },
+                      "Duplicate table alias");
+        requireThrows([&] { bind(validator, "SELECT * FROM missing;"); }, "Table does not exist");
+        requireThrows([&] { bind(validator, "SELECT 1;"); }, "SELECT requires a FROM clause");
+        requireThrows([&] { bind(validator, "DELETE FROM authors CROSS JOIN books;"); },
+                      "Only single-table DELETE");
+
+        // Reuse the validator after both successful joins and binding errors.
+        select = std::get<BoundSelect>(bind(validator, "SELECT id FROM authors;"));
+        require(std::get<std::int32_t>(evaluateValue(*select.projections[0].expr, joinedRow)) == 7,
+                "A previous statement leaked its tables or column positions");
+        auto del = std::get<BoundDelete>(bind(validator, "DELETE FROM authors AS a WHERE a.id = 7;"));
+        require(std::get<BoundNamedTableRef>(del.from->value).tableName == "authors" &&
+                    evaluatePredicate(*del.where, joinedRow),
+                "DELETE lost its target or failed to resolve its alias");
+    }
 }
 
 int main()
@@ -311,4 +388,5 @@ int main()
     testDefaultErrors(catalog, validator);
     testLiteralConversions(catalog, validator);
     testFloatingPointInputs(validator);
+    testTableReferences(catalog, validator);
 }

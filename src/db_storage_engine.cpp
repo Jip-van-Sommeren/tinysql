@@ -274,18 +274,22 @@ QueryResult StorageEngine::updateRows(const BoundUpdate &update)
 
 QueryResult StorageEngine::deleteRows(const BoundDelete &del)
 {
-
-    const auto schema = getTableHeader(del.tableName);
+    if (!del.from)
+        throw std::runtime_error("DELETE requires a FROM clause");
+    const auto *target = std::get_if<BoundNamedTableRef>(&del.from->value);
+    if (!target)
+        throw std::runtime_error("Only single-table DELETE is supported");
+    const auto &tableName = target->tableName;
     StorageConstraintLookup lookup{*this};
     ConstraintValidator constraintValidator{lookup};
 
     const auto &fileNames = tablesDirectory_.listFileNames();
     auto tableNames = extractTableNames(fileNames);
-    auto table = openTable(del.tableName);
+    auto table = openTable(tableName);
 
     const auto &delRows = getLocatedRowsFromWhereExpr(del.where, table);
 
-    const auto validationResult = constraintValidator.validateFkConstraintForDelete(del.tableName, tableNames, *this, delRows);
+    const auto validationResult = constraintValidator.validateFkConstraintForDelete(tableName, tableNames, *this, delRows);
     if (!validationResult.valid)
         throw std::runtime_error(validationResult.message.value());
 

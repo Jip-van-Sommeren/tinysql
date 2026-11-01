@@ -330,7 +330,12 @@ QueryResult QueryExecutor::execute(const BoundQuery &query)
 QueryResult QueryExecutor::executeStatement(
     const BoundSelect &select)
 {
-    auto table = storageEngine_.openTable(select.tableName);
+    if (!select.from)
+        throw std::runtime_error("SELECT requires a FROM clause");
+    const auto *source = std::get_if<BoundNamedTableRef>(&select.from->value);
+    if (!source)
+        throw std::runtime_error("JOIN execution is not supported yet");
+    auto table = storageEngine_.openTable(source->tableName);
     return selectExecutor_.execute(select, table);
 }
 
