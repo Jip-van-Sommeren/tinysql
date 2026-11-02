@@ -9,7 +9,10 @@ class Table;
 class SelectExecutor
 {
 public:
-    QueryResult execute(const BoundSelect &select, Table &table) const;
+    QueryResult execute(const BoundSelect &select, StorageEngine &storageEngine) const;
+    std::pair<std::vector<Row>, size_t> executeTableRef(
+        const BoundTableRef &tableRef,
+        StorageEngine &storageEngine) const;
 };
 
 class QueryExecutor final

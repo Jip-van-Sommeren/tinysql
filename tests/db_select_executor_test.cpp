@@ -1,8 +1,7 @@
-#include "db_test_journal.h"
 #include "db_database.h"
 #include "db_decimal.h"
 #include "db_query_executor.h"
-#include "db_table.h"
+#include "db_storage_engine.h"
 #include "db_test_directory.h"
 
 #include <cmath>
@@ -312,9 +311,9 @@ int main()
                 std::get<std::int32_t>(result.rows[0].values[0]) == 10,
             "Aliased SELECT did not open or bind the correct table");
     database.executeSql("CREATE TABLE extras (product_id INT);");
-    requireThrows([&database] { database.executeSql("SELECT * FROM products CROSS JOIN extras;"); },
-                  "JOIN execution must be rejected until it is implemented",
-                  "JOIN execution is not supported yet");
+    result = database.executeSql("SELECT * FROM products CROSS JOIN extras;");
+    require(result.rows.empty() && result.columns.size() == 4,
+            "CROSS JOIN with an empty table must preserve the schema and return no rows");
     database.executeSql("INSERT INTO extras VALUES (10), (11);");
     result = database.executeSql("DELETE FROM extras AS e WHERE e.product_id = 10;");
     require(result.affectedRows == 1, "Aliased DELETE removed the wrong number of rows");
@@ -331,9 +330,14 @@ int main()
         },
         "Implicit alias was not rejected");
 
-    const journal_test::DatabaseIdentity identity{path};
-    StatementRecovery recovery{LinuxDirectory{path}, identity.bytes};
-    Table table = Table::open(LinuxDirectory{path / "tables"}, "products.table", recovery);
+    // Direct bound-query tests need an engine owned by this fixture.
+    const auto boundPath = directory.path / "bound";
+    {
+        auto boundDatabase = Database::create(boundPath, "bound_select_test");
+        boundDatabase.executeSql("CREATE TABLE products (id INT);");
+        boundDatabase.executeSql("INSERT INTO products VALUES (10), (11), (12);");
+    }
+    auto storageEngine = StorageEngine::open(boundPath);
     BoundSelect grouped{
         .projections = {},
         .from = std::make_unique<BoundTableRef>(BoundTableRef{.value = BoundNamedTableRef{"products"}}),
@@ -363,16 +367,16 @@ int main()
         .outputName = "total"});
     for (int execution = 0; execution < 2; ++execution)
     {
-        result = executor.execute(floatingSum, table);
+        result = executor.execute(floatingSum, storageEngine);
         require(result.rows.size() == 1 &&
                     std::get<std::float64_t>(result.rows[0].values[0]) == 1.5,
                 "FLOAT accumulation or repeated bound-query execution failed");
     }
 
     requireThrows(
-        [&executor, &grouped, &table]
+        [&executor, &grouped, &storageEngine]
         {
-            executor.execute(grouped, table);
+            executor.execute(grouped, storageEngine);
         },
         "A manually populated GROUP BY was not rejected");
 

@@ -212,7 +212,7 @@ namespace
             std::get<std::int64_t>(aggregate.value), 1);
     }
 
-    ResultRow evaluateAggregates(const BoundSelect &select, Table &table)
+    ResultRow evaluateAggregates(const BoundSelect &select, const std::vector<Row> &rows)
     {
         std::vector<AggregateState> aggregates;
         std::vector<std::unique_ptr<BoundExpr>> projections;
@@ -224,16 +224,16 @@ namespace
             projections.push_back(std::move(expr));
         }
 
-        TableCursor cursor = table.scan();
-        while (auto row = cursor.next())
+        // TableCursor cursor = table.scan();
+        for (const auto &row : rows)
         {
-            if (select.where && !evaluatePredicate(*select.where, *row))
+            if (select.where && !evaluatePredicate(*select.where, row))
             {
                 continue;
             }
             for (AggregateState &aggregate : aggregates)
             {
-                accumulateAggregate(aggregate, *row);
+                accumulateAggregate(aggregate, row);
             }
         }
 
@@ -254,9 +254,106 @@ namespace
     }
 }
 
+std::pair<std::vector<Row>, std::size_t> SelectExecutor::executeTableRef(
+    const BoundTableRef &tableRef,
+    StorageEngine &storageEngine) const
+{
+    return std::visit(
+        [&](const auto &join) -> std::pair<std::vector<Row>, std::size_t>
+        {
+            using T = std::decay_t<decltype(join)>;
+            if constexpr (std::is_same_v<T, BoundNamedTableRef>)
+            {
+                auto table = storageEngine.openTable(join.tableName);
+                const auto columnCount =
+                    storageEngine.getTableHeader(join.tableName).columns.size();
+                auto cursor = table.scan();
+                std::vector<Row> result;
+
+                while (auto row = cursor.next())
+                {
+                    result.push_back(*row);
+                }
+                return {std::move(result), columnCount};
+            }
+            else if constexpr (std::is_same_v<T, BoundJoinTableRef>)
+            {
+
+                auto [leftRows, leftColumnCount] =
+                    executeTableRef(*join.left, storageEngine);
+
+                auto [rightRows, rightColumnCount] =
+                    executeTableRef(*join.right, storageEngine);
+
+                std::vector<Row>
+                    result;
+                std::vector<bool> rightMatched(rightRows.size(), false);
+
+                for (const Row &left : leftRows)
+                {
+                    auto matched{false};
+                    for (std::size_t i = 0; i < rightRows.size(); ++i)
+                    {
+                        const Row &right = rightRows.at(i);
+                        Row combined = left;
+                        combined.values.insert(
+                            combined.values.end(),
+                            right.values.begin(),
+                            right.values.end());
+
+                        if (join.type == JoinType::Cross ||
+                            evaluatePredicate(*join.condition, combined))
+                        {
+                            matched = true;
+                            rightMatched.at(i) = true;
+                            result.push_back(std::move(combined));
+                        }
+                    }
+                    if (!matched &&
+                        (join.type == JoinType::LeftOuter ||
+                         join.type == JoinType::FullOuter))
+                    {
+                        Row combined = left;
+                        combined.values.resize(
+                            left.values.size() + rightColumnCount,
+                            Value{std::monostate{}});
+
+                        result.push_back(std::move(combined));
+                    }
+                }
+                // A right row is unmatched only after every left row has
+                // been checked. This also handles an empty left input.
+                if (join.type == JoinType::RightOuter ||
+                    join.type == JoinType::FullOuter)
+                {
+                    for (std::size_t i = 0; i < rightRows.size(); ++i)
+                    {
+                        if (rightMatched.at(i))
+                            continue;
+
+                        Row combined{};
+                        combined.values.resize(leftColumnCount, Value{std::monostate{}});
+
+                        const Row &right = rightRows[i];
+                        combined.values.insert(
+                            combined.values.end(),
+                            right.values.begin(),
+                            right.values.end());
+
+                        result.push_back(std::move(combined));
+                    }
+                }
+                return {std::move(result), leftColumnCount + rightColumnCount};
+            }
+        },
+        tableRef.value
+
+    );
+}
+
 QueryResult SelectExecutor::execute(
     const BoundSelect &select,
-    Table &table) const
+    StorageEngine &storageEngine) const
 {
     if (!select.groupBy.empty() || select.having)
     {
@@ -269,6 +366,7 @@ QueryResult SelectExecutor::execute(
         throw std::runtime_error(
             "Aggregate functions are not supported in WHERE");
     }
+    const auto [rows, columnCount] = executeTableRef(*select.from, storageEngine);
 
     QueryResult result{
         .columns = {},
@@ -288,14 +386,13 @@ QueryResult SelectExecutor::execute(
 
     if (hasAggregate)
     {
-        result.rows.push_back(evaluateAggregates(select, table));
+        result.rows.push_back(evaluateAggregates(select, rows));
         return result;
     }
 
-    TableCursor cursor = table.scan();
-    while (auto row = cursor.next())
+    for (const auto &row : rows)
     {
-        if (select.where && !evaluatePredicate(*select.where, *row))
+        if (select.where && !evaluatePredicate(*select.where, row))
         {
             continue;
         }
@@ -306,7 +403,7 @@ QueryResult SelectExecutor::execute(
         for (const BoundSelectItem &projection : select.projections)
         {
             resultRow.values.push_back(
-                evaluateValue(*projection.expr, *row));
+                evaluateValue(*projection.expr, row));
         }
 
         result.rows.push_back(std::move(resultRow));
@@ -332,11 +429,8 @@ QueryResult QueryExecutor::executeStatement(
 {
     if (!select.from)
         throw std::runtime_error("SELECT requires a FROM clause");
-    const auto *source = std::get_if<BoundNamedTableRef>(&select.from->value);
-    if (!source)
-        throw std::runtime_error("JOIN execution is not supported yet");
-    auto table = storageEngine_.openTable(source->tableName);
-    return selectExecutor_.execute(select, table);
+
+    return selectExecutor_.execute(select, storageEngine_);
 }
 
 QueryResult QueryExecutor::executeStatement(
