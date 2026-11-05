@@ -255,6 +255,46 @@ namespace
              {null, null, null, null, null, 104, null, 10}});
         require(result.columns.size() == 8, "An empty intermediate join lost its column count");
     }
+
+    void testSelfJoins(Database &database)
+    {
+        database.executeSql("CREATE TABLE employees (id INT, manager_id INT, salary INT);");
+        database.executeSql("INSERT INTO employees VALUES (1, NULL, 100), (2, 1, 20), (3, 1, 30), (4, 2, 40), (5, 99, 50);");
+        expectRows(database,
+            "SELECT e.id, m.id FROM employees AS e JOIN employees AS m ON e.manager_id = m.id;",
+            {{2, 1}, {3, 1}, {4, 2}});
+        expectRows(database,
+            "SELECT e.id, m.id FROM employees AS e LEFT JOIN employees AS m ON e.manager_id = m.id;",
+            {{1, null}, {2, 1}, {3, 1}, {4, 2}, {5, null}});
+        expectRows(database,
+            "SELECT e.id, m.id FROM employees AS e RIGHT JOIN employees AS m ON e.manager_id = m.id;",
+            {{2, 1}, {3, 1}, {4, 2}, {null, 3}, {null, 4}, {null, 5}});
+        expectRows(database,
+            "SELECT e.id, m.id FROM employees AS e FULL JOIN employees AS m ON e.manager_id = m.id;",
+            {{1, null}, {2, 1}, {3, 1}, {4, 2}, {5, null}, {null, 3}, {null, 4}, {null, 5}});
+        expectRows(database,
+            "SELECT m.*, e.* FROM employees AS e JOIN employees AS m ON e.manager_id = m.id WHERE e.id = 2;",
+            {{1, null, 100, 2, 1, 20}});
+        expectRows(database,
+            "SELECT e.salary + m.salary, 1 AS marker, m.salary, e.salary FROM employees AS e "
+            "JOIN employees AS m ON e.manager_id = m.id WHERE e.id = 2;",
+            {{120, 1, 100, 20}});
+        expectRows(database,
+            "SELECT e.id, m.id, g.id FROM employees AS e LEFT JOIN employees AS m ON e.manager_id = m.id "
+            "LEFT JOIN employees AS g ON m.manager_id = g.id;",
+            {{1, null, null}, {2, 1, null}, {3, 1, null}, {4, 2, 1}, {5, null, null}});
+        expectRows(database,
+            "SELECT COUNT(*), SUM(m.salary) FROM employees AS e JOIN employees AS m ON e.manager_id = m.id;",
+            {{std::int64_t{3}, std::int64_t{220}}});
+
+        // Single-table mutations still bind against all physical columns.
+        require(database.executeSql("UPDATE employees SET salary = salary + 1 WHERE id = 2;").affectedRows == 1,
+                "UPDATE lost its binding context");
+        expectRows(database, "SELECT salary FROM employees WHERE id = 2;", {{21}});
+        require(database.executeSql("DELETE FROM employees AS e WHERE e.id = 5;").affectedRows == 1,
+                "Aliased DELETE lost its binding context");
+        expectRows(database, "SELECT id FROM employees;", {{1}, {2}, {3}, {4}});
+    }
 }
 
 int main()
@@ -271,7 +311,8 @@ int main()
         {"duplicate rows", testDuplicateRows},
         {"ON and WHERE", testOnAndWhere},
         {"aggregates", testJoinAggregates},
-        {"chained joins", testChainedJoins}};
+        {"chained joins", testChainedJoins},
+        {"self joins", testSelfJoins}};
     int failures = 0;
     for (const auto &[name, test] : tests)
     {

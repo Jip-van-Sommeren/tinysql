@@ -893,9 +893,7 @@ BoundTableRef QueryValidator::bindTableRef(const TableRef &tableRef)
             {
                 if (!catalog_.tableExists(value.name))
                     throw std::runtime_error("Table does not exist: " + value.name);
-                appendContext(value.name);
-                if (value.alias)
-                    appendAlias(value.alias.value(), value.name);
+                bContext_.insert(value.name, value.alias, catalog_.getTableHeader(value.name));
 
                 return BoundTableRef{.value = BoundNamedTableRef{value.name, value.alias}};
             }
@@ -960,7 +958,7 @@ BoundSelect QueryValidator::validateStatement(const SelectStatement &statement)
     {
         if (dynamic_cast<const WildcardSelectItem *>(item.get()))
         {
-            for (const ColumnContext &columnContext : bContext_.getColumns())
+            for (const ColumnContext &columnContext : bContext_.wildCardSelect())
             {
                 addColumnProjection(columnContext);
             }
@@ -975,9 +973,9 @@ BoundSelect QueryValidator::validateStatement(const SelectStatement &statement)
             {
                 throw std::runtime_error("Unknown table qualifier in wildcard");
             }
-
+            const auto &name = qualifiedWildcard->qualifierParts[0];
             for (const ColumnContext &columnContext :
-                 bContext_.getColumns(qualifiedWildcard->qualifierParts[0]))
+                 bContext_.qualifiedWildCardSelect(name))
             {
                 addColumnProjection(columnContext);
             }
@@ -992,9 +990,8 @@ BoundSelect QueryValidator::validateStatement(const SelectStatement &statement)
             std::string outputName = exprItem->alias;
             if (outputName.empty() && columnExpr)
             {
-                const auto &[colName, tableName] = bContext_.resolveColumnName(
-                    columnExpr->parts);
-                outputName = colName;
+
+                outputName = bContext_.selectItem(columnExpr->parts).column.name;
             }
             else if (outputName.empty())
             {
@@ -1049,9 +1046,7 @@ BoundCreateTable QueryValidator::validateStatement(
                 static_cast<std::uint32_t>(result.columns.size())));
     }
 
-    bContext_.insertTableName(statement.tableName);
-    bContext_.insertCols(result.columns, statement.tableName);
-    bContext_.insertConstraints({}, statement.tableName);
+    bContext_.insert(statement.tableName, std::nullopt, result.columns);
 
     // Second pass: bind constraints.
     std::vector<BoundConstraint> boundConstraints{};
@@ -1059,7 +1054,7 @@ BoundCreateTable QueryValidator::validateStatement(
     for (const auto &constraint : statement.constraints)
     {
         auto boundConstraint = bindConstraintExpr(*constraint, statement.tableName);
-        bContext_.insertConstraint(boundConstraint, statement.tableName);
+        bContext_.insertConstraints({boundConstraint}, statement.tableName);
         boundConstraints.push_back(std::move(boundConstraint));
     }
 
@@ -1252,14 +1247,10 @@ BoundConstraint QueryValidator::bindConstraintExpr(
                 join(fkExpr.localColumns, "_"),
                 join(fkExpr.referencedColumns, "_"),
                 uuidToString(constraintId)));
-        if (referencedTable.tableNames.empty() || referencedTable.tableNames.size() > 1)
-        {
-            throw std::logic_error("Reference Context has more than 1 table");
-        }
         return BoundForeignKeyConstraintExpr{
             std::move(constraintName),
             std::move(localColumnIds),
-            std::string{referencedTable.tableNames.at(0)},
+            fkExpr.referencedTable,
             std::move(referencedColumnIds)};
     }
 
@@ -1629,11 +1620,8 @@ std::unique_ptr<BoundExpr> QueryValidator::bindExpr(
     if (const auto *column =
             dynamic_cast<const ColumnExpr *>(&expr))
     {
-        auto [columnName, tableName] = bContext_.resolveColumnName(
-            column->parts);
-
         const ColumnContext &resolved =
-            bContext_.resolveColumnContext(columnName, tableName);
+            bContext_.selectItem(column->parts);
 
         return std::make_unique<BoundColumnExpr>(
             resolved.pos,

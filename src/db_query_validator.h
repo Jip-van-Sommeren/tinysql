@@ -6,12 +6,12 @@
 #include <filesystem>
 #include <format>
 #include <memory>
+#include <limits>
 #include <stdexcept>
 #include <string_view>
 #include <tuple>
 #include <utility>
 #include <variant>
-#include <unordered_map>
 
 #include "db_storage.h"
 #include "db_sql_parser.h"
@@ -26,391 +26,231 @@ struct ColumnContext
     std::uint32_t pos;
 };
 
+struct TableContext
+{
+    std::string tableName;
+    // The visible qualifier: the explicit alias, or the table name if absent.
+    std::string alias;
+    std::vector<ColumnContext> columns;
+    std::vector<BoundConstraint> constraints;
+};
+
 struct BindContext
 {
 private:
-    std::uint32_t pos_{0};
-    std::unordered_map<std::string, std::vector<ColumnContext>> columnsMap{};
-    std::unordered_map<std::string, std::vector<BoundConstraint>> constraintsMap{};
-    std::unordered_map<std::string, std::string> aliases{};
+    std::size_t columnCount_{0};
+    std::vector<TableContext> tables_;
+
+    std::size_t tableIndex(const std::string &qualifier) const
+    {
+        for (std::size_t i = 0; i < tables_.size(); ++i)
+        {
+            if (tables_[i].alias == qualifier)
+                return i;
+        }
+        throw std::runtime_error("Unknown table: " + qualifier);
+    }
 
 public:
-    std::vector<std::string> tableNames{};
+    void insert(
+        const std::string &tableName,
+        const std::optional<std::string> &alias,
+        const std::vector<Column> &columns,
+        const std::vector<BoundConstraint> &constraints = {})
+    {
+        const std::string qualifier = alias.value_or(tableName);
+        if (resolveTable(qualifier))
+            throw std::runtime_error("Duplicate table alias: " + qualifier);
+        if (columns.size() > std::numeric_limits<std::uint32_t>::max() - columnCount_)
+            throw std::runtime_error("Too many columns in binding context");
+
+        TableContext table{
+            .tableName = tableName,
+            .alias = qualifier,
+            .columns = {},
+            .constraints = constraints};
+        table.columns.reserve(columns.size());
+        for (const auto &column : columns)
+        {
+            // Expression positions address the full FROM row. Schema column
+            // indices remain local to their stored table.
+            table.columns.push_back({
+                .column = column,
+                .pos = static_cast<std::uint32_t>(columnCount_ + column.columnIndex)});
+        }
+        tables_.push_back(std::move(table));
+        columnCount_ += columns.size();
+    }
+
+    void insert(
+        const std::string &tableName,
+        const std::optional<std::string> &alias,
+        const HeaderPage &schema)
+    {
+        insert(tableName, alias, schema.columns, schema.constraints);
+    }
+
+    bool resolveTable(const std::string &qualifier) const
+    {
+        return std::any_of(tables_.begin(), tables_.end(), [&](const TableContext &table)
+        {
+            return table.alias == qualifier;
+        });
+    }
+
     std::tuple<std::string, std::string> resolveColumnName(
         const std::vector<std::string> &parts) const
     {
         if (parts.size() == 1)
         {
-            std::optional<std::string> matchingTable;
-            for (const auto &[key, value] : columnsMap)
+            const TableContext *matchingTable = nullptr;
+            for (const auto &table : tables_)
             {
-                for (const auto &colContext : value)
+                for (const auto &column : table.columns)
                 {
-                    if (colContext.column.name == parts[0])
+                    if (column.column.name == parts[0])
                     {
                         if (matchingTable)
                             throw std::runtime_error("Ambiguous column name: " + parts[0]);
-                        matchingTable = key;
+                        matchingTable = &table;
                     }
                 }
             }
-            if (matchingTable)
-                return {parts[0], *matchingTable};
-            throw std::runtime_error("Unknown column: " + parts[0]);
+            if (!matchingTable)
+                throw std::runtime_error("Unknown column: " + parts[0]);
+            return {parts[0], matchingTable->alias};
         }
-
-        if (parts.size() == 2 && columnsMap.contains(parts[0]))
+        if (parts.size() == 2)
         {
-            return {parts[1], parts[0]};
+            const auto &table = tables_[tableIndex(parts[0])];
+            return {parts[1], table.alias};
         }
-
-        if (parts.size() == 2 && aliases.contains(parts[0]))
-        {
-            return {parts[1], aliases.at(parts[0])};
-        }
-
         throw std::runtime_error("Unsupported column reference");
     }
 
-    void insertTableName(const std::string &tableName)
+    const std::vector<ColumnContext> &getColumns(const std::string &qualifier) const
     {
-        if (resolveTable(tableName))
-            throw std::runtime_error("Duplicate table reference: " + tableName);
-        tableNames.push_back(tableName);
+        return tables_[tableIndex(qualifier)].columns;
     }
 
-    const std::vector<ColumnContext> &getColumns(const std::string &tableName) const
+    std::vector<ColumnContext> wildCardSelect() const
     {
-        const auto &name = aliases.contains(tableName) ? aliases.at(tableName) : tableName;
-        if (!columnsMap.contains(name))
-            throw std::runtime_error("Unknown table: " + tableName);
-        return columnsMap.at(name);
-    }
-
-    std::vector<ColumnContext> getColumns() const
-    {
-        std::vector<ColumnContext> columns{};
-        for (const auto &tableName : tableNames)
-        {
-            const auto &val = columnsMap.at(tableName);
-            columns.insert(columns.end(), val.begin(), val.end());
-        }
+        std::vector<ColumnContext> columns;
+        columns.reserve(columnCount_);
+        for (const auto &table : tables_)
+            columns.insert(columns.end(), table.columns.begin(), table.columns.end());
         return columns;
     }
 
-    void insertCols(std::vector<Column> cols, const std::string &tableName)
+    const std::vector<ColumnContext> &qualifiedWildCardSelect(const std::string &qualifier) const
     {
+        return getColumns(qualifier);
+    }
 
-        std::vector<ColumnContext> colContexts{};
-        for (auto &col : cols)
+    const ColumnContext &selectItem(const std::vector<std::string> &parts) const
+    {
+        const auto [name, qualifier] = resolveColumnName(parts);
+        return resolveColumnContext(name, qualifier);
+    }
+
+    const ColumnContext &resolveColumnContext(const std::string &name, const std::string &qualifier) const
+    {
+        const auto &columns = getColumns(qualifier);
+        const auto column = std::find_if(columns.begin(), columns.end(), [&](const ColumnContext &c)
         {
-            colContexts.push_back(ColumnContext{.column = col, .pos = pos_});
-            ++pos_;
-        }
-        columnsMap.insert({tableName, colContexts});
+            return c.column.name == name;
+        });
+        if (column == columns.end())
+            throw std::runtime_error(std::format("Unknown column '{}.{}'", qualifier, name));
+        return *column;
     }
 
-    void insertConstraints(std::vector<BoundConstraint> constraints, const std::string &tableName)
+    ColumnContext &resolveColumnContext(const std::string &name, const std::string &qualifier)
     {
-
-        constraintsMap.insert({tableName, constraints});
-    }
-
-    void insertConstraint(BoundConstraint constraint, const std::string &tableName)
-    {
-        constraintsMap.at(tableName).push_back(std::move(constraint));
-    }
-
-    void insertAlias(const std::string &alias, const std::string &tableName)
-    {
-        if (aliases.contains(alias) || (columnsMap.contains(alias) && alias != tableName))
-            throw std::runtime_error("Duplicate table alias: " + alias);
-        aliases.insert({alias, tableName});
-    }
-
-    Column &resolveColumn(std::string_view name, const std::string &tableName)
-    {
-        auto &columns = columnsMap.at(tableName);
-        auto it = std::find_if(
-            columns.begin(),
-            columns.end(),
-            [&](const ColumnContext &c)
-            {
-                return c.column.name == name;
-            });
-
-        if (it == columns.end())
+        auto &columns = tables_[tableIndex(qualifier)].columns;
+        const auto column = std::find_if(columns.begin(), columns.end(), [&](const ColumnContext &c)
         {
-            throw std::runtime_error(
-                std::format(
-                    "Unknown column '{}.{}'",
-                    tableName,
-                    name));
-        }
-
-        return it->column;
+            return c.column.name == name;
+        });
+        if (column == columns.end())
+            throw std::runtime_error(std::format("Unknown column '{}.{}'", qualifier, name));
+        return *column;
     }
 
-    bool resolveTable(const std::string &targetTableName) const
+    const ColumnContext &resolveColumnContext(std::uint32_t columnId, const std::string &qualifier) const
     {
-        if (aliases.contains(targetTableName))
-            return true;
-        for (const auto &tableName : tableNames)
+        const auto &columns = getColumns(qualifier);
+        const auto column = std::find_if(columns.begin(), columns.end(), [&](const ColumnContext &c)
         {
-            if (tableName == targetTableName)
-            {
-                return true;
-            }
-        }
-        return false;
+            return c.column.columnIndex == columnId;
+        });
+        if (column == columns.end())
+            throw std::runtime_error(std::format("Unknown column '{}.{}'", qualifier, columnId));
+        return *column;
     }
 
-    const ColumnContext &resolveColumnContext(std::string_view name, const std::string &tableName) const
+    const Column &resolveColumn(const std::string &name, const std::string &qualifier) const
     {
-        const auto &columns = getColumns(tableName);
-        auto it = std::find_if(
-            columns.begin(),
-            columns.end(),
-            [&](const ColumnContext &c)
-            {
-                return c.column.name == name;
-            });
+        return resolveColumnContext(name, qualifier).column;
+    }
 
-        if (it == columns.end())
+    Column &resolveColumn(const std::string &name, const std::string &qualifier)
+    {
+        return resolveColumnContext(name, qualifier).column;
+    }
+
+    const Column &resolveColumn(std::uint32_t columnId, const std::string &qualifier) const
+    {
+        return resolveColumnContext(columnId, qualifier).column;
+    }
+
+    const std::vector<BoundConstraint> &getConstraints(const std::string &qualifier) const
+    {
+        return tables_[tableIndex(qualifier)].constraints;
+    }
+
+    void insertConstraints(const std::vector<BoundConstraint> &constraints, const std::string &qualifier)
+    {
+        auto &stored = tables_[tableIndex(qualifier)].constraints;
+        stored.insert(stored.end(), constraints.begin(), constraints.end());
+    }
+
+    const BoundConstraint &resolveConstraint(const std::string &name, const std::string &qualifier) const
+    {
+        const auto &constraints = getConstraints(qualifier);
+        const auto constraint = std::find_if(constraints.begin(), constraints.end(), [&](const BoundConstraint &c)
         {
-            throw std::runtime_error(
-                std::format(
-                    "Unknown column '{}.{}'",
-                    tableName,
-                    name));
-        }
-
-        return *it;
+            return std::visit([&](const auto &value) { return value.constraintName == name; }, c);
+        });
+        if (constraint == constraints.end())
+            throw std::runtime_error(std::format("Unknown constraint '{}.{}'", qualifier, name));
+        return *constraint;
     }
 
-    const Column &resolveColumn(std::string_view name, const std::string &tableName) const
+    const BoundDefaultConstraintExpr *findDefaultConstraint(ColumnId columnId, const std::string &qualifier) const
     {
-        return resolveColumnContext(name, tableName).column;
-    }
-
-    const Column &resolveColumn(std::uint32_t columnIndex, const std::string &tableName) const
-    {
-        if (!columnsMap.contains(tableName))
-            throw std::runtime_error("error");
-        const auto &columns = columnsMap.at(tableName);
-        auto it = std::find_if(
-            columns.begin(),
-            columns.end(),
-            [&](const ColumnContext &c)
-            {
-                return c.column.columnIndex == columnIndex;
-            });
-
-        if (it == columns.end())
+        for (const auto &constraint : getConstraints(qualifier))
         {
-            throw std::runtime_error(
-                std::format(
-                    "Unknown column '{}.{}'",
-                    tableName,
-                    columnIndex));
-        }
-
-        return it->column;
-    }
-
-    const BoundConstraint &resolveConstraint(std::string_view name, const std::string &tableName) const
-    {
-        if (!constraintsMap.contains(tableName))
-            throw std::runtime_error("error");
-        const auto &constraints = constraintsMap.at(tableName);
-        auto it = std::find_if(
-            constraints.begin(),
-            constraints.end(),
-            [&](const BoundConstraint &constraint)
-            {
-                return std::visit(
-                    [&](const auto &c)
-                    {
-                        return c.constraintName == name;
-                    },
-                    constraint);
-            });
-
-        if (it == constraints.end())
-        {
-            throw std::runtime_error(
-                std::format(
-                    "Unknown constraint '{}.{}'",
-                    tableName,
-                    name));
-        }
-
-        return *it;
-    }
-
-    const BoundDefaultConstraintExpr *findDefaultConstraint(ColumnId columnId, const std::string &tableName) const
-    {
-        if (!constraintsMap.contains(tableName))
-            throw std::runtime_error("error");
-        const auto &constraints = constraintsMap.at(tableName);
-        for (const BoundConstraint &constraint : constraints)
-        {
-            const auto *defaultConstraint =
-                std::get_if<BoundDefaultConstraintExpr>(&constraint);
+            const auto *defaultConstraint = std::get_if<BoundDefaultConstraintExpr>(&constraint);
             if (defaultConstraint && defaultConstraint->columnId == columnId)
-            {
                 return defaultConstraint;
-            }
         }
         return nullptr;
     }
 
-    bool hasDefaultConstraint(ColumnId columnId, const std::string &tableName) const
+    bool hasDefaultConstraint(ColumnId columnId, const std::string &qualifier) const
     {
-        return findDefaultConstraint(columnId, tableName) != nullptr;
+        return findDefaultConstraint(columnId, qualifier) != nullptr;
     }
 
-    const BoundDefaultConstraintExpr &getDefaultConstraint(ColumnId columnId, const std::string &tableName) const
+    const BoundDefaultConstraintExpr &getDefaultConstraint(ColumnId columnId, const std::string &qualifier) const
     {
-        const auto *constraint = findDefaultConstraint(columnId, tableName);
+        const auto *constraint = findDefaultConstraint(columnId, qualifier);
         if (!constraint)
-        {
             throw std::runtime_error("No default constraint found for column");
-        }
-
         return *constraint;
     }
 };
-
-// struct BindContext
-// {
-//     std::string tableName;
-//     std::vector<Column> columns;
-//     std::vector<BoundConstraint> constraints;
-
-//     Column &resolveColumn(std::string_view name)
-//     {
-//         auto it = std::find_if(
-//             columns.begin(),
-//             columns.end(),
-//             [&](const Column &column)
-//             {
-//                 return column.name == name;
-//             });
-
-//         if (it == columns.end())
-//         {
-//             throw std::runtime_error(
-//                 std::format(
-//                     "Unknown column '{}.{}'",
-//                     tableName,
-//                     name));
-//         }
-
-//         return *it;
-//     }
-
-//     const Column &resolveColumn(std::string_view name) const
-//     {
-//         auto it = std::find_if(
-//             columns.begin(),
-//             columns.end(),
-//             [&](const Column &column)
-//             {
-//                 return column.name == name;
-//             });
-
-//         if (it == columns.end())
-//         {
-//             throw std::runtime_error(
-//                 std::format(
-//                     "Unknown column '{}.{}'",
-//                     tableName,
-//                     name));
-//         }
-
-//         return *it;
-//     }
-
-//     const Column &resolveColumn(std::uint32_t columnIndex) const
-//     {
-//         auto it = std::find_if(
-//             columns.begin(),
-//             columns.end(),
-//             [&](const Column &column)
-//             {
-//                 return column.columnIndex == columnIndex;
-//             });
-
-//         if (it == columns.end())
-//         {
-//             throw std::runtime_error(
-//                 std::format(
-//                     "Unknown column '{}.{}'",
-//                     tableName,
-//                     columnIndex));
-//         }
-
-//         return *it;
-//     }
-
-//     const BoundConstraint &resolveConstraint(std::string_view name) const
-//     {
-//         auto it = std::find_if(
-//             constraints.begin(),
-//             constraints.end(),
-//             [&](const BoundConstraint &constraint)
-//             {
-//                 return std::visit(
-//                     [&](const auto &c)
-//                     {
-//                         return c.constraintName == name;
-//                     },
-//                     constraint);
-//             });
-
-//         if (it == constraints.end())
-//         {
-//             throw std::runtime_error(
-//                 std::format(
-//                     "Unknown constraint '{}.{}'",
-//                     tableName,
-//                     name));
-//         }
-
-//         return *it;
-//     }
-
-//     const BoundDefaultConstraintExpr *findDefaultConstraint(ColumnId columnId) const
-//     {
-//         for (const BoundConstraint &constraint : constraints)
-//         {
-//             const auto *defaultConstraint =
-//                 std::get_if<BoundDefaultConstraintExpr>(&constraint);
-//             if (defaultConstraint && defaultConstraint->columnId == columnId)
-//             {
-//                 return defaultConstraint;
-//             }
-//         }
-//         return nullptr;
-//     }
-
-//     bool hasDefaultConstraint(ColumnId columnId) const
-//     {
-//         return findDefaultConstraint(columnId) != nullptr;
-//     }
-
-//     const BoundDefaultConstraintExpr &getDefaultConstraint(ColumnId columnId) const
-//     {
-//         const auto *constraint = findDefaultConstraint(columnId);
-//         if (!constraint)
-//         {
-//             throw std::runtime_error("No default constraint found for column");
-//         }
-
-//         return *constraint;
-//     }
-// };
 
 struct BoundTableRef;
 struct BoundNamedTableRef
@@ -571,32 +411,10 @@ private:
 
     BindContext createBindContext(const std::string &name) const
     {
-        HeaderPage schema = catalog_.getTableHeader(name);
         BindContext bindContext{};
-        bindContext.insertTableName(name);
-        bindContext.insertCols(schema.columns, name);
-        bindContext.insertConstraints(schema.constraints, name);
+        bindContext.insert(name, std::nullopt, catalog_.getTableHeader(name));
         return bindContext;
     }
-
-    void appendContext(const std::string &name)
-    {
-        HeaderPage schema = catalog_.getTableHeader(name);
-        bContext_.insertTableName(name);
-        bContext_.insertCols(schema.columns, name);
-        bContext_.insertConstraints(schema.constraints, name);
-    }
-
-    void appendAlias(const std::string &alias, const std::string &name)
-    {
-        bContext_.insertAlias(alias, name);
-    }
-
-    // return Context{
-    //     .tableName = name,
-    //     .alias = alias,
-    //     .column = std::move(schema.columns),
-    //     .constraints = std::move(schema.constraints)};
 
     DataType
     binaryResultType(

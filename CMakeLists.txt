@@ -23,13 +23,11 @@ function(db_configure_target target_name usage_requirement)
     endif()
 endfunction()
 
-add_library(db_sql
-    src/db_sql_lexer.cpp
-    src/db_sql_parser.cpp
-)
-db_configure_target(db_sql PUBLIC)
+
 
 add_library(db_core
+    src/db_sql_lexer.cpp
+    src/db_sql_parser.cpp
     src/db_buffer_manager.cpp
     src/db_database.cpp
     src/db_decimal.cpp
@@ -55,7 +53,6 @@ find_package(ZLIB REQUIRED)
 
 target_link_libraries(db_core PRIVATE PkgConfig::UUID ZLIB::ZLIB)
 db_configure_target(db_core PUBLIC)
-target_link_libraries(db_core PUBLIC db_sql)
 
 add_executable(db src/main.cpp)
 db_configure_target(db PRIVATE)

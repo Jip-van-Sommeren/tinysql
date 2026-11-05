@@ -70,7 +70,7 @@ namespace
         std::map<std::string, HeaderPage> tables;
     };
 
-    BoundQuery bind(QueryValidator &validator, const std::string &sql)
+    BoundQuery bindSql(QueryValidator &validator, const std::string &sql)
     {
         Lexer lexer{sql};
         Parser parser{lexer.tokenize()};
@@ -79,12 +79,12 @@ namespace
 
     void create(MemoryCatalog &catalog, QueryValidator &validator, const std::string &sql)
     {
-        catalog.add(std::get<BoundCreateTable>(bind(validator, sql)));
+        catalog.add(std::get<BoundCreateTable>(bindSql(validator, sql)));
     }
 
     BoundInsert insert(QueryValidator &validator, const std::string &sql)
     {
-        return std::get<BoundInsert>(bind(validator, sql));
+        return std::get<BoundInsert>(bindSql(validator, sql));
     }
 
     void testDefaults(MemoryCatalog &catalog, QueryValidator &validator)
@@ -98,9 +98,7 @@ namespace
 
         const HeaderPage schema = catalog.getTableHeader("defaults");
         BindContext context;
-        context.insertTableName("defaults");
-        context.insertCols(schema.columns, "defaults");
-        context.insertConstraints(schema.constraints, "defaults");
+        context.insert("defaults", std::nullopt, schema);
         static_assert(std::is_same_v<
                       decltype(context.getDefaultConstraint(1, "defaults")),
                       const BoundDefaultConstraintExpr &>);
@@ -109,6 +107,20 @@ namespace
         require(context.getDefaultConstraint(1, "defaults").columnId == 1,
                 "Default lookup returned the wrong column");
         requireThrows([&] { context.getDefaultConstraint(0, "defaults"); }, "No default constraint");
+
+        // Lookups must refer to the context's owned schema, including mutable
+        // lookups used when CREATE TABLE applies NOT NULL / PRIMARY KEY.
+        const BindContext &readOnlyContext = context;
+        auto &requiredColumn = context.resolveColumn("required", "defaults");
+        requiredColumn.nullable = true;
+        require(readOnlyContext.resolveColumn(1, "defaults").nullable,
+                "Mutable column lookup updated a copy of the schema");
+        requiredColumn.nullable = false;
+        const auto &defaultConstraint = readOnlyContext.getDefaultConstraint(1, "defaults");
+        const auto &namedConstraint = readOnlyContext.resolveConstraint(defaultConstraint.constraintName, "defaults");
+        require(std::get<BoundDefaultConstraintExpr>(namedConstraint).columnId == 1 &&
+                    std::get<std::int32_t>(evaluateValue(*defaultConstraint.value, Row{})) == 7,
+                "Default/constraint lookup returned data whose lifetime ended");
 
         for (int repetition = 0; repetition < 2; ++repetition)
         {
@@ -174,7 +186,7 @@ namespace
         requireThrows([&] { insert(validator, "INSERT INTO computed_null (id) VALUES (1);"); },
                       "NOT NULL");
 
-        auto failingTable = std::get<BoundCreateTable>(bind(validator,
+        auto failingTable = std::get<BoundCreateTable>(bindSql(validator,
             "CREATE TABLE failing_default (id INT, value INT DEFAULT 0);"));
         // Install an unfolded bound expression: the binder normally folds
         // literal arithmetic, but stored expressions must also be evaluated
@@ -199,13 +211,13 @@ namespace
                  "CREATE TABLE bad (id INT, value INT DEFAULT ABS(id));",
                  "CREATE TABLE bad (id INT, value BOOLEAN DEFAULT id IS NULL);"})
         {
-            requireThrows([&] { bind(validator, sql); }, "cannot reference table columns");
+            requireThrows([&] { bindSql(validator, sql); }, "cannot reference table columns");
         }
-        requireThrows([&] { bind(validator, "CREATE TABLE bad (id INT DEFAULT 1 DEFAULT 2);"); },
+        requireThrows([&] { bindSql(validator, "CREATE TABLE bad (id INT DEFAULT 1 DEFAULT 2);"); },
                       "Multiple DEFAULT");
-        requireThrows([&] { bind(validator, "CREATE TABLE bad (value TEXT DEFAULT 1);"); },
+        requireThrows([&] { bindSql(validator, "CREATE TABLE bad (value TEXT DEFAULT 1);"); },
                       "incompatible");
-        requireThrows([&] { bind(validator, "CREATE TABLE bad (id INT DEFAULT COUNT(*));"); },
+        requireThrows([&] { bindSql(validator, "CREATE TABLE bad (id INT DEFAULT COUNT(*));"); },
                       "Aggregate functions are not allowed");
     }
 
@@ -309,7 +321,7 @@ namespace
         create(catalog, validator, "CREATE TABLE books (id INT, author_id INT, title TEXT);");
         create(catalog, validator, "CREATE TABLE ratings (book_id INT, score INT);");
 
-        auto select = std::get<BoundSelect>(bind(validator,
+        auto select = std::get<BoundSelect>(bindSql(validator,
             "SELECT a.author_name, b.title FROM authors AS a "
             "JOIN books AS b ON a.id = b.author_id WHERE b.id = 10;"));
         const auto &join = std::get<BoundJoinTableRef>(select.from->value);
@@ -328,7 +340,7 @@ namespace
                     std::get<std::string>(evaluateValue(*select.projections[1].expr, joinedRow)) == "Book",
                 "Qualified projections resolved the wrong columns");
 
-        select = std::get<BoundSelect>(bind(validator,
+        select = std::get<BoundSelect>(bindSql(validator,
             "SELECT *, b.*, author_name, title FROM authors AS a "
             "CROSS JOIN books AS b;"));
         require(!std::get<BoundJoinTableRef>(select.from->value).condition,
@@ -344,7 +356,7 @@ namespace
                     evaluateValue(*select.projections[9].expr, joinedRow) == joinedRow.values[4],
                 "Unqualified columns must be searched in every table");
 
-        select = std::get<BoundSelect>(bind(validator,
+        select = std::get<BoundSelect>(bindSql(validator,
             "SELECT r.score FROM authors AS a JOIN books AS b ON a.id = b.author_id "
             "LEFT JOIN ratings AS r ON b.id = r.book_id;"));
         const auto &outerJoin = std::get<BoundJoinTableRef>(select.from->value);
@@ -358,25 +370,87 @@ namespace
                     std::get<std::int32_t>(evaluateValue(*select.projections[0].expr, ratedRow)) == 5,
                 "Chained JOIN column positions are incorrect");
 
-        requireThrows([&] { bind(validator, "SELECT id FROM authors CROSS JOIN books;"); },
+        requireThrows([&] { bindSql(validator, "SELECT id FROM authors CROSS JOIN books;"); },
                       "Ambiguous column");
-        requireThrows([&] { bind(validator, "SELECT missing FROM authors CROSS JOIN books;"); },
+        requireThrows([&] { bindSql(validator, "SELECT missing FROM authors CROSS JOIN books;"); },
                       "Unknown column");
-        requireThrows([&] { bind(validator, "SELECT * FROM authors AS x CROSS JOIN books AS x;"); },
+        requireThrows([&] { bindSql(validator, "SELECT * FROM authors AS x CROSS JOIN books AS x;"); },
                       "Duplicate table alias");
-        requireThrows([&] { bind(validator, "SELECT * FROM missing;"); }, "Table does not exist");
-        requireThrows([&] { bind(validator, "SELECT 1;"); }, "SELECT requires a FROM clause");
-        requireThrows([&] { bind(validator, "DELETE FROM authors CROSS JOIN books;"); },
+        requireThrows([&] { bindSql(validator, "SELECT * FROM missing;"); }, "Table does not exist");
+        requireThrows([&] { bindSql(validator, "SELECT 1;"); }, "SELECT requires a FROM clause");
+        requireThrows([&] { bindSql(validator, "DELETE FROM authors CROSS JOIN books;"); },
                       "Only single-table DELETE");
 
         // Reuse the validator after both successful joins and binding errors.
-        select = std::get<BoundSelect>(bind(validator, "SELECT id FROM authors;"));
+        select = std::get<BoundSelect>(bindSql(validator, "SELECT id FROM authors;"));
         require(std::get<std::int32_t>(evaluateValue(*select.projections[0].expr, joinedRow)) == 7,
                 "A previous statement leaked its tables or column positions");
-        auto del = std::get<BoundDelete>(bind(validator, "DELETE FROM authors AS a WHERE a.id = 7;"));
+        auto del = std::get<BoundDelete>(bindSql(validator, "DELETE FROM authors AS a WHERE a.id = 7;"));
         require(std::get<BoundNamedTableRef>(del.from->value).tableName == "authors" &&
                     evaluatePredicate(*del.where, joinedRow),
                 "DELETE lost its target or failed to resolve its alias");
+    }
+
+    void testSelfJoinBindings(MemoryCatalog &catalog, QueryValidator &validator)
+    {
+        create(catalog, validator, "CREATE TABLE employees (id INT, manager_id INT, salary INT);");
+        const Row input{.values = {2, 1, 20, 1, std::monostate{}, 100}};
+        const auto checkProjections = [&](const std::string &sql, const std::vector<Value> &expected)
+        {
+            const auto select = std::get<BoundSelect>(bindSql(validator, sql));
+            require(select.projections.size() == expected.size(), "Wrong self-join projection count");
+            for (std::size_t i = 0; i < expected.size(); ++i)
+                require(evaluateValue(*select.projections[i].expr, input) == expected[i],
+                        "Input positions depend on projection order: " + sql);
+            if (select.where)
+                require(evaluatePredicate(*select.where, input), "Self-join WHERE resolved the wrong input");
+            const auto &join = std::get<BoundJoinTableRef>(select.from->value);
+            if (join.condition)
+                require(evaluatePredicate(*join.condition, input), "Self-join ON resolved the wrong input");
+        };
+        checkProjections(
+            "SELECT m.salary, e.id, 1 AS one, e.salary + m.salary AS total, m.salary "
+            "FROM employees AS e JOIN employees AS m ON e.manager_id = m.id WHERE e.id = 2;",
+            {100, 2, 1, 120, 100});
+        checkProjections(
+            "SELECT m.*, e.*, m.*, *, e.id FROM employees AS e CROSS JOIN employees AS m;",
+            {1, std::monostate{}, 100, 2, 1, 20, 1, std::monostate{}, 100,
+             2, 1, 20, 1, std::monostate{}, 100, 2});
+
+        const auto select = std::get<BoundSelect>(bindSql(validator,
+            "SELECT salary, id, salary FROM employees AS e WHERE manager_id = 1;"));
+        require(std::get<std::int32_t>(evaluateValue(*select.projections[0].expr, input)) == 20 &&
+                    std::get<std::int32_t>(evaluateValue(*select.projections[1].expr, input)) == 2 &&
+                    std::get<std::int32_t>(evaluateValue(*select.projections[2].expr, input)) == 20,
+                "Unqualified projections lost their stored column positions");
+        const auto update = std::get<BoundUpdate>(bindSql(validator,
+            "UPDATE employees SET salary = salary + 5 WHERE id = 2;"));
+        require(update.assignments[0].columnId == 2 &&
+                    std::get<std::int32_t>(evaluateValue(*update.assignments[0].expr, input)) == 25 &&
+                    evaluatePredicate(*update.where, input),
+                "UPDATE context did not register its schema before binding");
+
+        for (const std::string from : {
+                 "employees CROSS JOIN employees",
+                 "employees AS e CROSS JOIN employees AS e",
+                 "employees AS books CROSS JOIN books",
+                 "books CROSS JOIN employees AS books"})
+            requireThrows([&] { bindSql(validator, "SELECT * FROM " + from + ";"); }, "Duplicate table alias");
+        requireThrows([&] { bindSql(validator, "SELECT id FROM employees AS e CROSS JOIN employees AS m;"); },
+                      "Ambiguous column");
+        requireThrows([&] { bindSql(validator, "SELECT employees.id FROM employees AS e;"); }, "Unknown table");
+        requireThrows([&] { bindSql(validator, "SELECT employees.* FROM employees AS e;"); }, "Unknown table qualifier");
+        requireThrows([&] { bindSql(validator, "SELECT m.missing FROM employees AS e CROSS JOIN employees AS m;"); },
+                      "Unknown column");
+
+        // Physical names can coincide with another binding's alias. Resolution
+        // uses the visible qualifier, while storage still uses physical names.
+        const auto swapped = std::get<BoundSelect>(bindSql(validator,
+            "SELECT employees.id, books.id FROM employees AS books CROSS JOIN books AS employees;"));
+        const Row swappedInput{.values = {2, 1, 20, 10, 2, std::string{"Book"}}};
+        require(std::get<std::int32_t>(evaluateValue(*swapped.projections[0].expr, swappedInput)) == 10 &&
+                    std::get<std::int32_t>(evaluateValue(*swapped.projections[1].expr, swappedInput)) == 2,
+                "Alias resolution fell back to a physical table name");
     }
 }
 
@@ -389,4 +463,5 @@ int main()
     testLiteralConversions(catalog, validator);
     testFloatingPointInputs(validator);
     testTableReferences(catalog, validator);
+    testSelfJoinBindings(catalog, validator);
 }
