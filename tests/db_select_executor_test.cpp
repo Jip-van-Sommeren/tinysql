@@ -4,7 +4,9 @@
 #include "db_storage_engine.h"
 #include "db_test_directory.h"
 
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <filesystem>
 #include <limits>
 #include <memory>
@@ -373,12 +375,16 @@ int main()
                 "FLOAT accumulation or repeated bound-query execution failed");
     }
 
-    requireThrows(
-        [&executor, &grouped, &storageEngine]
-        {
-            executor.execute(grouped, storageEngine);
-        },
-        "A manually populated GROUP BY was not rejected");
+    result = executor.execute(grouped, storageEngine);
+    std::vector<std::int32_t> groupedIds;
+    for (const auto &row : result.rows)
+    {
+        require(row.values.size() == 1, "Grouped row has the wrong number of columns");
+        groupedIds.push_back(std::get<std::int32_t>(row.values[0]));
+    }
+    std::sort(groupedIds.begin(), groupedIds.end());
+    require(groupedIds == std::vector<std::int32_t>{10, 11, 12},
+            "A bound GROUP BY without aggregates returned incorrect groups");
 
     QueryResult deleted = database.executeSql(
         "DELETE FROM products WHERE id = 12;");

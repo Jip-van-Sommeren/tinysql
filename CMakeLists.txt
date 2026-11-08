@@ -114,6 +114,11 @@ if(BUILD_TESTING)
     target_link_libraries(db_select_executor_test PRIVATE db_core)
     add_test(NAME db_select_executor_test COMMAND db_select_executor_test)
 
+    add_executable(db_group_by_having_test tests/db_group_by_having_test.cpp)
+    db_configure_target(db_group_by_having_test PRIVATE)
+    target_link_libraries(db_group_by_having_test PRIVATE db_core)
+    add_test(NAME db_group_by_having_test COMMAND db_group_by_having_test)
+
     add_executable(db_join_executor_test tests/db_join_executor_test.cpp)
     db_configure_target(db_join_executor_test PRIVATE)
     target_link_libraries(db_join_executor_test PRIVATE db_core)

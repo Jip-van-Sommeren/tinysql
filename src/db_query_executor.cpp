@@ -130,6 +130,13 @@ namespace
             }
             return true;
         }
+        case BoundExprKind::IsNull:
+        {
+            const auto &isNullA = static_cast<const BoundIsNullExpr &>(a);
+            const auto &isNullB = static_cast<const BoundIsNullExpr &>(b);
+            return isNullA.negated == isNullB.negated &&
+                   sameBoundExpr(*isNullA.operand, *isNullB.operand);
+        }
 
         default:
             return false;
@@ -383,18 +390,19 @@ namespace
             }
             // aggregateRows.push_back(std::move(aggregateRow));
             if (preparedHaving &&
-                evaluatePredicate(*preparedHaving, aggregateRow))
+                !evaluatePredicate(*preparedHaving, aggregateRow))
             {
-                ResultRow result;
-                result.values.reserve(projections.size());
-                for (const auto &projection : projections)
-                {
-                    result.values.push_back(evaluateValue(*projection, aggregateRow));
-                }
-                return {result};
+
+                return {};
             }
 
-            return {};
+            ResultRow result;
+            result.values.reserve(projections.size());
+            for (const auto &projection : projections)
+            {
+                result.values.push_back(evaluateValue(*projection, aggregateRow));
+            }
+            return {result};
         }
 
         std::vector<Row> aggregateRows;
@@ -411,7 +419,7 @@ namespace
             aggregateRows.push_back(std::move(groupRow));
         }
 
-        std::vector<ResultRow> result;
+        std::vector<ResultRow> result{};
         result.reserve(groupAggregates.size());
         for (const auto &aggregateRow : aggregateRows)
         {

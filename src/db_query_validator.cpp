@@ -940,7 +940,7 @@ BoundSelect QueryValidator::validateStatement(const SelectStatement &statement)
 
     if (statement.where)
     {
-        where = bindExpr(*statement.where, true);
+        where = bindExpr(*statement.where);
     }
 
     std::vector<BoundSelectItem> projections;
@@ -1025,6 +1025,10 @@ BoundSelect QueryValidator::validateStatement(const SelectStatement &statement)
     if (statement.having)
     {
         having = bindExpr(*statement.having, true);
+        if (having->type() != DataType::Boolean && having->type() != DataType::Null)
+        {
+            throw std::runtime_error("Expected a boolean or NULL in HAVING");
+        }
     }
 
     return BoundSelect{
