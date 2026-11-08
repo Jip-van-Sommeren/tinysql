@@ -940,7 +940,7 @@ BoundSelect QueryValidator::validateStatement(const SelectStatement &statement)
 
     if (statement.where)
     {
-        where = bindExpr(*statement.where);
+        where = bindExpr(*statement.where, true);
     }
 
     std::vector<BoundSelectItem> projections;
@@ -1006,14 +1006,34 @@ BoundSelect QueryValidator::validateStatement(const SelectStatement &statement)
 
         throw std::runtime_error("Unsupported SELECT item");
     }
+    std::vector<std::unique_ptr<BoundExpr>> groupBy{};
+    groupBy.reserve(statement.groupBy.size());
+    if (!statement.groupBy.empty())
+    {
+
+        for (const auto &groupByExpr : statement.groupBy)
+        {
+            if (isNumericLiteral(*groupByExpr))
+            {
+                throw std::runtime_error(
+                    "Positional references in GROUP BY are not supported");
+            }
+            groupBy.push_back(bindExpr(*groupByExpr));
+        }
+    }
+    std::unique_ptr<BoundExpr> having{nullptr};
+    if (statement.having)
+    {
+        having = bindExpr(*statement.having, true);
+    }
 
     return BoundSelect{
         .projections = std::move(projections),
         .from = std::make_unique<BoundTableRef>(std::move(tableRef)),
 
         .where = std::move(where),
-        .groupBy = {},
-        .having = nullptr};
+        .groupBy = std::move(groupBy),
+        .having = std::move(having)};
 }
 
 Column QueryValidator::bindColumnDefinition(

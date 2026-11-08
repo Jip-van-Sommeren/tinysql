@@ -12,11 +12,13 @@
 #include <utility>
 #include <variant>
 #include <vector>
+#include <map>
 
 namespace
 {
     bool containsAggregate(const BoundExpr &expr)
     {
+
         switch (expr.kind())
         {
         case BoundExprKind::FunctionCall:
@@ -65,13 +67,95 @@ namespace
         std::unique_ptr<BoundExpr> expression;
         Value value;
     };
+    bool sameBoundExpr(const BoundExpr &a, const BoundExpr &b)
+    {
+        if (a.kind() != b.kind())
+        {
+            return false;
+        }
+        if (a.type() != b.type())
+        {
+            return false;
+        }
+
+        switch (a.kind())
+        {
+        case BoundExprKind::ColumnReference:
+        {
+            const auto &colA = static_cast<const BoundColumnExpr &>(a);
+            const auto &colB = static_cast<const BoundColumnExpr &>(b);
+            return colA.columnIndex == colB.columnIndex;
+        }
+
+        case BoundExprKind::Literal:
+        {
+            const auto &litA = static_cast<const BoundLiteralExpr &>(a);
+            const auto &litB = static_cast<const BoundLiteralExpr &>(b);
+            return litA.value == litB.value;
+        }
+
+        case BoundExprKind::Binary:
+        {
+            const auto &binA = static_cast<const BoundBinaryExpr &>(a);
+            const auto &binB = static_cast<const BoundBinaryExpr &>(b);
+            return binA.op == binB.op &&
+                   sameBoundExpr(*binA.left, *binB.left) &&
+                   sameBoundExpr(*binA.right, *binB.right);
+        }
+
+        case BoundExprKind::Unary:
+        {
+            const auto &unaryA = static_cast<const BoundUnaryExpr &>(a);
+            const auto &unaryB = static_cast<const BoundUnaryExpr &>(b);
+            return unaryA.op == unaryB.op &&
+                   sameBoundExpr(*unaryA.operand, *unaryB.operand);
+        }
+
+        case BoundExprKind::FunctionCall:
+        {
+            const auto &funcA = static_cast<const BoundFunctionCall &>(a);
+            const auto &funcB = static_cast<const BoundFunctionCall &>(b);
+            if (funcA.id != funcB.id ||
+                funcA.category != funcB.category ||
+                funcA.arguments.size() != funcB.arguments.size())
+            {
+                return false;
+            }
+            for (std::size_t i = 0; i < funcA.arguments.size(); ++i)
+            {
+                if (!sameBoundExpr(*funcA.arguments[i], *funcB.arguments[i]))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        default:
+            return false;
+        }
+    }
 
     // Replace aggregate calls in a cloned projection with references to the
     // aggregate result row, so ordinary expression evaluation can finish it.
     void prepareAggregateProjection(
         std::unique_ptr<BoundExpr> &expr,
-        std::vector<AggregateState> &aggregates)
+        std::vector<AggregateState> &aggregates,
+        const std::vector<std::unique_ptr<BoundExpr>> &groupKeys)
     {
+        for (std::size_t i = 0; i < groupKeys.size(); ++i)
+        {
+            if (sameBoundExpr(*expr, *groupKeys[i]))
+            {
+                const auto type = expr->type();
+
+                expr = std::make_unique<BoundColumnExpr>(
+                    static_cast<std::uint32_t>(i),
+                    type);
+
+                return;
+            }
+        }
         switch (expr->kind())
         {
         case BoundExprKind::FunctionCall:
@@ -99,7 +183,7 @@ namespace
                 }
 
                 const DataType resultType = function.type();
-                const auto index = static_cast<std::uint32_t>(aggregates.size());
+                const auto index = static_cast<std::uint32_t>(groupKeys.size() + aggregates.size());
                 Value initial = function.id == FunctionId::Count
                                     ? Value{std::int64_t{0}}
                                     : Value{std::monostate{}};
@@ -110,7 +194,7 @@ namespace
 
             for (auto &argument : function.arguments)
             {
-                prepareAggregateProjection(argument, aggregates);
+                prepareAggregateProjection(argument, aggregates, groupKeys);
             }
             return;
         }
@@ -118,22 +202,23 @@ namespace
         case BoundExprKind::Binary:
         {
             auto &binary = static_cast<BoundBinaryExpr &>(*expr);
-            prepareAggregateProjection(binary.left, aggregates);
-            prepareAggregateProjection(binary.right, aggregates);
+            prepareAggregateProjection(binary.left, aggregates, groupKeys);
+            prepareAggregateProjection(binary.right, aggregates, groupKeys);
             return;
         }
 
         case BoundExprKind::Unary:
             prepareAggregateProjection(
-                static_cast<BoundUnaryExpr &>(*expr).operand, aggregates);
+                static_cast<BoundUnaryExpr &>(*expr).operand, aggregates, groupKeys);
             return;
 
         case BoundExprKind::IsNull:
             prepareAggregateProjection(
-                static_cast<BoundIsNullExpr &>(*expr).operand, aggregates);
+                static_cast<BoundIsNullExpr &>(*expr).operand, aggregates, groupKeys);
             return;
 
         case BoundExprKind::ColumnReference:
+
             throw std::runtime_error(
                 "Column reference outside an aggregate requires GROUP BY");
 
@@ -212,7 +297,7 @@ namespace
             std::get<std::int64_t>(aggregate.value), 1);
     }
 
-    ResultRow evaluateAggregates(const BoundSelect &select, const std::vector<Row> &rows)
+    std::vector<ResultRow> evaluateAggregates(const BoundSelect &select, const std::vector<Row> &rows)
     {
         std::vector<AggregateState> aggregates;
         std::vector<std::unique_ptr<BoundExpr>> projections;
@@ -220,35 +305,128 @@ namespace
         for (const BoundSelectItem &projection : select.projections)
         {
             auto expr = projection.expr->clone();
-            prepareAggregateProjection(expr, aggregates);
+            prepareAggregateProjection(expr, aggregates, select.groupBy);
             projections.push_back(std::move(expr));
         }
 
-        // TableCursor cursor = table.scan();
+        std::unique_ptr<BoundExpr> preparedHaving;
+
+        if (select.having)
+        {
+            preparedHaving = select.having->clone();
+            prepareAggregateProjection(preparedHaving, aggregates, select.groupBy);
+        }
+        std::map<std::vector<Value>, std::vector<AggregateState>> groupAggregates{};
+
         for (const auto &row : rows)
         {
             if (select.where && !evaluatePredicate(*select.where, row))
             {
                 continue;
             }
-            for (AggregateState &aggregate : aggregates)
+            if (select.groupBy.empty())
+            {
+                for (AggregateState &aggregate : aggregates)
+                {
+                    accumulateAggregate(aggregate, row);
+                }
+                continue;
+            }
+            std::vector<Value> groupKey{};
+            groupKey.reserve(select.groupBy.size());
+
+            for (const auto &groupByExpr : select.groupBy)
+            {
+
+                auto keyValue = evaluateValue(*groupByExpr, row);
+                groupKey.push_back(keyValue);
+            }
+            if (!groupAggregates.contains(groupKey))
+            {
+                auto &states = groupAggregates[groupKey];
+                states.reserve(aggregates.size());
+
+                for (const auto &aggregate : aggregates)
+                {
+                    states.push_back({aggregate.expression->clone(),
+                                      aggregate.value});
+                }
+            }
+            for (AggregateState &aggregate : groupAggregates[groupKey])
             {
                 accumulateAggregate(aggregate, row);
             }
         }
 
-        Row aggregateRow;
-        aggregateRow.values.reserve(aggregates.size());
-        for (AggregateState &aggregate : aggregates)
+        // TableCursor cursor = table.scan();
+        // for (const auto &row : rows)
+        // {
+        //     if (select.where && !evaluatePredicate(*select.where, row))
+        //     {
+        //         continue;
+        //     }
+
+        //     for (AggregateState &aggregate : aggregates)
+        //     {
+        //         accumulateAggregate(aggregate, row);
+        //     }
+        // }
+
+        if (select.groupBy.empty())
         {
-            aggregateRow.values.push_back(std::move(aggregate.value));
+            Row aggregateRow;
+
+            aggregateRow.values.reserve(aggregates.size());
+            for (AggregateState &aggregate : aggregates)
+            {
+                aggregateRow.values.push_back(std::move(aggregate.value));
+            }
+            // aggregateRows.push_back(std::move(aggregateRow));
+            if (preparedHaving &&
+                evaluatePredicate(*preparedHaving, aggregateRow))
+            {
+                ResultRow result;
+                result.values.reserve(projections.size());
+                for (const auto &projection : projections)
+                {
+                    result.values.push_back(evaluateValue(*projection, aggregateRow));
+                }
+                return {result};
+            }
+
+            return {};
         }
 
-        ResultRow result;
-        result.values.reserve(projections.size());
-        for (const auto &projection : projections)
+        std::vector<Row> aggregateRows;
+        aggregateRows.reserve(groupAggregates.size());
+        for (auto &[groupKey, groupAggregates] : groupAggregates)
         {
-            result.values.push_back(evaluateValue(*projection, aggregateRow));
+            Row groupRow;
+            groupRow.values = std::move(groupKey);
+            groupRow.values.reserve(groupRow.values.size() + groupAggregates.size());
+            for (AggregateState &aggregate : groupAggregates)
+            {
+                groupRow.values.push_back(std::move(aggregate.value));
+            }
+            aggregateRows.push_back(std::move(groupRow));
+        }
+
+        std::vector<ResultRow> result;
+        result.reserve(groupAggregates.size());
+        for (const auto &aggregateRow : aggregateRows)
+        {
+            if (preparedHaving &&
+                !evaluatePredicate(*preparedHaving, aggregateRow))
+            {
+                continue;
+            }
+            ResultRow resultRow;
+            resultRow.values.reserve(projections.size());
+            for (const auto &projection : projections)
+            {
+                resultRow.values.push_back(evaluateValue(*projection, aggregateRow));
+            }
+            result.push_back(std::move(resultRow));
         }
         return result;
     }
@@ -355,11 +533,6 @@ QueryResult SelectExecutor::execute(
     const BoundSelect &select,
     StorageEngine &storageEngine) const
 {
-    if (!select.groupBy.empty() || select.having)
-    {
-        throw std::runtime_error(
-            "GROUP BY and HAVING are not supported yet");
-    }
 
     if (select.where && containsAggregate(*select.where))
     {
@@ -376,17 +549,18 @@ QueryResult SelectExecutor::execute(
 
     result.columns.reserve(select.projections.size());
 
-    bool hasAggregate = false;
+    bool hasAggregate{false};
     for (const BoundSelectItem &projection : select.projections)
     {
         hasAggregate = hasAggregate || containsAggregate(*projection.expr);
+
         result.columns.push_back({projection.outputName,
                                   projection.expr->type()});
     }
 
-    if (hasAggregate)
+    if (hasAggregate || !select.groupBy.empty() || select.having)
     {
-        result.rows.push_back(evaluateAggregates(select, rows));
+        result.rows = evaluateAggregates(select, rows);
         return result;
     }
 

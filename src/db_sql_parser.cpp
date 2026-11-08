@@ -128,10 +128,14 @@ JoinTableRef::JoinTableRef(
 SelectStatement::SelectStatement(
     std::vector<std::unique_ptr<SelectItem>> selectList,
     std::unique_ptr<TableRef> from,
-    std::unique_ptr<Expr> where)
+    std::unique_ptr<Expr> where,
+    std::vector<std::unique_ptr<Expr>> groupBy,
+    std::unique_ptr<Expr> having)
     : selectList(std::move(selectList)),
       from(std::move(from)),
-      where(std::move(where)) {}
+      where(std::move(where)),
+      groupBy(std::move(groupBy)),
+      having(std::move(having)) {}
 
 DeleteStatement::DeleteStatement(
     std::unique_ptr<TableRef> from,
@@ -626,6 +630,36 @@ std::unique_ptr<ConstraintExpr> Parser::parseTableConstraintBody()
 //         "Expected column constraint, found: " + peek().text);
 // }
 
+std::vector<std::unique_ptr<Expr>> Parser::parseOptionalGroupBy()
+{
+
+    if (matchKeyword("GROUP"))
+    {
+        expectKeyword("BY");
+        std::vector<std::unique_ptr<Expr>> items;
+
+        items.push_back(parseExpression());
+
+        while (match(TokenType::Comma))
+        {
+            items.push_back(parseExpression());
+        }
+        return items;
+    }
+
+    return {};
+}
+
+std::unique_ptr<Expr> Parser::parseOptionalHaving()
+{
+    if (matchKeyword("HAVING"))
+    {
+        return parseExpression();
+    }
+
+    return nullptr;
+}
+
 SelectStatement Parser::parseSelectStatement()
 {
     expectKeyword("SELECT");
@@ -633,12 +667,16 @@ SelectStatement Parser::parseSelectStatement()
     auto selectList = parseSelectList();
     auto from = parseOptionalFrom();
     auto where = parseOptionalWhere();
+    auto groupBy = parseOptionalGroupBy();
+    auto having = parseOptionalHaving();
     finishStatement();
 
     return SelectStatement{
         std::move(selectList),
         std::make_unique<TableRef>(std::move(from)),
-        std::move(where)};
+        std::move(where),
+        std::move(groupBy),
+        std::move(having)};
 }
 
 DeleteStatement Parser::parseDeleteStatement()

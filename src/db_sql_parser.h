@@ -362,11 +362,15 @@ struct SelectStatement
     std::vector<std::unique_ptr<SelectItem>> selectList;
     std::unique_ptr<TableRef> from;
     std::unique_ptr<Expr> where;
+    std::vector<std::unique_ptr<Expr>> groupBy;
+    std::unique_ptr<Expr> having;
 
     SelectStatement(
         std::vector<std::unique_ptr<SelectItem>> selectList,
         std::unique_ptr<TableRef> from,
-        std::unique_ptr<Expr> where);
+        std::unique_ptr<Expr> where,
+        std::vector<std::unique_ptr<Expr>> groupBy,
+        std::unique_ptr<Expr> having);
 };
 
 struct DeleteStatement
@@ -490,6 +494,9 @@ private:
     TableRef parseRequiredFrom();
     TableRef parseNamedTableRef();
     TableRef parseTableRef();
+
+    std::unique_ptr<Expr> parseOptionalHaving();
+    std::vector<std::unique_ptr<Expr>> parseOptionalGroupBy();
     bool isComparisonOperator(const Token &token);
     bool isArithmeticOperator(const Token &token);
     bool isBinaryOperator(const Token &token);

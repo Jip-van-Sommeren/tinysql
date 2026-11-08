@@ -110,7 +110,6 @@ Token Lexer::readWord()
         return {TokenType::Keyword, text};
     }
 
-
     return {TokenType::Identifier, text};
 }
 
@@ -199,6 +198,9 @@ bool Lexer::isKeyword(const std::string &word) const
            word == "UPDATE" ||
            word == "SET" ||
            word == "DELETE" ||
+           word == "GROUP" ||
+           word == "BY" ||
+           word == "HAVING" ||
            word == "CREATE" ||
            word == "TABLE" ||
            word == "CONSTRAINT" ||
@@ -225,7 +227,6 @@ bool Lexer::isKeyword(const std::string &word) const
            word == "FALSE" ||
            word == "OR";
 }
-
 
 bool Lexer::isDataTypeKeyword(const std::string &word) const
 {
