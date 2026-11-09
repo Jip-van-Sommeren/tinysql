@@ -58,6 +58,8 @@ public:
     QueryResult deleteRows(const BoundDelete &del);
     QueryResult updateRows(const BoundUpdate &update);
 
+    QueryResult createIndex(const BoundCreateIndex &createIndex);
+
     // const std::filesystem::path &getTablesPath() const;
 
 private:
@@ -78,6 +80,7 @@ private:
     std::filesystem::path dbPath_;
     LinuxDirectory dbRootDirectory_;
     LinuxDirectory tablesDirectory_;
+    LinuxDirectory indexDirectory_;
     LinuxDirectory journalDirectory_;
     StatementRecovery statementRecovery_;
 

@@ -441,12 +441,30 @@ struct ParsedColumnDefinition
     std::vector<std::unique_ptr<ConstraintExpr>> constraints;
 };
 
+struct CreateIndexStatement
+{
+    std::string tableName;
+    std::string name;
+    std::vector<std::unique_ptr<ColumnExpr>> columns;
+    bool unique;
+
+    CreateIndexStatement(std::string tableName,
+                         std::string name,
+                         std::vector<std::unique_ptr<ColumnExpr>> columns,
+                         bool unique)
+        : tableName(std::move(tableName)),
+          name(std::move(name)),
+          columns(std::move(columns)),
+          unique(unique) {};
+};
+
 using Statement = std::variant<
     InsertStatement,
     SelectStatement,
     DeleteStatement,
     CreateTableStatement,
-    UpdateStatement>;
+    UpdateStatement,
+    CreateIndexStatement>;
 
 class Parser
 {
@@ -459,6 +477,7 @@ public:
     InsertStatement parseInsertStatement();
     UpdateStatement parseUpdateStatement();
     CreateTableStatement parseCreateTableStatement();
+    CreateIndexStatement parseCreateIndexStatement(bool unique);
 
 private:
     std::vector<Token> tokens;

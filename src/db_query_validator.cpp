@@ -813,6 +813,10 @@ BoundQuery QueryValidator::validate(const Statement &statement)
             {
                 return validateStatement(value);
             }
+            else if constexpr (std::is_same_v<T, CreateIndexStatement>)
+            {
+                return validateStatement(value);
+            }
             else
             {
                 throw std::runtime_error("Unknown Statement Type");
@@ -1051,6 +1055,38 @@ Column QueryValidator::bindColumnDefinition(
     column.columnIndex = columnIndex;
 
     return column;
+}
+
+BoundCreateIndex QueryValidator::validateStatement(
+    const CreateIndexStatement &statement)
+{
+    if (!catalog_.tableExists(statement.tableName))
+    {
+        throw std::runtime_error("Table does not exist: " + statement.tableName);
+    }
+
+    bContext_ = createBindContext(statement.tableName);
+
+    std::vector<ColumnId> columnIds{};
+    columnIds.reserve(statement.columns.size());
+    for (const auto &columnExpr : statement.columns)
+    {
+        if (columnExpr->parts.size() > 1)
+        {
+            throw std::runtime_error("Qualified column names are not allowed when creating indexes");
+        }
+        if (columnExpr->parts.empty())
+        {
+            throw std::runtime_error("No Column name specified");
+        }
+        Column &column = bContext_.resolveColumn(columnExpr->parts.at(0), statement.tableName);
+        columnIds.push_back(column.columnIndex);
+    }
+    return BoundCreateIndex{
+        .tableName = statement.tableName,
+        .name = statement.name,
+        .columnIds = std::move(columnIds),
+        .unique = statement.unique};
 }
 
 BoundCreateTable QueryValidator::validateStatement(

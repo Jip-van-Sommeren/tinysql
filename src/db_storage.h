@@ -69,7 +69,9 @@ enum class PageType : uint8_t
     IndexPage = 2,
     OverflowPage = 3,
     FreePage = 4,
-    HeaderPage = 5
+    HeaderPage = 5,
+    IndexHeaderPage = 6,
+    TableHeaderPage = 7
 };
 
 struct PageHeader
@@ -108,7 +110,33 @@ struct HeaderPage
     uint32_t firstDataPageId = 1;
     uint32_t lastDataPageId = 1;
     uint32_t nextUnusedPageId = 2;
+
+    static constexpr PageType type() noexcept
+    {
+        return PageType::HeaderPage;
+    }
 };
+
+struct IndexMetadataPage
+{
+    std::string magic = "MYIX";
+    std::uint16_t version = 1;
+    std::uint32_t pageSize = PAGE_SIZE;
+
+    std::string indexName;
+    std::string tableName;
+    std::vector<ColumnId> keyColumns; // In index-key order
+    bool unique = false;
+
+    PageId rootPageId = 1;
+    PageId nextUnusedPageId = 2;
+
+    static constexpr PageType type() noexcept
+    {
+        return PageType::IndexHeaderPage;
+    }
+};
+
 // [PageHeader][slots...][free space...][row payload bytes...]
 enum class SlotFlag : std::uint16_t
 {
@@ -153,9 +181,62 @@ struct DataPage
 {
     std::vector<Slot> slots;
     std::vector<RowEntry> rows;
+    static constexpr PageType type() noexcept
+    {
+        return PageType::DataPage;
+    }
 };
 
-using PageData = std::variant<HeaderPage, DataPage>;
+struct IndexPageHeader
+{
+    std::uint16_t level;     // 0 = leaf; higher = internal
+    std::uint16_t flags;     // Reserved initially
+    PageId firstChildPageId; // Internal pages only
+
+    static constexpr std::size_t serializedSize() noexcept
+    {
+        return sizeof(level) + sizeof(flags) + sizeof(firstChildPageId);
+    }
+};
+
+struct LeafIndexEntry
+{
+    std::vector<std::byte> key;
+    RowId rowId;
+    std::size_t serializedSize() const
+    {
+        return sizeof(std::uint16_t)                                  // encoded key length
+               + key.size() + sizeof(PageId) + sizeof(std::uint16_t); // table slot index
+    }
+};
+
+struct InternalIndexEntry
+{
+    std::vector<std::byte> separatorKey;
+    PageId pageId;
+
+    std::size_t serializedSize() const
+    {
+        return sizeof(std::uint16_t) + separatorKey.size() + sizeof(PageId);
+    }
+};
+
+using IndexEntry = std::variant<
+    std::vector<LeafIndexEntry>,
+    std::vector<InternalIndexEntry>>;
+
+struct IndexPage
+{
+    IndexPageHeader header;
+    IndexEntry entries;
+    std::vector<Slot> slots;
+    static constexpr PageType type() noexcept
+    {
+        return PageType::IndexPage;
+    }
+};
+
+using PageData = std::variant<HeaderPage, DataPage, IndexPage>;
 
 struct Page
 {

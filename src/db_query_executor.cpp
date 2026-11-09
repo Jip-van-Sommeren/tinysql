@@ -365,20 +365,6 @@ namespace
             }
         }
 
-        // TableCursor cursor = table.scan();
-        // for (const auto &row : rows)
-        // {
-        //     if (select.where && !evaluatePredicate(*select.where, row))
-        //     {
-        //         continue;
-        //     }
-
-        //     for (AggregateState &aggregate : aggregates)
-        //     {
-        //         accumulateAggregate(aggregate, row);
-        //     }
-        // }
-
         if (select.groupBy.empty())
         {
             Row aggregateRow;
@@ -667,6 +653,31 @@ QueryResult QueryExecutor::executeStatement(
             dbName_,
             createTable.columns,
             createTable.constraints);
+    }
+    catch (...)
+    {
+        storageEngine_.rollbackStatement();
+        throw;
+    }
+
+    storageEngine_.commitStatement();
+
+    return QueryResult{
+        .columns = {},
+        .rows = {},
+        .affectedRows = 0,
+        .returnsRows = false};
+}
+
+QueryResult QueryExecutor::executeStatement(
+    const BoundCreateIndex &createIndex)
+{
+    storageEngine_.beginStatement();
+
+    try
+    {
+        storageEngine_.createIndex(
+            createIndex);
     }
     catch (...)
     {

@@ -46,6 +46,24 @@ namespace
             throw;
         }
     }
+    const std::string pageTypeToString(PageType type)
+    {
+        switch (type)
+        {
+        case PageType::DataPage:
+            return "DataPage";
+        case PageType::IndexPage:
+            return "IndexPage";
+        case PageType::OverflowPage:
+            return "OverflowPage";
+        case PageType::FreePage:
+            return "FreePage";
+        case PageType::HeaderPage:
+            return "HeaderPage";
+        default:
+            throw std::runtime_error("Unknown page type");
+        }
+    };
 }
 
 PageGuard::PageGuard(
@@ -207,7 +225,8 @@ PageGuard BufferManager::getHeaderPage()
     return header;
 }
 
-PageGuard BufferManager::getDataPage(PageId pageId)
+template <PagePayload T>
+PageGuard BufferManager::getPage(PageId pageId)
 {
     const PageGuard header = getHeaderPage();
     PageGuard data = getPage(
@@ -216,10 +235,12 @@ PageGuard BufferManager::getDataPage(PageId pageId)
         {
             return decodeDataPage(rawPage, header.as<HeaderPage>());
         });
-    if (data.page().header.pageType != PageType::DataPage)
+    if (data.page().header.pageType != T::type())
     {
-        throw std::runtime_error("Page is not a data page");
+        throw std::runtime_error("Page " + std::to_string(pageId) + " is not a " +
+                                 pageTypeToString(T::type()));
     }
+
     return data;
 }
 
@@ -257,7 +278,7 @@ void BufferManager::markDirty(PageId pageId)
 std::uint64_t BufferManager::deleteRow(const RowId &rowId)
 {
     requireReadable();
-    PageGuard data = getDataPage(rowId.pageId);
+    PageGuard data = getPage<DataPage>(rowId.pageId);
     const DataPage &stored = data.as<DataPage>();
     if (stored.slots.at(rowId.slotIndex).has(SlotFlag::Deleted))
         return 0;
@@ -309,6 +330,16 @@ void BufferManager::insertRows(const std::vector<Row> &rows)
     insertRowsImpl(rows);
 }
 
+void BufferManager::insertIndeces(const IndexEntry &entries)
+{
+    if (const std::vector<LeafIndexEntry> *leafEntries = std::get_if<std::vector<LeafIndexEntry>>(&entries))
+        insertIndecesImpl<LeafIndexEntry>(*leafEntries);
+    else if (const std::vector<InternalIndexEntry> *internalEntries = std::get_if<std::vector<InternalIndexEntry>>(&entries))
+        insertIndecesImpl<InternalIndexEntry>(*internalEntries);
+    else
+        throw std::runtime_error("Unknown index entry type");
+}
+
 template <std::ranges::input_range Rows>
 void BufferManager::insertRowsImpl(Rows &&rows)
 {
@@ -335,12 +366,12 @@ void BufferManager::insertRowsImpl(Rows &&rows)
             throw std::runtime_error("Row is too large to fit on a page");
 
         if (headerPage.lastDataPageId == 0)
-            currentPageId = createDataPage(header);
+            currentPageId = createPage<DataPage>(header);
 
         while (true)
         {
-            PageGuard data = getDataPage(currentPageId);
-            if (enoughSpaceForInsert(data.page(), rowSize))
+            PageGuard data = getPage<DataPage>(currentPageId);
+            if (enoughSpaceForInsert<DataPage>(data.page(), rowSize))
             {
                 appendRowToExistingDataPage(header, data, row);
                 break;
@@ -348,7 +379,51 @@ void BufferManager::insertRowsImpl(Rows &&rows)
             if (data.page().nextPageId() != 0)
                 currentPageId = data.page().nextPageId();
             else
-                currentPageId = createDataPage(header);
+                currentPageId = createPage<DataPage>(header);
+        }
+    }
+}
+
+template <IndexEntryType T>
+void BufferManager::insertIndecesImpl(const std::vector<T> &indexEntries)
+{
+    requireReadable();
+    auto current = indexEntries.begin();
+    const auto end = indexEntries.end();
+    if (current == end)
+        return;
+
+    PageGuard header = getHeaderPage();
+    const HeaderPage &headerPage = header.as<HeaderPage>();
+    PageId currentPageId = headerPage.firstDataPageId;
+
+    for (; current != end; ++current)
+    {
+        const T &indexEntry = *current;
+        // const auto validation = validateIndexEntryAgainstSchema(headerPage.columns, indexEntry);
+        // if (!validation.valid)
+        //     throw std::runtime_error(validation.message);
+
+        const auto indexEntrySize = indexEntry.serializedSize();
+        const auto maxIndexEntrySize = PAGE_SIZE - PageHeaderLayout::Size - IndexPageHeader::serializedSize() - encodedSlotSize();
+        if (indexEntrySize > maxIndexEntrySize)
+            throw std::runtime_error("Index entry is too large to fit on a page");
+
+        if (headerPage.lastDataPageId == 0)
+            currentPageId = createPage<IndexPage>(header);
+
+        while (true)
+        {
+            PageGuard data = getPage<IndexPage>(currentPageId);
+            if (enoughSpaceForInsert<IndexPage>(data.page(), indexEntrySize))
+            {
+                appendRowToExistingIndexPage<T>(header, data, indexEntry);
+                break;
+            }
+            if (data.page().nextPageId() != 0)
+                currentPageId = data.page().nextPageId();
+            else
+                currentPageId = createPage<IndexPage>(header);
         }
     }
 }
@@ -488,6 +563,89 @@ RawPage BufferManager::encodeCachedPage(const Page &page)
     throw std::runtime_error("Unsupported page type while encoding cached page");
 }
 
+template <IndexEntryType T>
+void BufferManager::appendRowToExistingIndexPage(
+    PageGuard &header,
+    PageGuard &data,
+    const T &index)
+{
+    HeaderPage &headerPage = header.write<HeaderPage>();
+    IndexPage &page = data.write<IndexPage>();
+    PageHeader &pageHeader = data.writePage().header;
+
+    const std::size_t encodedSize = index.serializedSize();
+    if (encodedSize > std::numeric_limits<std::uint16_t>::max())
+    {
+        throw std::runtime_error("Index is too large for uint16_t slot size");
+    }
+    if (encodedSize > PAGE_SIZE)
+    {
+        throw std::runtime_error("Index is too large for page size");
+    }
+
+    const std::uint16_t indexSize = static_cast<std::uint16_t>(encodedSize);
+    const std::size_t slotSize = encodedSlotSize();
+
+    if (page.slots.size() > std::numeric_limits<std::uint16_t>::max())
+    {
+        throw std::runtime_error("Data page has too many slots");
+    }
+    pageHeader.slotCount =
+        static_cast<std::uint16_t>(page.slots.size());
+
+    bool needsNewSlot = true;
+    for (std::size_t slotIndex = 0;
+         slotIndex < page.slots.size();
+         ++slotIndex)
+    {
+        Slot &slot = page.slots[slotIndex];
+
+        if (slot.has(SlotFlag::Deleted) && slot.size >= indexSize)
+        {
+            slot.clear(SlotFlag::Deleted);
+            slot.size = indexSize;
+            // page.entries = std::get<T>(page.entries);
+            std::get<std::vector<T>>(page.entries).push_back(std::move(index));
+
+            needsNewSlot = false;
+            break;
+        }
+    }
+
+    if (needsNewSlot)
+    {
+        if (pageHeader.freeSpaceEnd < pageHeader.freeSpaceStart)
+        {
+            throw std::runtime_error("Invalid free space pointers");
+        }
+
+        std::size_t freeSpace =
+            pageHeader.freeSpaceEnd - pageHeader.freeSpaceStart;
+        std::size_t neededSpace = slotSize + indexSize;
+
+        if (neededSpace > freeSpace)
+        {
+            throw std::runtime_error("Index does not fit in selected data page");
+        }
+
+        std::uint16_t rowOffset = pageHeader.freeSpaceStart;
+        page.slots.push_back(Slot{
+            .offset = rowOffset,
+            .size = indexSize,
+            .flags = 0});
+        std::get<std::vector<T>>(page.entries).push_back(std::move(index));
+
+        pageHeader.freeSpaceStart = static_cast<std::uint16_t>(
+            pageHeader.freeSpaceStart + indexSize);
+        pageHeader.freeSpaceEnd = static_cast<std::uint16_t>(
+            pageHeader.freeSpaceEnd - slotSize);
+        pageHeader.slotCount =
+            static_cast<std::uint16_t>(page.slots.size());
+    }
+
+    ++headerPage.totalRowCount;
+}
+
 void BufferManager::appendRowToExistingDataPage(
     PageGuard &header,
     PageGuard &data,
@@ -574,6 +732,21 @@ void BufferManager::appendRowToExistingDataPage(
     ++headerPage.totalRowCount;
 }
 
+template <typename T, PagePayload P>
+void BufferManager::initializeNew(const T &payload)
+{
+    requireReadable();
+    if (!statementRecovery_.isNewFile(relativeTablePath_) || pageFile_.size() != 0)
+    {
+        throw std::logic_error("Can only initialize a new, unwritten table in the active statement");
+    }
+
+    Page headerPage = makeHeaderPage<T>(magic, payload);
+    Page dataPage = makeEmptyPage<P>(FirstDataPageId);
+    setPage(headerPage, headerPage.pageId());
+    setPage(dataPage, headerPage.nextPageId());
+}
+
 void BufferManager::initializeNewTable(const std::string &tableName,
                                        const std::string &magic,
                                        const std::vector<Column> &columns,
@@ -586,12 +759,13 @@ void BufferManager::initializeNewTable(const std::string &tableName,
     }
 
     Page headerPage = makeHeaderPage(tableName, magic, columns, constraints);
-    Page dataPage = makeEmptyDataPage(1);
+    Page dataPage = makeEmptyPage<DataPage>(FirstDataPageId);
     setPage(headerPage, headerPage.pageId());
     setPage(dataPage, headerPage.nextPageId());
 }
 
-PageId BufferManager::createDataPage(PageGuard &header)
+template <PagePayload T>
+PageId BufferManager::createPage(PageGuard &header)
 {
     HeaderPage &headerPage = header.write<HeaderPage>();
 
@@ -610,7 +784,7 @@ PageId BufferManager::createDataPage(PageGuard &header)
 
     if (previousPageId != 0)
     {
-        PageGuard previous = getDataPage(previousPageId);
+        PageGuard previous = getPage<T>(previousPageId);
         previous.writePage().header.nextPageId = newPageId;
     }
     else
@@ -618,10 +792,10 @@ PageId BufferManager::createDataPage(PageGuard &header)
         headerPage.firstDataPageId = newPageId;
     }
 
-    Page newDataPage = makeEmptyDataPage(newPageId);
-    if (newDataPage.header.pageType != PageType::DataPage)
+    Page newDataPage = makeEmptyPage<T>(newPageId);
+    if (newDataPage.header.pageType != PageType::IndexPage)
     {
-        throw std::runtime_error("New page is not a data page");
+        throw std::runtime_error("New page is not an index page");
     }
 
     headerPage.lastDataPageId = newPageId;
@@ -631,11 +805,12 @@ PageId BufferManager::createDataPage(PageGuard &header)
     return newPageId;
 }
 
+template <PagePayload T>
 bool BufferManager::enoughSpaceForInsert(
     const Page &page,
     std::size_t rowSize) const
 {
-    if (page.header.pageType != PageType::DataPage)
+    if (page.header.pageType != T::type())
     {
         throw std::runtime_error("Invalid page type for insert space check");
     }
@@ -654,7 +829,7 @@ bool BufferManager::enoughSpaceForInsert(
         return true;
     }
 
-    const DataPage &dataPage = std::get<DataPage>(page.data);
+    const T &dataPage = std::get<T>(page.data);
     for (const Slot &slot : dataPage.slots)
     {
         if (slot.has(SlotFlag::Deleted) && slot.size >= rowSize)

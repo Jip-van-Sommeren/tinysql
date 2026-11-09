@@ -207,10 +207,59 @@ Statement Parser::parseStatement()
     }
     if (checkKeyword("CREATE"))
     {
-        return parseCreateTableStatement();
+        if (checkKeyword("TABLE"))
+        {
+            return parseCreateTableStatement();
+        }
+        else if (checkKeyword("INDEX"))
+        {
+            parseCreateIndexStatement(false);
+        }
+        else if (checkKeyword("UNIQUE") && checkKeyword("INDEX"))
+        {
+            parseCreateIndexStatement(true);
+        }
     }
 
     throw std::runtime_error("Expected SQL statement, got: " + peek().text);
+}
+
+CreateIndexStatement Parser::parseCreateIndexStatement(bool unique)
+{
+    expectKeyword("CREATE");
+    if (unique)
+    {
+        expectKeyword("UNIQUE");
+    }
+    expectKeyword("INDEX");
+
+    auto indexNameToken = expect(TokenType::Identifier);
+    std::string indexName = std::move(indexNameToken.text);
+
+    expectKeyword("ON");
+
+    auto tableNameToken = expect(TokenType::Identifier);
+    std::string tableName = std::move(tableNameToken.text);
+
+    expect(TokenType::LeftParen);
+
+    std::vector<std::unique_ptr<ColumnExpr>> columns;
+    columns.push_back(parseIdentifierColumnExpr());
+
+    while (match(TokenType::Comma))
+    {
+        columns.push_back(parseIdentifierColumnExpr());
+    }
+
+    expect(TokenType::RightParen);
+
+    finishStatement();
+
+    return CreateIndexStatement{
+        std::move(tableName),
+        std::move(indexName),
+        std::move(columns),
+        unique};
 }
 
 CreateTableStatement Parser::parseCreateTableStatement()

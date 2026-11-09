@@ -72,6 +72,17 @@ public:
         const Value &value);
 };
 
+class IndexWriter
+{
+public:
+    IndexWriter(ByteWriter &writer);
+    void writeIndex(const LeafIndexEntry &entry);
+    void writeIndex(const InternalIndexEntry &entry);
+
+private:
+    ByteWriter &writer;
+};
+
 class RowWriter
 {
 public:
@@ -188,6 +199,19 @@ private:
     PageHeaderWriter headerWriter;
     SlotWriter slotWriter;
     const HeaderPage &tableHeader;
+};
+
+class IndexPageWriter
+{
+public:
+    IndexPageWriter(ByteWriter &writer);
+    void write(const PageHeader &pageHeader, const IndexPageHeader &indexHeader, const IndexEntry &entries);
+    void write(std::uint32_t pageId, const IndexEntry &entries);
+
+private:
+    ByteWriter &writer;
+    PageHeaderWriter headerWriter;
+    SlotWriter slotWriter;
 };
 
 class ExpressionSerializer

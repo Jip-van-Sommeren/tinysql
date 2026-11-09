@@ -58,7 +58,7 @@ std::optional<LocatedRow> TableCursor::nextLocated()
                 throw std::runtime_error(
                     "Detected a cycle at page " + std::to_string(pageId_));
             }
-            currentPage_.emplace(table_->bufferManager.getDataPage(pageId_));
+            currentPage_.emplace(table_->bufferManager.getPage<DataPage>(pageId_));
         }
 
         const DataPage &dataPage = currentPage_->as<DataPage>();
@@ -94,7 +94,7 @@ std::optional<Row> TableCursor::next()
                 throw std::runtime_error(
                     "Detected a cycle at page " + std::to_string(pageId_));
             }
-            currentPage_.emplace(table_->bufferManager.getDataPage(pageId_));
+            currentPage_.emplace(table_->bufferManager.getPage<DataPage>(pageId_));
         }
 
         const DataPage &dataPage = currentPage_->as<DataPage>();

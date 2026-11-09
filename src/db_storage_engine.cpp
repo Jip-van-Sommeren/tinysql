@@ -99,6 +99,7 @@ StorageEngine::StorageEngine(
       dbRootDirectory_(std::move(lockedRoot)),
       tablesDirectory_(dbPath_ / "tables"),
       journalDirectory_(dbPath_ / "journal"),
+      indexDirectory_(dbPath_ / "indexes"),
       statementRecovery_(dbRootDirectory_, dbId)
 {
 }
@@ -151,6 +152,13 @@ StorageEngine StorageEngine::create(
         const int error = errno;
 
         throwError("mkdir", error, path / "journal");
+    }
+
+    if (::mkdir((path / "indexes").c_str(), 0700) == -1)
+    {
+        const int error = errno;
+
+        throwError("mkdir", error, path / "indexes");
     }
 
     createMetaFile(path, dbId);
@@ -300,6 +308,10 @@ QueryResult StorageEngine::deleteRows(const BoundDelete &del)
         .rows = {},
         .affectedRows = deletedCount,
         .returnsRows = false};
+}
+
+QueryResult StorageEngine::createIndex(const BoundCreateIndex &createIndex)
+{
 }
 
 bool StorageEngine::tableExists(const std::string &name) const

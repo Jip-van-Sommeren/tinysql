@@ -26,8 +26,10 @@ static_assert(sizeof(std::float32_t) == 4);
 using ColumnId = std::uint32_t;
 using PageId = std::uint32_t;
 
-constexpr std::uint32_t
+constexpr PageId
     HeaderPageId{0};
+
+constexpr PageId FirstDataPageId{1};
 
 enum class SqlTruth
 {

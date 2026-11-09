@@ -74,9 +74,8 @@ public:
         {
             // Expression positions address the full FROM row. Schema column
             // indices remain local to their stored table.
-            table.columns.push_back({
-                .column = column,
-                .pos = static_cast<std::uint32_t>(columnCount_ + column.columnIndex)});
+            table.columns.push_back({.column = column,
+                                     .pos = static_cast<std::uint32_t>(columnCount_ + column.columnIndex)});
         }
         tables_.push_back(std::move(table));
         columnCount_ += columns.size();
@@ -93,9 +92,7 @@ public:
     bool resolveTable(const std::string &qualifier) const
     {
         return std::any_of(tables_.begin(), tables_.end(), [&](const TableContext &table)
-        {
-            return table.alias == qualifier;
-        });
+                           { return table.alias == qualifier; });
     }
 
     std::tuple<std::string, std::string> resolveColumnName(
@@ -157,9 +154,7 @@ public:
     {
         const auto &columns = getColumns(qualifier);
         const auto column = std::find_if(columns.begin(), columns.end(), [&](const ColumnContext &c)
-        {
-            return c.column.name == name;
-        });
+                                         { return c.column.name == name; });
         if (column == columns.end())
             throw std::runtime_error(std::format("Unknown column '{}.{}'", qualifier, name));
         return *column;
@@ -169,9 +164,7 @@ public:
     {
         auto &columns = tables_[tableIndex(qualifier)].columns;
         const auto column = std::find_if(columns.begin(), columns.end(), [&](const ColumnContext &c)
-        {
-            return c.column.name == name;
-        });
+                                         { return c.column.name == name; });
         if (column == columns.end())
             throw std::runtime_error(std::format("Unknown column '{}.{}'", qualifier, name));
         return *column;
@@ -181,9 +174,7 @@ public:
     {
         const auto &columns = getColumns(qualifier);
         const auto column = std::find_if(columns.begin(), columns.end(), [&](const ColumnContext &c)
-        {
-            return c.column.columnIndex == columnId;
-        });
+                                         { return c.column.columnIndex == columnId; });
         if (column == columns.end())
             throw std::runtime_error(std::format("Unknown column '{}.{}'", qualifier, columnId));
         return *column;
@@ -219,9 +210,8 @@ public:
     {
         const auto &constraints = getConstraints(qualifier);
         const auto constraint = std::find_if(constraints.begin(), constraints.end(), [&](const BoundConstraint &c)
-        {
-            return std::visit([&](const auto &value) { return value.constraintName == name; }, c);
-        });
+                                             { return std::visit([&](const auto &value)
+                                                                 { return value.constraintName == name; }, c); });
         if (constraint == constraints.end())
             throw std::runtime_error(std::format("Unknown constraint '{}.{}'", qualifier, name));
         return *constraint;
@@ -349,6 +339,14 @@ struct BoundCreateTable
     std::vector<BoundConstraint> constraints;
 };
 
+struct BoundCreateIndex
+{
+    std::string tableName;
+    std::string name;
+    std::vector<ColumnId> columnIds;
+    bool unique;
+};
+
 struct BoundAssignment
 {
     ColumnId columnId;
@@ -362,7 +360,7 @@ struct BoundUpdate
     std::unique_ptr<BoundExpr> where;
 };
 
-using BoundQuery = std::variant<BoundSelect, BoundInsert, BoundDelete, BoundCreateTable, BoundUpdate>;
+using BoundQuery = std::variant<BoundSelect, BoundInsert, BoundDelete, BoundCreateTable, BoundCreateIndex, BoundUpdate>;
 
 enum class SerializedExprType : std::uint8_t
 {
@@ -388,6 +386,7 @@ private:
     BoundDelete validateStatement(const DeleteStatement &statement);
     BoundUpdate validateStatement(const UpdateStatement &statement);
     BoundCreateTable validateStatement(const CreateTableStatement &statement);
+    BoundCreateIndex validateStatement(const CreateIndexStatement &statement);
 
     BoundTableRef bindTableRef(const TableRef &tableRef);
     BoundConstraint bindConstraintExpr(const ConstraintExpr &expr, const std::string &tableName);

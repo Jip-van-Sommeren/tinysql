@@ -14,6 +14,15 @@
 #include <variant>
 #include <vector>
 
+#include <concepts>
+
+template <typename T>
+concept IndexEntryType =
+    std::same_as<T, LeafIndexEntry> ||
+    std::same_as<T, InternalIndexEntry>;
+
+template <typename T>
+concept PagePayload = std::same_as<T, DataPage> || std::same_as<T, IndexPage>;
 class BufferManager;
 
 // Owns one pin on a cached page. The manager must outlive the guard and
@@ -72,12 +81,17 @@ public:
 
     PageGuard getPage(PageId pageId, const PageReader &reader);
     PageGuard getHeaderPage();
-    PageGuard getDataPage(PageId pageId);
+
+    template <PagePayload T>
+    PageGuard getPage(PageId pageId);
 
     void initializeNewTable(const std::string &tableName,
                             const std::string &magic,
                             const std::vector<Column> &columns,
                             const std::vector<BoundConstraint> &constraints);
+
+    template <typename T, PagePayload P>
+    void initializeNew(const T &payload);
 
     void insertRows(const std::vector<Row> &rows);
     void insertRow(const Row &row);
@@ -93,6 +107,8 @@ public:
             deletedCount += deleteRow(rowId);
         return deletedCount;
     }
+
+    void insertIndeces(const IndexEntry &entries);
     void flushPage(PageId pageId);
     void flushAll();
     void sync();
@@ -104,6 +120,9 @@ private:
     // Instantiated only by the concrete insertion/update methods in the .cpp.
     template <std::ranges::input_range Rows>
     void insertRowsImpl(Rows &&rows);
+
+    template <IndexEntryType T>
+    void insertIndecesImpl(const std::vector<T> &indexEntries);
 
     PageFile pageFile_;
     StatementRecovery &statementRecovery_;
@@ -128,6 +147,20 @@ private:
         PageGuard &headerPage,
         PageGuard &dataPage,
         const Row &row);
-    PageId createDataPage(PageGuard &headerPage);
-    bool enoughSpaceForInsert(const Page &page, std::size_t rowSize) const;
+
+    template <IndexEntryType T>
+    void appendRowToExistingIndexPage(
+        PageGuard &header,
+        PageGuard &data,
+        const T &entry);
+    // PageId createDataPage(PageGuard &headerPage);
+    // PageId createIndexPage(PageGuard &header);
+
+    template <PagePayload T>
+    PageId createPage(PageGuard &header);
+
+    template <PagePayload T>
+    bool enoughSpaceForInsert(
+        const Page &page,
+        std::size_t rowSize) const;
 };

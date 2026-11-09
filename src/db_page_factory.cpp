@@ -112,9 +112,7 @@ namespace
 
 Page makeEmptyDataPage(std::uint32_t pageId)
 {
-    DataPage dataPage{
-        .slots = {},
-        .rows = {}};
+    DataPage dataPage{};
 
     PageHeader pageHeader{
         .pageId = pageId,

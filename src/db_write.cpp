@@ -322,6 +322,24 @@ std::vector<std::byte> ValueSerializer::serializeValue(
     }
 }
 
+IndexWriter::IndexWriter(ByteWriter &writer)
+    : writer(writer) {}
+
+void IndexWriter::writeIndex(const LeafIndexEntry &entry)
+{
+    writer.writeUnsigned<std::uint32_t>(static_cast<std::uint32_t>(entry.key.size()));
+    writer.writeBytes(entry.key.data(), entry.key.size());
+    writer.writeUnsigned<std::uint32_t>(entry.rowId.pageId);
+    writer.writeUnsigned<std::uint16_t>(entry.rowId.slotIndex);
+}
+
+void IndexWriter::writeIndex(const InternalIndexEntry &entry)
+{
+    writer.writeUnsigned<std::uint32_t>(static_cast<std::uint32_t>(entry.separatorKey.size()));
+    writer.writeBytes(entry.separatorKey.data(), entry.separatorKey.size());
+    writer.writeUnsigned<std::uint32_t>(entry.pageId);
+}
+
 RowWriter::RowWriter(ByteWriter &writer, const HeaderPage &headerPage)
     : writer(writer), headerPage(headerPage) {}
 
@@ -757,6 +775,145 @@ void HeaderPageWriter::writeColumnStorage(const ColumnStorage &storage)
     }
 
     throw std::runtime_error("Unknown column storage type");
+}
+
+IndexPageWriter::IndexPageWriter(ByteWriter &writer)
+    : writer(writer),
+      headerWriter(writer),
+      slotWriter(writer) {}
+
+void IndexPageWriter::write(std::uint32_t pageId, const IndexEntry &entries)
+{
+    PageHeader header{
+        .pageId = pageId,
+        .pageType = PageType::IndexPage,
+        .slotCount = 0,
+        .freeSpaceStart = static_cast<std::uint16_t>(PageHeaderLayout::Size),
+        .freeSpaceEnd = static_cast<std::uint16_t>(PAGE_SIZE),
+        .nextPageId = 0};
+
+    IndexPageHeader indexHeader{
+        .level = std::holds_alternative<std::vector<LeafIndexEntry>>(entries) ? std::uint16_t{0} : std::uint16_t{1},
+        .flags = 0,
+        .firstChildPageId = 0};
+
+    write(header, indexHeader, entries);
+}
+
+void IndexPageWriter::write(const PageHeader &pageHeader, const IndexPageHeader &indexHeader, const IndexEntry &entries)
+{
+    PageHeader header = pageHeader;
+    header.pageType = PageType::IndexPage;
+    header.slotCount = 0;
+    header.freeSpaceStart = static_cast<std::uint16_t>(PageHeaderLayout::Size);
+    header.freeSpaceEnd = static_cast<std::uint16_t>(PAGE_SIZE);
+
+    headerWriter.write(header);
+
+    writer.writeUnsigned<std::uint16_t>(indexHeader.level);
+    writer.writeUnsigned<std::uint16_t>(indexHeader.flags);
+    writer.writeUnsigned<std::uint32_t>(indexHeader.firstChildPageId);
+
+    std::uint16_t freeStart = static_cast<std::uint16_t>(PageHeaderLayout::Size + indexHeader.serializedSize());
+    std::uint16_t freeEnd = static_cast<std::uint16_t>(PAGE_SIZE);
+    std::uint16_t slotIndex = 0;
+
+    if (const std::vector<LeafIndexEntry> *leafEntries = std::get_if<std::vector<LeafIndexEntry>>(&entries))
+    {
+        for (const auto &leafEntry : *leafEntries)
+        {
+            std::size_t indexSize{leafEntry.serializedSize()};
+
+            if (indexSize > std::numeric_limits<std::uint16_t>::max())
+            {
+                throw std::runtime_error("index too large for uint16_t slot size");
+            }
+
+            if (freeStart + indexSize + SlotWriter::SlotSize > freeEnd)
+            {
+                throw std::runtime_error("not enough space in data page");
+            }
+
+            std::uint16_t indexOffset = freeStart;
+
+            writer.seek(indexOffset);
+
+            IndexWriter indexWriter(writer);
+            indexWriter.writeIndex(leafEntry);
+
+            std::size_t actualIndexEnd = writer.position();
+            std::size_t expectedIndexEnd = static_cast<std::size_t>(indexOffset) + indexSize;
+
+            if (actualIndexEnd != expectedIndexEnd)
+            {
+                throw std::runtime_error("computed index size does not match written index size");
+            }
+
+            Slot slot{
+                .offset = indexOffset,
+                .size = static_cast<std::uint16_t>(indexSize),
+                .flags = 0};
+
+            slotWriter.writeSlot(slotIndex, slot);
+
+            freeStart = static_cast<std::uint16_t>(expectedIndexEnd);
+            freeEnd -= static_cast<std::uint16_t>(SlotWriter::SlotSize);
+
+            ++slotIndex;
+        }
+    }
+    else if (const std::vector<InternalIndexEntry> *internalEntries = std::get_if<std::vector<InternalIndexEntry>>(&entries))
+    {
+        for (const auto &internalEntry : *internalEntries)
+        {
+            std::size_t indexSize{internalEntry.serializedSize()};
+
+            if (indexSize > std::numeric_limits<std::uint16_t>::max())
+            {
+                throw std::runtime_error("index too large for uint16_t slot size");
+            }
+
+            if (freeStart + indexSize + SlotWriter::SlotSize > freeEnd)
+            {
+                throw std::runtime_error("not enough space in data page");
+            }
+
+            std::uint16_t indexOffset = freeStart;
+
+            writer.seek(indexOffset);
+
+            IndexWriter indexWriter(writer);
+            indexWriter.writeIndex(internalEntry);
+
+            std::size_t actualIndexEnd = writer.position();
+            std::size_t expectedIndexEnd = static_cast<std::size_t>(indexOffset) + indexSize;
+
+            if (actualIndexEnd != expectedIndexEnd)
+            {
+                throw std::runtime_error("computed index size does not match written index size");
+            }
+
+            Slot slot{
+                .offset = indexOffset,
+                .size = static_cast<std::uint16_t>(indexSize),
+                .flags = 0};
+
+            slotWriter.writeSlot(slotIndex, slot);
+
+            freeStart = static_cast<std::uint16_t>(expectedIndexEnd);
+            freeEnd -= static_cast<std::uint16_t>(SlotWriter::SlotSize);
+
+            ++slotIndex;
+        }
+    }
+    else
+    {
+        throw std::runtime_error("Unsupported entry type for index page");
+    }
+
+    headerWriter.setSlotCount(slotIndex);
+    headerWriter.setFreeSpaceStart(freeStart);
+    headerWriter.setFreeSpaceEnd(freeEnd);
 }
 
 DataPageWriter::DataPageWriter(ByteWriter &writer, const HeaderPage &tableHeader)
