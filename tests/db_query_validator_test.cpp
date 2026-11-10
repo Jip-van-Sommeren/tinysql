@@ -61,7 +61,7 @@ namespace
 
         void add(const BoundCreateTable &table)
         {
-            Page page = makeHeaderPage(table.tableName, "test", table.columns, table.constraints);
+            Page page = makeHeaderPage(CreateTablePayload{table.tableName, "test", table.columns, table.constraints});
             Page decoded = decodeHeaderPage(encodePage(page));
             tables.insert_or_assign(table.tableName, std::get<HeaderPage>(std::move(decoded.data)));
         }
@@ -85,6 +85,23 @@ namespace
     BoundInsert insert(QueryValidator &validator, const std::string &sql)
     {
         return std::get<BoundInsert>(bindSql(validator, sql));
+    }
+
+    void testCreateDispatch(MemoryCatalog &catalog, QueryValidator &validator)
+    {
+        create(catalog, validator, "CREATE TABLE index_source (id INT, value INT);");
+        const auto plain = std::get<BoundCreateIndex>(bindSql(validator,
+            "CREATE INDEX by_value ON index_source (value, id);"));
+        require(plain.tableName == "index_source" && plain.name == "by_value" &&
+                    plain.columnIds == std::vector<ColumnId>{1, 0} && !plain.unique,
+                "CREATE INDEX dispatch or key order is incorrect");
+        const auto unique = std::get<BoundCreateIndex>(bindSql(validator,
+            "CREATE UNIQUE INDEX by_id ON index_source (id);"));
+        require(unique.tableName == "index_source" && unique.name == "by_id" &&
+                    unique.columnIds == std::vector<ColumnId>{0} && unique.unique,
+                "CREATE UNIQUE INDEX dispatch is incorrect");
+        for (const std::string sql : {"CREATE", "CREATE UNIQUE", "CREATE UNIQUE TABLE invalid (id INT);"})
+            requireThrows([&] { bindSql(validator, sql); }, "Expected SQL statement");
     }
 
     void testDefaults(MemoryCatalog &catalog, QueryValidator &validator)
@@ -458,6 +475,7 @@ int main()
 {
     MemoryCatalog catalog;
     QueryValidator validator{catalog};
+    testCreateDispatch(catalog, validator);
     testDefaults(catalog, validator);
     testDefaultErrors(catalog, validator);
     testLiteralConversions(catalog, validator);

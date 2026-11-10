@@ -16,7 +16,7 @@
 #include "db_storage.h"
 #include "db_sql_parser.h"
 #include "db_read.h"
-#include "db_storage_engine.h"
+#include "db_catalog.h"
 
 using TableId = std::uint32_t;
 

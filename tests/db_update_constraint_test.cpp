@@ -2,6 +2,7 @@
 #include "db_page_file.h"
 #include "db_sql_lexer.h"
 #include "db_storage_engine.h"
+#include "db_query_validator.h"
 #include "db_test_directory.h"
 #include "db_write.h"
 
@@ -37,7 +38,7 @@ namespace
             {
                 using T = std::decay_t<decltype(bound)>;
                 if constexpr (std::is_same_v<T, BoundCreateTable>)
-                    engine.createTable(bound.tableName, "test", bound.columns, bound.constraints);
+                    engine.createTable(bound);
                 else if constexpr (std::is_same_v<T, BoundInsert>)
                     engine.insertRows(bound);
                 else if constexpr (std::is_same_v<T, BoundDelete>)

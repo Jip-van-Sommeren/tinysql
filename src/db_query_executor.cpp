@@ -1,4 +1,5 @@
 #include "db_query_executor.h"
+#include "db_storage_engine.h"
 #include "db_decimal.h"
 #include "db_expression_evaluator.h"
 #include "db_query_validator.h"
@@ -648,11 +649,7 @@ QueryResult QueryExecutor::executeStatement(
 
     try
     {
-        storageEngine_.createTable(
-            createTable.tableName,
-            dbName_,
-            createTable.columns,
-            createTable.constraints);
+        storageEngine_.createTable(createTable);
     }
     catch (...)
     {
@@ -676,8 +673,7 @@ QueryResult QueryExecutor::executeStatement(
 
     try
     {
-        storageEngine_.createIndex(
-            createIndex);
+        storageEngine_.createIndex(createIndex);
     }
     catch (...)
     {

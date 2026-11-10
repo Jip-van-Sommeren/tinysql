@@ -488,7 +488,7 @@ private:
     bool isAtEnd() const;
     const Token &advance();
     bool check(TokenType type) const;
-    bool checkKeyword(const std::string &keyword) const;
+    bool checkKeyword(const std::string &keyword, std::size_t lookahead = 0) const;
     bool match(TokenType type);
     bool matchKeyword(const std::string &keyword);
     bool checkOperator(const std::string &op) const;

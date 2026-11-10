@@ -101,15 +101,15 @@ namespace
         StatementRecovery recovery{LinuxDirectory{path}, identity.bytes};
         BufferManager manager{LinuxDirectory{path / "tables"}, relativeFile.filename(), LinuxFile::OpenMode::OpenExisting, recovery};
         {
-            auto guard = manager.getDataPage(1);
+            auto guard = manager.getPage<DataPage>(1);
             requireThrows([&]
                           { guard.write<DataPage>(); }, "active statement");
         }
         recovery.begin();
         {
-            auto first = manager.getDataPage(1);
+            auto first = manager.getPage<DataPage>(1);
             {
-                const auto second = manager.getDataPage(1);
+                const auto second = manager.getPage<DataPage>(1);
                 require(&first.page() == &second.page(),
                         "Guards do not reference the same cached page");
                 first.write<DataPage>().rows.at(0).row.values.at(0) = std::int32_t{42};
@@ -121,9 +121,9 @@ namespace
             const Page *address = &first.page();
             for (PageId id = 2; id < 128; ++id)
             {
-                manager.getDataPage(id);
+                manager.getPage<DataPage>(id);
             }
-            const auto again = manager.getDataPage(1);
+            const auto again = manager.getPage<DataPage>(1);
             require(&again.page() == address, "Cache growth invalidated a guard");
             manager.flushPage(1);
             manager.sync();
@@ -131,7 +131,7 @@ namespace
         recovery.commit();
 
         BufferManager reopened{LinuxDirectory{path / "tables"}, relativeFile.filename(), LinuxFile::OpenMode::OpenExisting, recovery};
-        require(std::get<std::int32_t>(reopened.getDataPage(1).as<DataPage>().rows.at(0).row.values.at(0)) == 42,
+        require(std::get<std::int32_t>(reopened.getPage<DataPage>(1).as<DataPage>().rows.at(0).row.values.at(0)) == 42,
                 "Dirty page changes did not survive reopening");
 
         // Initialization replaces cached page zero through the public API. It
@@ -140,7 +140,7 @@ namespace
         BufferManager pins{LinuxDirectory{path / "tables"}, "pins.table", LinuxFile::OpenMode::CreateNew, recovery};
         auto initialize = [&]
         {
-            pins.initializeNewTable("pins", "test", schema.columns, schema.constraints);
+            pins.initializeNewTable(CreateTablePayload{"pins", "test", schema.columns, schema.constraints});
         };
         initialize();
         {
@@ -162,7 +162,7 @@ namespace
         }
         {
             auto source = pins.getHeaderPage();
-            auto target = pins.getDataPage(1);
+            auto target = pins.getPage<DataPage>(1);
             target = std::move(source);
             requireThrows(initialize, "pinned");
             auto &self = target;
@@ -173,7 +173,7 @@ namespace
         BufferManager otherPins{LinuxDirectory{path / "tables"}, "other-pins.table", LinuxFile::OpenMode::CreateNew, recovery};
         auto initializeOther = [&]
         {
-            otherPins.initializeNewTable("other-pins", "test", schema.columns, schema.constraints);
+            otherPins.initializeNewTable(CreateTablePayload{"other-pins", "test", schema.columns, schema.constraints});
         };
         initializeOther();
         {
@@ -194,18 +194,18 @@ namespace
             "unwind test");
         initialize();
 
-        // Both guards acquired by getDataPage must release on validation failure.
+        // Both guards acquired by getPage<DataPage> must release on validation failure.
         requireThrows([&]
-                      { pins.getDataPage(0); }, "not a data page");
+                      { pins.getPage<DataPage>(0); }, "not a DataPage");
         initialize();
 
         BufferManager invalidHeader{LinuxDirectory{path / "tables"}, relativeFile.filename(), LinuxFile::OpenMode::OpenExisting, recovery};
         invalidHeader.getPage(0, [](const RawPage &)
                               { return makeEmptyDataPage(0); });
         requireThrows([&]
-                      { invalidHeader.getHeaderPage(); }, "not a table header");
+                      { invalidHeader.getHeaderPage(); }, "not a header page");
         requireThrows([&]
-                      { invalidHeader.initializeNewTable("guard_values", "test", schema.columns, schema.constraints); }, "new, unwritten table");
+                      { invalidHeader.initializeNewTable(CreateTablePayload{"guard_values", "test", schema.columns, schema.constraints}); }, "new, unwritten table");
 
         BufferManager decodeFailure{LinuxDirectory{path / "tables"}, relativeFile.filename(), LinuxFile::OpenMode::OpenExisting, recovery};
         requireThrows(
@@ -215,9 +215,9 @@ namespace
                                       { throw std::runtime_error("decode failure"); });
             },
             "decode failure");
-        decodeFailure.getDataPage(1);
+        decodeFailure.getPage<DataPage>(1);
         requireThrows([&]
-                      { decodeFailure.initializeNewTable("guard_values", "test", schema.columns, schema.constraints); }, "new, unwritten table");
+                      { decodeFailure.initializeNewTable(CreateTablePayload{"guard_values", "test", schema.columns, schema.constraints}); }, "new, unwritten table");
         recovery.rollback();
     }
 
@@ -242,7 +242,7 @@ namespace
         database.executeSql(insertSql + ";");
         {
             BufferManager manager{LinuxDirectory{path / "tables"}, relativeFile.filename(), LinuxFile::OpenMode::OpenExisting, recovery};
-            auto first = manager.getDataPage(1);
+            auto first = manager.getPage<DataPage>(1);
             require(first.as<DataPage>().rows.size() == 2 && first.page().nextPageId() != 0,
                     "Cursor fixture did not span multiple pages");
         }
@@ -420,7 +420,7 @@ namespace
         recovery.begin();
         {
             BufferManager manager{LinuxDirectory{path / "tables"}, relativeFile.filename(), LinuxFile::OpenMode::OpenExisting, recovery};
-            auto page = manager.getDataPage(1);
+            auto page = manager.getPage<DataPage>(1);
             page.writePage().header.nextPageId = 50; // Deliberately missing next page.
             manager.flushPage(1);
             manager.sync();
@@ -465,7 +465,7 @@ namespace
             metadata.nextUnusedPageId = highId + 1;
             manager.insertRows({Row{{std::int32_t{42}}}});
             metadata.firstDataPageId = 1;
-            auto first = manager.getDataPage(1);
+            auto first = manager.getPage<DataPage>(1);
             first.writePage().header.nextPageId = highId;
             manager.flushAll();
             manager.sync();

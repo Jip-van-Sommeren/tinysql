@@ -95,6 +95,24 @@ private:
     std::vector<ColumnId> decodeColumnIds();
 };
 
+class IndexHeaderPageDecoder
+{
+public:
+    explicit IndexHeaderPageDecoder(ByteReader &decoder);
+
+    Page decode();
+
+private:
+    ByteReader &decoder;
+    PageHeaderDecoder pageHeaderDecoder;
+
+    Column decodeColumn();
+    ColumnStorage decodeColumnStorage();
+    BoundConstraint decodeConstraint();
+    std::unique_ptr<BoundExpr> decodeExpression();
+    std::vector<ColumnId> decodeColumnIds();
+};
+
 class ValueDeserializer
 {
 public:
@@ -187,4 +205,5 @@ auto decodePage(const RawPage &buffer, Reader reader)
 bool isValidPageType(std::uint8_t value);
 PageHeader decodePageHeader(const RawPage &page);
 Page decodeHeaderPage(const RawPage &page);
+Page decodeIndexHeaderPage(const RawPage &page);
 Page decodeDataPage(const RawPage &page, const HeaderPage &headerPage);

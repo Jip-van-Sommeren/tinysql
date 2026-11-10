@@ -186,6 +186,17 @@ private:
     void writeColumnStorage(const ColumnStorage &storage);
 };
 
+class IndexHeaderPageWriter
+{
+public:
+    explicit IndexHeaderPageWriter(ByteWriter &writer);
+
+    void write(const IndexHeaderPage &header);
+
+private:
+    ByteWriter &writer;
+};
+
 class DataPageWriter
 {
 public:

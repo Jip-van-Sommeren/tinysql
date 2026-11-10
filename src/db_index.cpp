@@ -17,7 +17,6 @@ Index Index::open(const LinuxDirectory &indexDir, const std::filesystem::path &r
 
 Index Index::create(const LinuxDirectory &indexDir,
                     const CreateIndexPayload &createIndexPayload,
-
                     StatementRecovery &statementRecovery)
 {
     Index index{indexDir, createIndexPayload.indexName + ".index", LinuxFile::OpenMode::CreateNew, statementRecovery};
@@ -27,11 +26,12 @@ Index Index::create(const LinuxDirectory &indexDir,
 
 void Index::validateHeaderPage()
 {
+    bufferManager_.getIndexHeaderPage();
 }
 
 void Index::initializeNewIndex(const CreateIndexPayload &createIndexPayload)
 {
-    bufferManager_.initializeNew(createIndexPayload);
+    bufferManager_.initializeNewIndex(createIndexPayload);
     bufferManager_.flushAll();
     bufferManager_.sync();
 }

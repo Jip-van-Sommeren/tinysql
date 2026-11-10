@@ -43,10 +43,7 @@ class Table
 public:
     static Table create(
         const LinuxDirectory &tablesDir,
-        const std::string &tableName,
-        const std::string &magic,
-        const std::vector<Column> &columns,
-        const std::vector<BoundConstraint> &constraints, StatementRecovery &statementRecovery);
+        const CreateTablePayload &payload, StatementRecovery &statementRecovery);
 
     static Table open(const LinuxDirectory &dbRoot, const std::filesystem::path &relTablePath, StatementRecovery &statementRecovery);
 
@@ -65,9 +62,6 @@ private:
     BufferManager bufferManager;
 
     void initializeNewTable(
-        const std::string &tableName,
-        const std::string &magic,
-        const std::vector<Column> &columns,
-        const std::vector<BoundConstraint> &constraints);
+        const CreateTablePayload &payload);
     void validateHeaderPage();
 };

@@ -101,6 +101,43 @@ PageHeader PageHeaderDecoder::decode()
     return header;
 }
 
+IndexHeaderPageDecoder::IndexHeaderPageDecoder(ByteReader &decoder)
+    : decoder(decoder), pageHeaderDecoder(decoder) {}
+
+Page IndexHeaderPageDecoder::decode()
+{
+    PageHeader pageHeader = pageHeaderDecoder.decode();
+
+    if (pageHeader.pageType != PageType::IndexHeaderPage)
+    {
+        throw std::runtime_error("Expected header page");
+    }
+
+    IndexHeaderPage headerPage;
+    headerPage.magic = decoder.readString();
+    headerPage.version = decoder.readUnsigned<std::uint16_t>();
+    headerPage.pageSize = decoder.readUnsigned<std::uint32_t>();
+    headerPage.indexName = decoder.readString();
+    headerPage.tableName = decoder.readString();
+
+    std::uint32_t columnCount = decoder.readUnsigned<std::uint32_t>();
+    headerPage.keyColumns.reserve(columnCount);
+
+    for (std::uint32_t i = 0; i < columnCount; ++i)
+    {
+        headerPage.keyColumns.push_back(decoder.readUnsigned<std::uint32_t>());
+    }
+
+    headerPage.unique = static_cast<bool>(decoder.readUnsigned<std::uint8_t>());
+
+    headerPage.rootPageId = decoder.readUnsigned<std::uint32_t>();
+    headerPage.nextUnusedPageId = decoder.readUnsigned<std::uint32_t>();
+
+    return Page{
+        .header = pageHeader,
+        .data = std::move(headerPage)};
+}
+
 HeaderPageDecoder::HeaderPageDecoder(ByteReader &decoder)
     : decoder(decoder), pageHeaderDecoder(decoder) {}
 
@@ -707,6 +744,13 @@ Page decodeHeaderPage(const RawPage &page)
 {
     ByteReader decoder(page.bytes);
     HeaderPageDecoder headerPageDecoder(decoder);
+    return headerPageDecoder.decode();
+}
+
+Page decodeIndexHeaderPage(const RawPage &page)
+{
+    ByteReader decoder(page.bytes);
+    IndexHeaderPageDecoder headerPageDecoder(decoder);
     return headerPageDecoder.decode();
 }
 

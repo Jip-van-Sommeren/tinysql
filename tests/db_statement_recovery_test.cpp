@@ -176,7 +176,10 @@ namespace
         auto engine = StorageEngine::create(root);
         engine.beginStatement();
         // Header serialization throws after the file has been created.
-        requireError([&] { engine.createTable("items", std::string(PAGE_SIZE * 2, 'x'), {}, {}); }, "bounds");
+        Column oversizedColumn{};
+        oversizedColumn.name = std::string(PAGE_SIZE * 2, 'x');
+        oversizedColumn.type = DataType::Int;
+        requireError([&] { engine.createTable(BoundCreateTable{"items", {oversizedColumn}, {}}); }, "bounds");
         engine.rollbackStatement();
         require(!engine.tableExists("items"), "Header construction failure left an untracked file");
     }
@@ -218,7 +221,7 @@ namespace
         const Path root = directory.path / "db";
         auto engine = StorageEngine::create(root);
         engine.beginStatement();
-        { auto table = engine.createTable("items", "test", {}, {}); }
+        { auto table = engine.createTable(BoundCreateTable{"items", {}, {}}); }
         Probe probe{};
         probe.root = root;
         probe.target = root / "tables/items.table";
@@ -251,7 +254,7 @@ namespace
         std::vector<std::byte> before;
         {
             engine.beginStatement();
-            auto table = engine.createTable("items", "test", schema.columns, schema.constraints);
+            auto table = engine.createTable(BoundCreateTable{"items", schema.columns, schema.constraints});
             engine.commitStatement();
             engine.beginStatement();
             table.insertRows(BoundInsert{.tableName = "items", .rows = {Row{{std::int32_t{1}}}}});
@@ -290,7 +293,7 @@ namespace
             require(!recovery.isActive(), "Failed begin left active state");
         }
         std::filesystem::remove(journal);
-        requireError([&] { engine.createTable("no_statement", "test", {}, {}); }, "active statement");
+        requireError([&] { engine.createTable(BoundCreateTable{"no_statement", {}, {}}); }, "active statement");
         require(!engine.tableExists("no_statement"), "Creation without a statement touched disk");
         for (int statement = 0; statement < 3; ++statement)
         {
@@ -375,7 +378,7 @@ namespace
             a.flushPage(0);
             require(eventCount(probe, "sync", journal) == 2,
                     "Already-covered single-page write repeated the barrier");
-            b.getDataPage(1).write<DataPage>().rows[0].row.values[0] = std::int32_t{2};
+            b.getPage<DataPage>(1).write<DataPage>().rows[0].row.values[0] = std::int32_t{2};
             b.flushAll();
             require(eventCount(probe, "sync", journal) == 4,
                     "A batch must use exactly one two-sync publication");
@@ -772,7 +775,7 @@ namespace
         probe.skipMatches = 1;
         {
             Observe observe{probe};
-            requireError([&] { manager.getDataPage(1).write<DataPage>(); }, "pwrite");
+            requireError([&] { manager.getPage<DataPage>(1).write<DataPage>(); }, "pwrite");
             requireError([&] { recovery.commit(); }, "recovery is required");
             requireError([&] { manager.getHeaderPage(); }, "recovery is required");
         }
@@ -906,7 +909,7 @@ namespace
                 table.insertRows({.tableName = "items", .rows = {
                     Row{{std::int32_t{2}, std::string(1500, 'b')}},
                     Row{{std::int32_t{3}, std::string(1500, 'c')}}}});
-                { auto added = engine.createTable("added", "test", {}, {}); }
+                { auto added = engine.createTable(BoundCreateTable{"added", {}, {}}); }
                 require(readFile(root / "tables/items.table").size() > before.size(), "Retry fixture did not grow");
                 Probe probe{};
                 probe.root = root;

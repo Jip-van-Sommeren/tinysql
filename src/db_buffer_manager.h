@@ -82,16 +82,13 @@ public:
     PageGuard getPage(PageId pageId, const PageReader &reader);
     PageGuard getHeaderPage();
 
+    PageGuard getIndexHeaderPage();
+
     template <PagePayload T>
     PageGuard getPage(PageId pageId);
 
-    void initializeNewTable(const std::string &tableName,
-                            const std::string &magic,
-                            const std::vector<Column> &columns,
-                            const std::vector<BoundConstraint> &constraints);
-
-    template <typename T, PagePayload P>
-    void initializeNew(const T &payload);
+    void initializeNewTable(const CreateTablePayload &createTablePayload);
+    void initializeNewIndex(const CreateIndexPayload &CreateIndexPayload);
 
     void insertRows(const std::vector<Row> &rows);
     void insertRow(const Row &row);

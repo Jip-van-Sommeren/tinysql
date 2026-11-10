@@ -70,8 +70,7 @@ enum class PageType : uint8_t
     OverflowPage = 3,
     FreePage = 4,
     HeaderPage = 5,
-    IndexHeaderPage = 6,
-    TableHeaderPage = 7
+    IndexHeaderPage = 6
 };
 
 struct PageHeader
@@ -117,7 +116,7 @@ struct HeaderPage
     }
 };
 
-struct IndexMetadataPage
+struct IndexHeaderPage
 {
     std::string magic = "MYIX";
     std::uint16_t version = 1;
@@ -135,6 +134,22 @@ struct IndexMetadataPage
     {
         return PageType::IndexHeaderPage;
     }
+};
+
+struct CreateIndexPayload
+{
+    std::string indexName;
+    std::string tableName;
+    std::string magic;
+    std::vector<ColumnId> columns;
+};
+
+struct CreateTablePayload
+{
+    std::string tableName;
+    std::string magic;
+    std::vector<Column> columns;
+    std::vector<BoundConstraint> constraints;
 };
 
 // [PageHeader][slots...][free space...][row payload bytes...]
@@ -236,7 +251,7 @@ struct IndexPage
     }
 };
 
-using PageData = std::variant<HeaderPage, DataPage, IndexPage>;
+using PageData = std::variant<HeaderPage, DataPage, IndexPage, IndexHeaderPage>;
 
 struct Page
 {

@@ -283,11 +283,11 @@ namespace
 
     void testPageCompatibility()
     {
-        const Page header = makeHeaderPage("items", "MYDB", {
+        const Page header = makeHeaderPage(CreateTablePayload{"items", "MYDB", {
             Column{.name = "id", .type = DataType::Int, .nullable = false,
                    .columnIndex = 0, .storage = FixedColumnStorage{}},
             Column{.name = "name", .type = DataType::Text, .nullable = true,
-                   .columnIndex = 1, .storage = VarColumnStorage{}}}, {});
+                   .columnIndex = 1, .storage = VarColumnStorage{}}}, {}});
         const HeaderPage &schema = std::get<HeaderPage>(header.data);
         const std::vector<Row> rows{
             Row{{std::int32_t{0x12345678}, std::string{"a\0b", 3}}},

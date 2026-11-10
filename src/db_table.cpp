@@ -1,7 +1,6 @@
 #include "db_table.h"
 
 #include "db_expression_evaluator.h"
-#include "db_page_factory.h"
 #include "db_query_validator.h"
 
 #include <algorithm>
@@ -115,14 +114,11 @@ std::optional<Row> TableCursor::next()
 
 Table Table::create(
     const LinuxDirectory &tablesDir,
-    const std::string &tableName,
-    const std::string &magic,
-    const std::vector<Column> &columns,
-    const std::vector<BoundConstraint> &constraints,
+    const CreateTablePayload &payload,
     StatementRecovery &statementRecovery)
 {
-    Table table{tablesDir, tableName + ".table", LinuxFile::OpenMode::CreateNew, statementRecovery};
-    table.initializeNewTable(tableName, magic, columns, constraints);
+    Table table{tablesDir, payload.tableName + ".table", LinuxFile::OpenMode::CreateNew, statementRecovery};
+    table.initializeNewTable(payload);
     return table;
 }
 
@@ -184,12 +180,10 @@ Table::Table(const LinuxDirectory &tablesDir, const std::filesystem::path &relTa
 }
 
 void Table::initializeNewTable(
-    const std::string &tableName,
-    const std::string &magic,
-    const std::vector<Column> &columns,
-    const std::vector<BoundConstraint> &constraints)
+    const CreateTablePayload &payload)
 {
-    bufferManager.initializeNewTable(tableName, magic, columns, constraints);
+    // bufferManager.initializeNewTable(tableName, magic, columns, constraints);
+    bufferManager.initializeNewTable(payload);
     bufferManager.flushAll();
     bufferManager.sync();
 }

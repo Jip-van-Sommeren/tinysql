@@ -5,6 +5,7 @@
 
 struct BoundSelect;
 class Table;
+class StorageEngine;
 
 class SelectExecutor
 {

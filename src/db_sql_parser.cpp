@@ -207,17 +207,17 @@ Statement Parser::parseStatement()
     }
     if (checkKeyword("CREATE"))
     {
-        if (checkKeyword("TABLE"))
+        if (checkKeyword("TABLE", 1))
         {
             return parseCreateTableStatement();
         }
-        else if (checkKeyword("INDEX"))
+        else if (checkKeyword("INDEX", 1))
         {
-            parseCreateIndexStatement(false);
+            return parseCreateIndexStatement(false);
         }
-        else if (checkKeyword("UNIQUE") && checkKeyword("INDEX"))
+        else if (checkKeyword("UNIQUE", 1) && checkKeyword("INDEX", 2))
         {
-            parseCreateIndexStatement(true);
+            return parseCreateIndexStatement(true);
         }
     }
 
@@ -834,9 +834,12 @@ bool Parser::check(TokenType type) const
     return peek().type == type;
 }
 
-bool Parser::checkKeyword(const std::string &keyword) const
+bool Parser::checkKeyword(const std::string &keyword, std::size_t lookahead) const
 {
-    return peek().type == TokenType::Keyword && peek().text == keyword;
+    if (lookahead >= tokens.size() - pos)
+        return false;
+    const Token &token = tokens[pos + lookahead];
+    return token.type == TokenType::Keyword && token.text == keyword;
 }
 
 bool Parser::match(TokenType type)

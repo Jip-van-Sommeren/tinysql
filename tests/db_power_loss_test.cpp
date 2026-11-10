@@ -139,6 +139,7 @@ namespace
     {
         std::filesystem::remove_all(root);
         std::filesystem::create_directories(root / "tables");
+        std::filesystem::create_directories(root / "indexes");
         std::filesystem::create_directories(root / "journal");
         for (const auto &[name, bytes] : image)
         {
@@ -271,7 +272,7 @@ namespace
         second.insertRows({.tableName = "other", .rows = {Row{{std::int32_t{2}, std::string(1500, 'd')}}}});
         // Append new before-images after earlier database writes and rotate both
         // boundary slots several times within the same statement.
-        { auto added = engine.createTable("added", "test", {}, {}); }
+        { auto added = engine.createTable(BoundCreateTable{"added", {}, {}}); }
         first.insertRows({.tableName = "items", .rows = {Row{{std::int32_t{4}, std::string(1500, 'e')}}}});
     }
 
@@ -303,7 +304,7 @@ namespace
             engine.beginStatement();
             auto table = engine.openTable("items");
             table.insertRows({.tableName = "items", .rows = {Row{{std::int32_t{5}, std::string(1500, 'f')}}}});
-            { auto added = engine.createTable("abandoned", "test", {}, {}); }
+            { auto added = engine.createTable(BoundCreateTable{"abandoned", {}, {}}); }
         }
         Model recovery{root};
         {

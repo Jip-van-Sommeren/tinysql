@@ -715,6 +715,30 @@ void PageHeaderWriter::setNextPageId(std::uint32_t nextPageId)
     writer.writeUnsignedAt<std::uint32_t>(PageHeaderLayout::NextPageId, nextPageId);
 }
 
+IndexHeaderPageWriter::IndexHeaderPageWriter(ByteWriter &writer) : writer(writer) {}
+
+void IndexHeaderPageWriter::write(const IndexHeaderPage &header)
+{
+    writer.writeString(header.magic);
+    writer.writeUnsigned<std::uint16_t>(header.version);
+    writer.writeUnsigned<std::uint32_t>(header.pageSize);
+    writer.writeString(header.indexName);
+    writer.writeString(header.tableName);
+
+    if (header.keyColumns.size() > std::numeric_limits<std::uint32_t>::max())
+    {
+        throw std::overflow_error("Too many index key columns");
+    }
+    writer.writeUnsigned<std::uint32_t>(static_cast<std::uint32_t>(header.keyColumns.size()));
+    for (const auto &col : header.keyColumns)
+    {
+        writer.writeUnsigned<std::uint32_t>(col);
+    }
+    writer.writeUnsigned<std::uint8_t>(static_cast<std::uint8_t>(header.unique));
+    writer.writeUnsigned<std::uint32_t>(header.rootPageId);
+    writer.writeUnsigned<std::uint32_t>(header.nextUnusedPageId);
+}
+
 HeaderPageWriter::HeaderPageWriter(ByteWriter &writer)
     : writer(writer) {}
 

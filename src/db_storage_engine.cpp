@@ -1,6 +1,9 @@
 #include "db_storage_engine.h"
+#include "db_query_validator.h"
 #include "db_linux_file.h"
 #include "db_write.h"
+#include "db_table.h"
+#include "db_index.h"
 #include "db_constraint_validator.h"
 #include "db_expression_evaluator.h"
 
@@ -98,8 +101,8 @@ StorageEngine::StorageEngine(
     : dbPath_(path),
       dbRootDirectory_(std::move(lockedRoot)),
       tablesDirectory_(dbPath_ / "tables"),
-      journalDirectory_(dbPath_ / "journal"),
       indexDirectory_(dbPath_ / "indexes"),
+      journalDirectory_(dbPath_ / "journal"),
       statementRecovery_(dbRootDirectory_, dbId)
 {
 }
@@ -310,8 +313,16 @@ QueryResult StorageEngine::deleteRows(const BoundDelete &del)
         .returnsRows = false};
 }
 
-QueryResult StorageEngine::createIndex(const BoundCreateIndex &createIndex)
+Index StorageEngine::createIndex(const BoundCreateIndex &createIndex)
 {
+    requireReadable();
+    if (tablesDirectory_.entryExists(createIndex.name + ".index"))
+    {
+        throw std::runtime_error("Index already exists: " + createIndex.name);
+    }
+    CreateIndexPayload createIndexPayload{.indexName = createIndex.name, .tableName = createIndex.tableName, .magic = "MYIX", .columns = createIndex.columnIds};
+
+    return Index::create(indexDirectory_, createIndexPayload, statementRecovery_);
 }
 
 bool StorageEngine::tableExists(const std::string &name) const
@@ -338,31 +349,24 @@ HeaderPage StorageEngine::getTableHeader(const std::string &tableName) const
 }
 
 Table StorageEngine::createTable(
-    const std::string &tableName,
-    const std::string &magic,
-    const std::vector<Column> &columns,
-    const std::vector<BoundConstraint> &constraints)
+    const BoundCreateTable &createTable)
 {
     requireReadable();
-    if (tablesDirectory_.entryExists(tableName + ".table"))
+    if (tablesDirectory_.entryExists(createTable.tableName + ".table"))
     {
-        throw std::runtime_error("Table already exists: " + tableName);
+        throw std::runtime_error("Table already exists: " + createTable.tableName);
     }
 
     StorageConstraintLookup lookup{*this};
     ConstraintValidator constraintValidator{lookup};
 
-    const auto validationResult = constraintValidator.validateFkConstraintForTableCreation(constraints, *this);
+    const auto validationResult = constraintValidator.validateFkConstraintForTableCreation(createTable.constraints, *this);
     if (!validationResult.valid)
         throw std::runtime_error(validationResult.message.value());
 
     return Table::create(
         tablesDirectory_,
-
-        tableName,
-        magic,
-        columns,
-        constraints,
+        CreateTablePayload{.tableName = createTable.tableName, .magic = "MYDB", .columns = createTable.columns, .constraints = createTable.constraints},
         statementRecovery_);
 }
 

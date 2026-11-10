@@ -1,11 +1,11 @@
 #pragma once
 
 #include "db_table.h"
+#include "db_index.h"
 #include "db_catalog.h"
 #include "db_journal_file.h"
 #include "db_read.h"
 #include "db_query_result.h"
-#include "db_query_validator.h"
 
 #include <filesystem>
 #include <string>
@@ -14,6 +14,8 @@
 struct BoundInsert;
 struct BoundDelete;
 struct BoundUpdate;
+struct BoundCreateTable;
+struct BoundCreateIndex;
 
 class StorageEngine final : public Catalog
 {
@@ -25,10 +27,7 @@ public:
     HeaderPage getTableHeader(const std::string &name) const override;
 
     Table createTable(
-        const std::string &tableName,
-        const std::string &magic,
-        const std::vector<Column> &columns,
-        const std::vector<BoundConstraint> &constraints);
+        const BoundCreateTable &createTable);
     Table openTable(const std::string &tableName);
     void requireReadable() const { statementRecovery_.requireReadable(); }
     void syncTablesDirectory()
@@ -58,7 +57,7 @@ public:
     QueryResult deleteRows(const BoundDelete &del);
     QueryResult updateRows(const BoundUpdate &update);
 
-    QueryResult createIndex(const BoundCreateIndex &createIndex);
+    Index createIndex(const BoundCreateIndex &createIndex);
 
     // const std::filesystem::path &getTablesPath() const;
 

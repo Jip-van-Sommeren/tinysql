@@ -83,7 +83,7 @@ namespace
             StorageEngine engine = StorageEngine::open(root);
             require(engine.tableExists("items"), "Catalog did not resolve the database root");
             requireError([&]
-                         { engine.createTable("items", "test", {}, {}); }, "Table already exists");
+                         { engine.createTable(BoundCreateTable{"items", {}, {}}); }, "Table already exists");
             requireError([&]
                          { engine.openTable("missing"); }, "Table does not exist");
             require(!std::filesystem::exists(root / "tables/missing.table"),
@@ -201,7 +201,7 @@ namespace
             engine.beginStatement();
             auto table = engine.openTable("items");
             table.insertRows({.tableName = "items", .rows = {Row{{std::int32_t{2}}}}});
-            auto created = engine.createTable("uncommitted", "test", schema.columns, schema.constraints);
+            auto created = engine.createTable(BoundCreateTable{"uncommitted", schema.columns, schema.constraints});
         } // Close handles without retiring the durable undo journal.
         const auto changed = readFile(tablePath);
         const auto originalJournal = readFile(journalPath);
@@ -346,7 +346,7 @@ namespace
         auto engine = StorageEngine::create(root);
         engine.beginStatement();
         {
-            auto table = engine.createTable("items", "test", {}, {});
+            auto table = engine.createTable(BoundCreateTable{"items", {}, {}});
         }
         const auto journalPath = root / "journal/journal.log";
         const auto original = readFile(journalPath);

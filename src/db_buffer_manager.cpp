@@ -220,7 +220,17 @@ PageGuard BufferManager::getHeaderPage()
     PageGuard header = getPage(PageId{0}, decodeHeaderPage);
     if (header.page().header.pageType != PageType::HeaderPage)
     {
-        throw std::runtime_error("Page 0 is not a table header page");
+        throw std::runtime_error("Page 0 is not a header page");
+    }
+    return header;
+}
+
+PageGuard BufferManager::getIndexHeaderPage()
+{
+    PageGuard header = getPage(PageId{0}, decodeIndexHeaderPage);
+    if (header.page().header.pageType != PageType::IndexHeaderPage)
+    {
+        throw std::runtime_error("Page 0 is not a header page");
     }
     return header;
 }
@@ -732,8 +742,7 @@ void BufferManager::appendRowToExistingDataPage(
     ++headerPage.totalRowCount;
 }
 
-template <typename T, PagePayload P>
-void BufferManager::initializeNew(const T &payload)
+void BufferManager::initializeNewTable(const CreateTablePayload &createTablePayload)
 {
     requireReadable();
     if (!statementRecovery_.isNewFile(relativeTablePath_) || pageFile_.size() != 0)
@@ -741,16 +750,13 @@ void BufferManager::initializeNew(const T &payload)
         throw std::logic_error("Can only initialize a new, unwritten table in the active statement");
     }
 
-    Page headerPage = makeHeaderPage<T>(magic, payload);
-    Page dataPage = makeEmptyPage<P>(FirstDataPageId);
+    Page headerPage = makeHeaderPage(createTablePayload);
+    Page dataPage = makeEmptyPage<DataPage>(FirstDataPageId);
     setPage(headerPage, headerPage.pageId());
     setPage(dataPage, headerPage.nextPageId());
 }
 
-void BufferManager::initializeNewTable(const std::string &tableName,
-                                       const std::string &magic,
-                                       const std::vector<Column> &columns,
-                                       const std::vector<BoundConstraint> &constraints)
+void BufferManager::initializeNewIndex(const CreateIndexPayload &createIndexPayload)
 {
     requireReadable();
     if (!statementRecovery_.isNewFile(relativeTablePath_) || pageFile_.size() != 0)
@@ -758,8 +764,8 @@ void BufferManager::initializeNewTable(const std::string &tableName,
         throw std::logic_error("Can only initialize a new, unwritten table in the active statement");
     }
 
-    Page headerPage = makeHeaderPage(tableName, magic, columns, constraints);
-    Page dataPage = makeEmptyPage<DataPage>(FirstDataPageId);
+    Page headerPage = makeHeaderPage(createIndexPayload);
+    Page dataPage = makeEmptyPage<IndexPage>(FirstDataPageId);
     setPage(headerPage, headerPage.pageId());
     setPage(dataPage, headerPage.nextPageId());
 }
@@ -793,9 +799,9 @@ PageId BufferManager::createPage(PageGuard &header)
     }
 
     Page newDataPage = makeEmptyPage<T>(newPageId);
-    if (newDataPage.header.pageType != PageType::IndexPage)
+    if (newDataPage.header.pageType != T::type())
     {
-        throw std::runtime_error("New page is not an index page");
+        throw std::runtime_error("New page has the wrong page type");
     }
 
     headerPage.lastDataPageId = newPageId;
