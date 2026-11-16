@@ -93,6 +93,7 @@ private:
     bool initializing_ = false;
     bool journalPublished_ = false;
 
+    LinuxDirectory fileDirectory(const std::filesystem::path &path) const;
     void requireWritableStatement() const;
     void finish();
 };

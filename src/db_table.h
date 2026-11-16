@@ -35,7 +35,7 @@ private:
     PageId pageId_;
     std::size_t rowIndex_ = 0;
     std::optional<PageGuard> currentPage_;
-    std::unordered_set<std::uint32_t> seenPageIds_;
+    std::uint64_t remainingPages_ = 0;
 };
 
 class Table
@@ -47,7 +47,7 @@ public:
 
     static Table open(const LinuxDirectory &dbRoot, const std::filesystem::path &relTablePath, StatementRecovery &statementRecovery);
 
-    void insertRows(const BoundInsert &insert);
+    std::vector<LocatedRow> insertRows(const BoundInsert &insert);
     void updateRows(const std::vector<LocatedRow> &updateRows);
 
     TableCursor scan() &;
@@ -57,7 +57,11 @@ public:
 private:
     friend class TableCursor;
 
-    explicit Table(const LinuxDirectory &tablesDir, const std::filesystem::path &relTablePath, LinuxFile::OpenMode mode, StatementRecovery &statementRecovery);
+    explicit Table(const LinuxDirectory &tablesDir,
+                   const std::filesystem::path &relTablePath,
+                   LinuxFile::OpenMode mode,
+                   StatementRecovery &statementRecovery,
+                   std::optional<std::vector<Column>> schema);
 
     BufferManager bufferManager;
 

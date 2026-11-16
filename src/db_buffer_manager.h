@@ -73,7 +73,7 @@ public:
 
     explicit BufferManager(
         const LinuxDirectory &tablesDir, std::filesystem::path relTablePath,
-        LinuxFile::OpenMode mode, StatementRecovery &statementRecovery);
+        LinuxFile::OpenMode mode, StatementRecovery &statementRecovery, std::optional<std::vector<Column>> schema = std::nullopt, bool indexFile = false);
     BufferManager(const BufferManager &) = delete;
     BufferManager &operator=(const BufferManager &) = delete;
     BufferManager(BufferManager &&) = default;
@@ -90,10 +90,12 @@ public:
     void initializeNewTable(const CreateTablePayload &createTablePayload);
     void initializeNewIndex(const CreateIndexPayload &CreateIndexPayload);
 
-    void insertRows(const std::vector<Row> &rows);
-    void insertRow(const Row &row);
+    std::vector<LocatedRow> insertRows(const std::vector<Row> &rows);
+    std::vector<LocatedRow> insertRow(const Row &row);
     void updateRows(const std::vector<LocatedRow> &rows);
     std::uint64_t deleteRow(const RowId &rowId);
+
+    std::uint64_t deleteIndex(const PageId pageId, const size_t index);
 
     template <std::ranges::input_range Rows>
     std::uint64_t deleteRows(Rows &&rowIds)
@@ -105,22 +107,22 @@ public:
         return deletedCount;
     }
 
-    void insertIndeces(const IndexEntry &entries);
+    // Bulk pages are written immediately and released, keeping construction bounded.
+    void requireNewIndex() const;
+    void writeBulkIndexPage(const Page &page);
+    std::uint64_t pageCount() const { return pageFile_.size() / PAGE_SIZE; }
     void flushPage(PageId pageId);
     void flushAll();
     void sync();
     void requireReadable() const;
+    RowSchema getSchema() { return schema_; };
 
 private:
     friend class PageGuard;
 
     // Instantiated only by the concrete insertion/update methods in the .cpp.
-    template <std::ranges::input_range Rows>
-    void insertRowsImpl(Rows &&rows);
-
-    template <IndexEntryType T>
-    void insertIndecesImpl(const std::vector<T> &indexEntries);
-
+    RowSchema schema_;
+    bool indexFile_;
     PageFile pageFile_;
     StatementRecovery &statementRecovery_;
     std::filesystem::path relativeTablePath_;
@@ -129,10 +131,14 @@ private:
 
     std::unordered_map<PageId, PageFrame> pages;
 
+    template <std::ranges::input_range Rows>
+    std::vector<LocatedRow> insertRowsImpl(Rows &&rows);
+
     void prepareForWrite(PageId pageId);
 
     void setPage(const Page &page, PageId pageId);
 
+    void evictCleanPages();
     Page &fetchPage(PageId pageId, const PageReader &reader);
     void pinPage(PageId pageId);
     void unpinPage(PageId pageId) noexcept;
@@ -140,18 +146,10 @@ private:
 
     RawPage encodeCachedPage(const Page &page);
 
-    void appendRowToExistingDataPage(
+    LocatedRow appendRowToExistingDataPage(
         PageGuard &headerPage,
         PageGuard &dataPage,
         const Row &row);
-
-    template <IndexEntryType T>
-    void appendRowToExistingIndexPage(
-        PageGuard &header,
-        PageGuard &data,
-        const T &entry);
-    // PageId createDataPage(PageGuard &headerPage);
-    // PageId createIndexPage(PageGuard &header);
 
     template <PagePayload T>
     PageId createPage(PageGuard &header);

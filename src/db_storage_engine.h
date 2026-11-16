@@ -25,6 +25,7 @@ public:
 
     bool tableExists(const std::string &name) const override;
     HeaderPage getTableHeader(const std::string &name) const override;
+    std::vector<Column> getTableSchema(const std::string &tableName) const;
 
     Table createTable(
         const BoundCreateTable &createTable);
@@ -57,7 +58,10 @@ public:
     QueryResult deleteRows(const BoundDelete &del);
     QueryResult updateRows(const BoundUpdate &update);
 
-    Index createIndex(const BoundCreateIndex &createIndex);
+    Index createIndex(const BoundCreateIndex &createIndex, const IndexBulkLoadOptions &options = {});
+    Index openIndex(const std::string &indexName);
+    Index openIndex(const std::filesystem::path &fileName);
+    std::vector<Index> indexesForTable(const std::string &indexName);
 
     // const std::filesystem::path &getTablesPath() const;
 
@@ -88,6 +92,11 @@ private:
     std::filesystem::path getTablePath(const std::string &name) const
     {
         return dbPath_ / "tables" / (name + ".table");
+    }
+
+    std::filesystem::path getIndexPath(const std::string &name) const
+    {
+        return dbPath_ / "indexes" / (name + ".index");
     }
 
     static void throwError(const char *operation, int error, const std::filesystem::path &path)

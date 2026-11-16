@@ -18,6 +18,7 @@ TableCursor::TableCursor(Table &table)
 {
     const PageGuard header = table_->bufferManager.getHeaderPage();
     pageId_ = header.as<HeaderPage>().firstDataPageId;
+    remainingPages_ = table_->bufferManager.pageCount();
 }
 
 TableCursor::TableCursor(TableCursor &&other) noexcept
@@ -25,7 +26,7 @@ TableCursor::TableCursor(TableCursor &&other) noexcept
       pageId_(std::exchange(other.pageId_, 0)),
       rowIndex_(std::exchange(other.rowIndex_, 0)),
       currentPage_(std::move(other.currentPage_)),
-      seenPageIds_(std::move(other.seenPageIds_))
+      remainingPages_(std::exchange(other.remainingPages_, 0))
 {
     other.currentPage_.reset();
 }
@@ -39,7 +40,7 @@ TableCursor &TableCursor::operator=(TableCursor &&other) noexcept
         table_ = std::exchange(other.table_, nullptr);
         pageId_ = std::exchange(other.pageId_, 0);
         rowIndex_ = std::exchange(other.rowIndex_, 0);
-        seenPageIds_ = std::move(other.seenPageIds_);
+        remainingPages_ = std::exchange(other.remainingPages_, 0);
     }
     return *this;
 }
@@ -52,11 +53,12 @@ std::optional<LocatedRow> TableCursor::nextLocated()
     {
         if (!currentPage_)
         {
-            if (!seenPageIds_.insert(pageId_).second)
+            if (remainingPages_ == 0)
             {
                 throw std::runtime_error(
                     "Detected a cycle at page " + std::to_string(pageId_));
             }
+            --remainingPages_;
             currentPage_.emplace(table_->bufferManager.getPage<DataPage>(pageId_));
         }
 
@@ -69,7 +71,7 @@ std::optional<LocatedRow> TableCursor::nextLocated()
             RowId rowId{.pageId = pageId_, .slotIndex = slotIndex};
             return LocatedRow{
                 .id = rowId,
-                .row = row};
+                .row = std::move(row)};
         }
 
         pageId_ = currentPage_->page().nextPageId();
@@ -88,11 +90,12 @@ std::optional<Row> TableCursor::next()
     {
         if (!currentPage_)
         {
-            if (!seenPageIds_.insert(pageId_).second)
+            if (remainingPages_ == 0)
             {
                 throw std::runtime_error(
                     "Detected a cycle at page " + std::to_string(pageId_));
             }
+            --remainingPages_;
             currentPage_.emplace(table_->bufferManager.getPage<DataPage>(pageId_));
         }
 
@@ -117,7 +120,7 @@ Table Table::create(
     const CreateTablePayload &payload,
     StatementRecovery &statementRecovery)
 {
-    Table table{tablesDir, payload.tableName + ".table", LinuxFile::OpenMode::CreateNew, statementRecovery};
+    Table table{tablesDir, payload.tableName + ".table", LinuxFile::OpenMode::CreateNew, statementRecovery, payload.columns};
     table.initializeNewTable(payload);
     return table;
 }
@@ -125,21 +128,22 @@ Table Table::create(
 Table Table::open(const LinuxDirectory &tablesDir,
                   const std::filesystem::path &relTablePath, StatementRecovery &statementRecovery)
 {
-    Table table{tablesDir, relTablePath, LinuxFile::OpenMode::OpenExisting, statementRecovery};
+    Table table{tablesDir, relTablePath, LinuxFile::OpenMode::OpenExisting, statementRecovery, std::nullopt};
     table.validateHeaderPage();
     return table;
 }
 
-void Table::insertRows(const BoundInsert &insert)
+std::vector<LocatedRow> Table::insertRows(const BoundInsert &insert)
 {
     bufferManager.requireReadable();
     if (insert.rows.empty())
     {
-        return;
+        return {};
     }
-    bufferManager.insertRows(insert.rows);
+    const auto &locatedRows = bufferManager.insertRows(insert.rows);
     bufferManager.flushAll();
     bufferManager.sync();
+    return locatedRows;
 }
 
 void Table::updateRows(const std::vector<LocatedRow> &updateRows)
@@ -174,8 +178,12 @@ std::uint64_t Table::deleteRows(const std::vector<LocatedRow> &delRows)
     return deletedCount;
 }
 
-Table::Table(const LinuxDirectory &tablesDir, const std::filesystem::path &relTablePath, LinuxFile::OpenMode mode, StatementRecovery &statementRecovery)
-    : bufferManager(tablesDir, relTablePath, mode, statementRecovery)
+Table::Table(const LinuxDirectory &tablesDir,
+             const std::filesystem::path &relTablePath,
+             LinuxFile::OpenMode mode,
+             StatementRecovery &statementRecovery,
+             std::optional<std::vector<Column>> schema)
+    : bufferManager(tablesDir, relTablePath, mode, statementRecovery, schema)
 {
 }
 

@@ -39,3 +39,4 @@ Page makeHeaderPage(
     const CreateIndexPayload &payload);
 Page makeHeaderPage(
     const CreateTablePayload &payload);
+std::vector<Column> buildStoredColumns(const std::vector<Column> &columns);

@@ -11,78 +11,6 @@
 
 namespace
 {
-    std::vector<Column> buildStoredColumns(const std::vector<Column> &columns)
-    {
-        std::vector<Column> storedColumns;
-        storedColumns.reserve(columns.size());
-
-        std::uint32_t fixedOffset = 0;
-        std::uint32_t variableIndex = 0;
-
-        for (std::size_t i = 0; i < columns.size(); ++i)
-        {
-            Column column = columns[i];
-            column.columnIndex = static_cast<std::uint32_t>(i);
-
-            switch (column.type)
-            {
-            case DataType::Int:
-                column.storage = FixedColumnStorage{
-                    .offset = fixedOffset,
-                    .size = static_cast<std::uint32_t>(sizeof(std::int32_t))};
-                fixedOffset += static_cast<std::uint32_t>(sizeof(std::int32_t));
-                break;
-
-            case DataType::BigInt:
-                column.storage = FixedColumnStorage{
-                    .offset = fixedOffset,
-                    .size = static_cast<std::uint32_t>(sizeof(std::int64_t))};
-                fixedOffset += static_cast<std::uint32_t>(sizeof(std::int64_t));
-                break;
-
-            case DataType::Double:
-                column.storage = FixedColumnStorage{
-                    .offset = fixedOffset,
-                    .size = static_cast<std::uint32_t>(sizeof(std::float64_t))};
-                fixedOffset += static_cast<std::uint32_t>(sizeof(std::float64_t));
-                break;
-
-            case DataType::Decimal:
-                column.storage = FixedColumnStorage{
-                    .offset = fixedOffset,
-                    .size = static_cast<std::uint32_t>(
-                        sizeof(std::int64_t) + sizeof(std::uint32_t))};
-                fixedOffset += static_cast<std::uint32_t>(
-                    sizeof(std::int64_t) + sizeof(std::uint32_t));
-                break;
-
-            case DataType::Boolean:
-                column.storage = FixedColumnStorage{
-                    .offset = fixedOffset,
-                    .size = static_cast<std::uint32_t>(sizeof(std::uint8_t))};
-                fixedOffset += static_cast<std::uint32_t>(sizeof(std::uint8_t));
-                break;
-
-            case DataType::Text:
-                column.storage = VarColumnStorage{.varIndex = variableIndex};
-                ++variableIndex;
-                break;
-
-            case DataType::Null:
-                column.storage = FixedColumnStorage{
-                    .offset = fixedOffset,
-                    .size = 0};
-                break;
-
-            default:
-                throw std::runtime_error("Unsupported column type in table schema");
-            }
-
-            storedColumns.push_back(std::move(column));
-        }
-
-        return storedColumns;
-    }
 
     std::uint16_t calculateHeaderFreeSpaceStart(
         const PageHeader &pageHeader,
@@ -186,9 +114,11 @@ Page makeHeaderPage(
 Page makeHeaderPage(
     const CreateIndexPayload &payload)
 {
+    if (payload.keyColumns.empty() || payload.keyColumns.size() != payload.columns.size())
+        throw std::invalid_argument("Index needs matching key columns and schema");
     PageHeader pageHeader{
         .pageId = 0,
-        .pageType = PageType::HeaderPage,
+        .pageType = PageType::IndexHeaderPage,
         .slotCount = 0,
         .freeSpaceStart = 0,
         .freeSpaceEnd = static_cast<std::uint16_t>(PAGE_SIZE),
@@ -202,8 +132,9 @@ Page makeHeaderPage(
 
     tableHeader.indexName = payload.indexName;
     tableHeader.tableName = payload.tableName;
-    tableHeader.keyColumns = payload.columns; // In index-key order
-    tableHeader.unique = false;
+    tableHeader.keyColumns = payload.keyColumns;
+    tableHeader.columns = buildStoredColumns(payload.columns);
+    tableHeader.unique = payload.unique;
 
     tableHeader.rootPageId = 1;
     tableHeader.nextUnusedPageId = 2;
@@ -213,4 +144,77 @@ Page makeHeaderPage(
     return Page{
         .header = pageHeader,
         .data = std::move(tableHeader)};
+}
+
+std::vector<Column> buildStoredColumns(const std::vector<Column> &columns)
+{
+    std::vector<Column> storedColumns;
+    storedColumns.reserve(columns.size());
+
+    std::uint32_t fixedOffset = 0;
+    std::uint32_t variableIndex = 0;
+
+    for (std::size_t i = 0; i < columns.size(); ++i)
+    {
+        Column column = columns[i];
+        column.columnIndex = static_cast<std::uint32_t>(i);
+
+        switch (column.type)
+        {
+        case DataType::Int:
+            column.storage = FixedColumnStorage{
+                .offset = fixedOffset,
+                .size = static_cast<std::uint32_t>(sizeof(std::int32_t))};
+            fixedOffset += static_cast<std::uint32_t>(sizeof(std::int32_t));
+            break;
+
+        case DataType::BigInt:
+            column.storage = FixedColumnStorage{
+                .offset = fixedOffset,
+                .size = static_cast<std::uint32_t>(sizeof(std::int64_t))};
+            fixedOffset += static_cast<std::uint32_t>(sizeof(std::int64_t));
+            break;
+
+        case DataType::Double:
+            column.storage = FixedColumnStorage{
+                .offset = fixedOffset,
+                .size = static_cast<std::uint32_t>(sizeof(std::float64_t))};
+            fixedOffset += static_cast<std::uint32_t>(sizeof(std::float64_t));
+            break;
+
+        case DataType::Decimal:
+            column.storage = FixedColumnStorage{
+                .offset = fixedOffset,
+                .size = static_cast<std::uint32_t>(
+                    sizeof(std::int64_t) + sizeof(std::uint32_t))};
+            fixedOffset += static_cast<std::uint32_t>(
+                sizeof(std::int64_t) + sizeof(std::uint32_t));
+            break;
+
+        case DataType::Boolean:
+            column.storage = FixedColumnStorage{
+                .offset = fixedOffset,
+                .size = static_cast<std::uint32_t>(sizeof(std::uint8_t))};
+            fixedOffset += static_cast<std::uint32_t>(sizeof(std::uint8_t));
+            break;
+
+        case DataType::Text:
+            column.storage = VarColumnStorage{.varIndex = variableIndex};
+            ++variableIndex;
+            break;
+
+        case DataType::Null:
+            column.storage = FixedColumnStorage{
+                .offset = fixedOffset,
+                .size = 0};
+            break;
+
+        default:
+            throw std::runtime_error("Unsupported column type in table schema");
+        }
+
+        storedColumns.push_back(std::move(column));
+    }
+
+    return storedColumns;
 }

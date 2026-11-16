@@ -6,6 +6,7 @@
 #include "db_index.h"
 #include "db_constraint_validator.h"
 #include "db_expression_evaluator.h"
+#include "db_page_factory.h"
 
 #include <filesystem>
 #include <stdexcept>
@@ -242,7 +243,16 @@ QueryResult StorageEngine::insertRows(const BoundInsert &insert)
         throw std::runtime_error(validationResult.message.value());
     auto table = openTable(insert.tableName);
 
-    table.insertRows(insert);
+    const auto &locatedRows = table.insertRows(insert);
+
+    auto indexes = indexesForTable(insert.tableName);
+    if (!indexes.empty())
+    {
+        for (auto &index : indexes)
+        {
+            index.insertIndexes(locatedRows);
+        }
+    }
 
     return QueryResult{
         .columns = {},
@@ -276,6 +286,15 @@ QueryResult StorageEngine::updateRows(const BoundUpdate &update)
         throw std::runtime_error(validationResult.message.value());
     table.updateRows(updatedLocatedRows);
 
+    auto indexes = indexesForTable(update.tableName);
+    if (!indexes.empty())
+    {
+        for (auto &index : indexes)
+        {
+            index.insertIndexes(updatedLocatedRows);
+        }
+    }
+
     return QueryResult{
         .columns = {},
         .rows = {},
@@ -306,6 +325,15 @@ QueryResult StorageEngine::deleteRows(const BoundDelete &del)
 
     const auto deletedCount = table.deleteRows(delRows);
 
+    auto indexes = indexesForTable(tableName);
+    if (!indexes.empty())
+    {
+        for (auto &index : indexes)
+        {
+            index.deleteIndexes(delRows);
+        }
+    }
+
     return QueryResult{
         .columns = {},
         .rows = {},
@@ -313,16 +341,31 @@ QueryResult StorageEngine::deleteRows(const BoundDelete &del)
         .returnsRows = false};
 }
 
-Index StorageEngine::createIndex(const BoundCreateIndex &createIndex)
+Index StorageEngine::createIndex(const BoundCreateIndex &createIndex, const IndexBulkLoadOptions &options)
 {
     requireReadable();
-    if (tablesDirectory_.entryExists(createIndex.name + ".index"))
+    if (indexDirectory_.entryExists(createIndex.name + ".index"))
     {
         throw std::runtime_error("Index already exists: " + createIndex.name);
     }
-    CreateIndexPayload createIndexPayload{.indexName = createIndex.name, .tableName = createIndex.tableName, .magic = "MYIX", .columns = createIndex.columnIds};
 
-    return Index::create(indexDirectory_, createIndexPayload, statementRecovery_);
+    Table table = openTable(createIndex.tableName);
+    const auto &tableSchema = getTableHeader(createIndex.tableName);
+
+    std::vector<Column> selectedColumns{};
+    selectedColumns.reserve(createIndex.columnIds.size());
+
+    for (ColumnId id : createIndex.columnIds)
+    {
+        selectedColumns.push_back(tableSchema.columns.at(id));
+    }
+
+    // Reassigns columnIndex and rebuilds storage offsets.
+
+    CreateIndexPayload createIndexPayload{.indexName = createIndex.name, .tableName = createIndex.tableName, .magic = "MYIX", .keyColumns = createIndex.columnIds, .columns = buildStoredColumns(selectedColumns), .unique = createIndex.unique};
+    auto index = Index::create(indexDirectory_, createIndexPayload, statementRecovery_);
+    index.bulkLoad(table, options);
+    return index;
 }
 
 bool StorageEngine::tableExists(const std::string &name) const
@@ -346,6 +389,23 @@ HeaderPage StorageEngine::getTableHeader(const std::string &tableName) const
     Page page = decodeHeaderPage(rawPage);
 
     return std::get<HeaderPage>(page.data);
+}
+
+std::vector<Column> StorageEngine::getTableSchema(const std::string &tableName) const
+{
+    requireReadable();
+
+    const auto fileName = tableName + ".table";
+
+    if (!tableExists(tableName))
+    {
+        throw std::runtime_error("Table does not exist: " + tableName);
+    }
+
+    RawPage rawPage = readPageFromFile(tablesDirectory_, fileName, HeaderPageId);
+    Page page = decodeHeaderPage(rawPage);
+
+    return std::get<HeaderPage>(page.data).columns;
 }
 
 Table StorageEngine::createTable(
@@ -381,4 +441,45 @@ Table StorageEngine::openTable(const std::string &tableName)
     }
 
     return Table::open(tablesDirectory_, fileName, statementRecovery_);
+}
+
+Index StorageEngine::openIndex(const std::string &indexName)
+{
+    requireReadable();
+
+    const auto fileName = getIndexPath(indexName).filename();
+    if (!indexDirectory_.entryExists(fileName))
+    {
+        throw std::runtime_error("Index does not exist: " + indexName);
+    }
+
+    return Index::open(indexDirectory_, fileName, statementRecovery_);
+}
+
+Index StorageEngine::openIndex(const std::filesystem::path &fileName)
+{
+    requireReadable();
+
+    if (!indexDirectory_.entryExists(fileName))
+    {
+        throw std::runtime_error("Index does not exist: " + fileName.string());
+    }
+
+    return Index::open(indexDirectory_, fileName, statementRecovery_);
+}
+std::vector<Index> StorageEngine::indexesForTable(const std::string &tableName)
+{
+    const auto &fileNames = indexDirectory_.listFileNames();
+    std::vector<Index> result{};
+    result.reserve(fileNames.size());
+    for (const auto &fileName : fileNames)
+    {
+        auto index = openIndex(fileName);
+        const auto &name = index.getTableName();
+        if (name == tableName)
+        {
+            result.push_back(std::move(index));
+        }
+    }
+    return result;
 }

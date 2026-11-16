@@ -210,10 +210,17 @@ RawPage encodeDataPage(
 RawPage encodePage(const Page &page)
 {
     if (page.header.pageType == PageType::HeaderPage)
-    {
         return encodeHeaderPage(page.header, std::get<HeaderPage>(page.data));
+    if (page.header.pageType == PageType::IndexHeaderPage)
+    {
+        ByteWriter writer(PAGE_SIZE);
+        PageHeaderWriter(writer).write(page.header);
+        writer.seek(PageHeaderLayout::Size);
+        IndexHeaderPageWriter(writer).write(std::get<IndexHeaderPage>(page.data));
+        RawPage raw{};
+        std::copy(writer.bytes().begin(), writer.bytes().end(), raw.begin());
+        return raw;
     }
-
     throw std::runtime_error("encoding data pages requires table header; use encodeDataPage");
 }
 
@@ -222,9 +229,9 @@ std::size_t encodedSlotSize()
     return SlotWriter::SlotSize;
 }
 
-std::size_t encodedRowSize(const HeaderPage &tableHeader, const Row &row)
+std::size_t encodedRowSize(const HeaderPage &header, const Row &row)
 {
-    return RowWriter::computeSerializedRowSize(tableHeader, row.values);
+    return RowWriter::computeSerializedRowSize(RowSchema{header.columns}, row.values);
 }
 
 std::vector<std::byte> ValueSerializer::serializeValue(
@@ -322,30 +329,15 @@ std::vector<std::byte> ValueSerializer::serializeValue(
     }
 }
 
-IndexWriter::IndexWriter(ByteWriter &writer)
-    : writer(writer) {}
+RowWriter::RowWriter(ByteWriter &writer, const RowSchema &schema)
+    : writer(writer), columns_(schema.columns) {}
 
-void IndexWriter::writeIndex(const LeafIndexEntry &entry)
-{
-    writer.writeUnsigned<std::uint32_t>(static_cast<std::uint32_t>(entry.key.size()));
-    writer.writeBytes(entry.key.data(), entry.key.size());
-    writer.writeUnsigned<std::uint32_t>(entry.rowId.pageId);
-    writer.writeUnsigned<std::uint16_t>(entry.rowId.slotIndex);
-}
-
-void IndexWriter::writeIndex(const InternalIndexEntry &entry)
-{
-    writer.writeUnsigned<std::uint32_t>(static_cast<std::uint32_t>(entry.separatorKey.size()));
-    writer.writeBytes(entry.separatorKey.data(), entry.separatorKey.size());
-    writer.writeUnsigned<std::uint32_t>(entry.pageId);
-}
-
-RowWriter::RowWriter(ByteWriter &writer, const HeaderPage &headerPage)
-    : writer(writer), headerPage(headerPage) {}
+RowWriter::RowWriter(ByteWriter &writer, const HeaderPage &header)
+    : writer(writer), columns_(header.columns) {}
 
 void RowWriter::writeRow(const std::vector<Value> &values)
 {
-    if (values.size() != headerPage.columns.size())
+    if (values.size() != columns_.size())
     {
         throw std::runtime_error("value count does not match column count");
     }
@@ -357,7 +349,7 @@ void RowWriter::writeRow(const std::vector<Value> &values)
 
     std::vector<std::uint8_t> nullBitmap(nullBitmapSizeBytes, 0);
 
-    for (const Column &column : headerPage.columns)
+    for (const Column &column : columns_)
     {
         const Value &value = values[column.columnIndex];
 
@@ -393,12 +385,12 @@ void RowWriter::setBitmapBit(std::vector<std::uint8_t> &bitmap, std::size_t bitI
 
 void RowWriter::prepareLayout()
 {
-    nullBitmapSizeBytes = (headerPage.columns.size() + 7) / 8;
+    nullBitmapSizeBytes = (columns_.size() + 7) / 8;
 
     fixedAreaSize = 0;
     std::size_t varCount = 0;
 
-    for (const Column &column : headerPage.columns)
+    for (const Column &column : columns_)
     {
         if (std::holds_alternative<FixedColumnStorage>(column.storage))
         {
@@ -419,7 +411,7 @@ void RowWriter::prepareLayout()
 
 void RowWriter::writeFixedValues(const std::vector<Value> &values)
 {
-    for (const Column &column : headerPage.columns)
+    for (const Column &column : columns_)
     {
         if (!std::holds_alternative<FixedColumnStorage>(column.storage))
         {
@@ -522,7 +514,7 @@ void RowWriter::writeFixedValue(
 
 void RowWriter::writeVariableValues(const std::vector<Value> &values)
 {
-    for (const Column &column : headerPage.columns)
+    for (const Column &column : columns_)
     {
         if (!std::holds_alternative<VarColumnStorage>(column.storage))
         {
@@ -562,20 +554,20 @@ void RowWriter::writeVariableValue(
     varDataPos = writer.position();
 }
 std::size_t RowWriter::computeSerializedRowSize(
-    const HeaderPage &tableHeader,
+    const RowSchema &schema,
     const std::vector<Value> &values)
 {
-    if (values.size() != tableHeader.columns.size())
+    if (values.size() != schema.columns.size())
     {
         throw std::runtime_error("value count does not match column count");
     }
 
-    std::size_t nullBitmapSize = (tableHeader.columns.size() + 7) / 8;
+    std::size_t nullBitmapSize = (schema.columns.size() + 7) / 8;
     std::size_t fixedAreaSize = 0;
     std::size_t varColumnCount = 0;
     std::size_t varDataSize = 0;
 
-    for (const Column &column : tableHeader.columns)
+    for (const Column &column : schema.columns)
     {
         const Value &value = values[column.columnIndex];
 
@@ -734,6 +726,10 @@ void IndexHeaderPageWriter::write(const IndexHeaderPage &header)
     {
         writer.writeUnsigned<std::uint32_t>(col);
     }
+    writer.writeUnsigned<std::uint32_t>(static_cast<std::uint32_t>(header.columns.size()));
+    HeaderPageWriter columnWriter(writer);
+    for (const auto &column : header.columns)
+        columnWriter.writeColumn(column);
     writer.writeUnsigned<std::uint8_t>(static_cast<std::uint8_t>(header.unique));
     writer.writeUnsigned<std::uint32_t>(header.rootPageId);
     writer.writeUnsigned<std::uint32_t>(header.nextUnusedPageId);
@@ -801,145 +797,6 @@ void HeaderPageWriter::writeColumnStorage(const ColumnStorage &storage)
     throw std::runtime_error("Unknown column storage type");
 }
 
-IndexPageWriter::IndexPageWriter(ByteWriter &writer)
-    : writer(writer),
-      headerWriter(writer),
-      slotWriter(writer) {}
-
-void IndexPageWriter::write(std::uint32_t pageId, const IndexEntry &entries)
-{
-    PageHeader header{
-        .pageId = pageId,
-        .pageType = PageType::IndexPage,
-        .slotCount = 0,
-        .freeSpaceStart = static_cast<std::uint16_t>(PageHeaderLayout::Size),
-        .freeSpaceEnd = static_cast<std::uint16_t>(PAGE_SIZE),
-        .nextPageId = 0};
-
-    IndexPageHeader indexHeader{
-        .level = std::holds_alternative<std::vector<LeafIndexEntry>>(entries) ? std::uint16_t{0} : std::uint16_t{1},
-        .flags = 0,
-        .firstChildPageId = 0};
-
-    write(header, indexHeader, entries);
-}
-
-void IndexPageWriter::write(const PageHeader &pageHeader, const IndexPageHeader &indexHeader, const IndexEntry &entries)
-{
-    PageHeader header = pageHeader;
-    header.pageType = PageType::IndexPage;
-    header.slotCount = 0;
-    header.freeSpaceStart = static_cast<std::uint16_t>(PageHeaderLayout::Size);
-    header.freeSpaceEnd = static_cast<std::uint16_t>(PAGE_SIZE);
-
-    headerWriter.write(header);
-
-    writer.writeUnsigned<std::uint16_t>(indexHeader.level);
-    writer.writeUnsigned<std::uint16_t>(indexHeader.flags);
-    writer.writeUnsigned<std::uint32_t>(indexHeader.firstChildPageId);
-
-    std::uint16_t freeStart = static_cast<std::uint16_t>(PageHeaderLayout::Size + indexHeader.serializedSize());
-    std::uint16_t freeEnd = static_cast<std::uint16_t>(PAGE_SIZE);
-    std::uint16_t slotIndex = 0;
-
-    if (const std::vector<LeafIndexEntry> *leafEntries = std::get_if<std::vector<LeafIndexEntry>>(&entries))
-    {
-        for (const auto &leafEntry : *leafEntries)
-        {
-            std::size_t indexSize{leafEntry.serializedSize()};
-
-            if (indexSize > std::numeric_limits<std::uint16_t>::max())
-            {
-                throw std::runtime_error("index too large for uint16_t slot size");
-            }
-
-            if (freeStart + indexSize + SlotWriter::SlotSize > freeEnd)
-            {
-                throw std::runtime_error("not enough space in data page");
-            }
-
-            std::uint16_t indexOffset = freeStart;
-
-            writer.seek(indexOffset);
-
-            IndexWriter indexWriter(writer);
-            indexWriter.writeIndex(leafEntry);
-
-            std::size_t actualIndexEnd = writer.position();
-            std::size_t expectedIndexEnd = static_cast<std::size_t>(indexOffset) + indexSize;
-
-            if (actualIndexEnd != expectedIndexEnd)
-            {
-                throw std::runtime_error("computed index size does not match written index size");
-            }
-
-            Slot slot{
-                .offset = indexOffset,
-                .size = static_cast<std::uint16_t>(indexSize),
-                .flags = 0};
-
-            slotWriter.writeSlot(slotIndex, slot);
-
-            freeStart = static_cast<std::uint16_t>(expectedIndexEnd);
-            freeEnd -= static_cast<std::uint16_t>(SlotWriter::SlotSize);
-
-            ++slotIndex;
-        }
-    }
-    else if (const std::vector<InternalIndexEntry> *internalEntries = std::get_if<std::vector<InternalIndexEntry>>(&entries))
-    {
-        for (const auto &internalEntry : *internalEntries)
-        {
-            std::size_t indexSize{internalEntry.serializedSize()};
-
-            if (indexSize > std::numeric_limits<std::uint16_t>::max())
-            {
-                throw std::runtime_error("index too large for uint16_t slot size");
-            }
-
-            if (freeStart + indexSize + SlotWriter::SlotSize > freeEnd)
-            {
-                throw std::runtime_error("not enough space in data page");
-            }
-
-            std::uint16_t indexOffset = freeStart;
-
-            writer.seek(indexOffset);
-
-            IndexWriter indexWriter(writer);
-            indexWriter.writeIndex(internalEntry);
-
-            std::size_t actualIndexEnd = writer.position();
-            std::size_t expectedIndexEnd = static_cast<std::size_t>(indexOffset) + indexSize;
-
-            if (actualIndexEnd != expectedIndexEnd)
-            {
-                throw std::runtime_error("computed index size does not match written index size");
-            }
-
-            Slot slot{
-                .offset = indexOffset,
-                .size = static_cast<std::uint16_t>(indexSize),
-                .flags = 0};
-
-            slotWriter.writeSlot(slotIndex, slot);
-
-            freeStart = static_cast<std::uint16_t>(expectedIndexEnd);
-            freeEnd -= static_cast<std::uint16_t>(SlotWriter::SlotSize);
-
-            ++slotIndex;
-        }
-    }
-    else
-    {
-        throw std::runtime_error("Unsupported entry type for index page");
-    }
-
-    headerWriter.setSlotCount(slotIndex);
-    headerWriter.setFreeSpaceStart(freeStart);
-    headerWriter.setFreeSpaceEnd(freeEnd);
-}
-
 DataPageWriter::DataPageWriter(ByteWriter &writer, const HeaderPage &tableHeader)
     : writer(writer),
       headerWriter(writer),
@@ -975,7 +832,7 @@ void DataPageWriter::write(const PageHeader &pageHeader, const std::vector<Row> 
 
     for (const Row &row : rows)
     {
-        std::size_t rowSize = RowWriter::computeSerializedRowSize(tableHeader, row.values);
+        std::size_t rowSize = RowWriter::computeSerializedRowSize(RowSchema{.columns = tableHeader.columns}, row.values);
 
         if (rowSize > std::numeric_limits<std::uint16_t>::max())
         {

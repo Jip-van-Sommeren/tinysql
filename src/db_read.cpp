@@ -121,11 +121,24 @@ Page IndexHeaderPageDecoder::decode()
     headerPage.tableName = decoder.readString();
 
     std::uint32_t columnCount = decoder.readUnsigned<std::uint32_t>();
+    if (columnCount == 0 || columnCount > PAGE_SIZE / sizeof(ColumnId))
+        throw std::runtime_error("Invalid index key column count");
     headerPage.keyColumns.reserve(columnCount);
 
     for (std::uint32_t i = 0; i < columnCount; ++i)
     {
         headerPage.keyColumns.push_back(decoder.readUnsigned<std::uint32_t>());
+    }
+
+    const auto schemaCount = decoder.readUnsigned<std::uint32_t>();
+    if (schemaCount != columnCount || schemaCount > PAGE_SIZE / 11)
+        throw std::runtime_error("Invalid index schema column count");
+    HeaderPageDecoder columnDecoder(decoder);
+    for (std::uint32_t i = 0; i < schemaCount; ++i)
+    {
+        headerPage.columns.push_back(columnDecoder.decodeColumn());
+        if (headerPage.columns.back().columnIndex != i)
+            throw std::runtime_error("Invalid index schema column position");
     }
 
     headerPage.unique = static_cast<bool>(decoder.readUnsigned<std::uint8_t>());
@@ -509,16 +522,19 @@ RowDecoder::RowDecoder(
     const HeaderPage &headerPage,
     std::size_t rowStart)
     : decoder(decoder),
-      headerPage(headerPage),
+      columns_(headerPage.columns),
       rowStart(rowStart) {}
+
+RowDecoder::RowDecoder(ByteReader &decoder, const RowSchema &schema, std::size_t rowStart)
+    : decoder(decoder), columns_(schema.columns), rowStart(rowStart) {}
 
 Row RowDecoder::decodeRow()
 {
     prepareLayout();
 
-    std::vector<Value> values(headerPage.columns.size());
+    std::vector<Value> values(columns_.size());
 
-    for (const Column &column : headerPage.columns)
+    for (const Column &column : columns_)
     {
         if (isNull(column.columnIndex))
         {
@@ -556,11 +572,11 @@ Row RowDecoder::decodeRow()
 
 void RowDecoder::prepareLayout()
 {
-    nullBitmapSizeBytes = (headerPage.columns.size() + 7) / 8;
+    nullBitmapSizeBytes = (columns_.size() + 7) / 8;
     fixedAreaSize = 0;
     std::size_t varCount = 0;
 
-    for (const Column &column : headerPage.columns)
+    for (const Column &column : columns_)
     {
         if (std::holds_alternative<FixedColumnStorage>(column.storage))
         {
@@ -730,7 +746,8 @@ bool isValidPageType(std::uint8_t value)
            value == static_cast<std::uint8_t>(PageType::IndexPage) ||
            value == static_cast<std::uint8_t>(PageType::OverflowPage) ||
            value == static_cast<std::uint8_t>(PageType::FreePage) ||
-           value == static_cast<std::uint8_t>(PageType::HeaderPage);
+           value == static_cast<std::uint8_t>(PageType::HeaderPage) ||
+           value == static_cast<std::uint8_t>(PageType::IndexHeaderPage);
 }
 
 PageHeader decodePageHeader(const RawPage &page)

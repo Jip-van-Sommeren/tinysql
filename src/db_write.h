@@ -76,8 +76,8 @@ class IndexWriter
 {
 public:
     IndexWriter(ByteWriter &writer);
-    void writeIndex(const LeafIndexEntry &entry);
-    void writeIndex(const InternalIndexEntry &entry);
+    void writeIndex(const LeafIndexEntry &entry, const RowSchema &schema);
+    void writeIndex(const InternalIndexEntry &entry, const RowSchema &schema);
 
 private:
     ByteWriter &writer;
@@ -86,16 +86,17 @@ private:
 class RowWriter
 {
 public:
-    RowWriter(ByteWriter &writer, const HeaderPage &headerPage);
+    RowWriter(ByteWriter &writer, const RowSchema &schema);
+    RowWriter(ByteWriter &writer, const HeaderPage &header);
 
     void writeRow(const std::vector<Value> &values);
     static std::size_t computeSerializedRowSize(
-        const HeaderPage &tableHeader,
+        const RowSchema &tableHeader,
         const std::vector<Value> &values);
 
 private:
     ByteWriter &writer;
-    const HeaderPage &headerPage;
+    std::span<const Column> columns_;
 
     std::size_t rowStart = 0;
     std::size_t nullBitmapSizeBytes = 0;
@@ -177,11 +178,11 @@ public:
     explicit HeaderPageWriter(ByteWriter &writer);
 
     void write(const HeaderPage &header);
+    void writeColumn(const Column &column);
 
 private:
     ByteWriter &writer;
 
-    void writeColumn(const Column &column);
     void writeConstraint(const BoundConstraint &constraint);
     void writeColumnStorage(const ColumnStorage &storage);
 };
@@ -215,12 +216,13 @@ private:
 class IndexPageWriter
 {
 public:
-    IndexPageWriter(ByteWriter &writer);
+    IndexPageWriter(ByteWriter &writer, const RowSchema &schema);
     void write(const PageHeader &pageHeader, const IndexPageHeader &indexHeader, const IndexEntry &entries);
     void write(std::uint32_t pageId, const IndexEntry &entries);
 
 private:
     ByteWriter &writer;
+    const RowSchema &schema_;
     PageHeaderWriter headerWriter;
     SlotWriter slotWriter;
 };

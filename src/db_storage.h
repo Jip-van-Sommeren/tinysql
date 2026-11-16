@@ -73,6 +73,12 @@ enum class PageType : uint8_t
     IndexHeaderPage = 6
 };
 
+enum class DbType
+{
+    Table = 1,
+    Index = 2
+};
+
 struct PageHeader
 {
     uint32_t pageId;
@@ -125,6 +131,7 @@ struct IndexHeaderPage
     std::string indexName;
     std::string tableName;
     std::vector<ColumnId> keyColumns; // In index-key order
+    std::vector<Column> columns;
     bool unique = false;
 
     PageId rootPageId = 1;
@@ -141,7 +148,9 @@ struct CreateIndexPayload
     std::string indexName;
     std::string tableName;
     std::string magic;
-    std::vector<ColumnId> columns;
+    std::vector<ColumnId> keyColumns; // In index-key order
+    std::vector<Column> columns;
+    bool unique;
 };
 
 struct CreateTablePayload
@@ -216,29 +225,29 @@ struct IndexPageHeader
 
 struct LeafIndexEntry
 {
-    std::vector<std::byte> key;
+    Row key;
+    // LocatedRow key;
     RowId rowId;
-    std::size_t serializedSize() const
-    {
-        return sizeof(std::uint16_t)                                  // encoded key length
-               + key.size() + sizeof(PageId) + sizeof(std::uint16_t); // table slot index
-    }
+    std::size_t serializedSize(const RowSchema &schema) const;
 };
 
 struct InternalIndexEntry
 {
-    std::vector<std::byte> separatorKey;
+    Row separatorKey;
+    RowId separatorRowId;
     PageId pageId;
 
-    std::size_t serializedSize() const
-    {
-        return sizeof(std::uint16_t) + separatorKey.size() + sizeof(PageId);
-    }
+    std::size_t serializedSize(const RowSchema &schema) const;
 };
 
 using IndexEntry = std::variant<
     std::vector<LeafIndexEntry>,
     std::vector<InternalIndexEntry>>;
+
+struct RowSchema
+{
+    std::vector<Column> columns;
+};
 
 struct IndexPage
 {

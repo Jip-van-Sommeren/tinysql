@@ -83,12 +83,12 @@ public:
     explicit HeaderPageDecoder(ByteReader &decoder);
 
     Page decode();
+    Column decodeColumn();
 
 private:
     ByteReader &decoder;
     PageHeaderDecoder pageHeaderDecoder;
 
-    Column decodeColumn();
     ColumnStorage decodeColumnStorage();
     BoundConstraint decodeConstraint();
     std::unique_ptr<BoundExpr> decodeExpression();
@@ -136,11 +136,12 @@ public:
         const HeaderPage &headerPage,
         std::size_t rowStart);
 
+    RowDecoder(ByteReader &decoder, const RowSchema &schema, std::size_t rowStart);
     Row decodeRow();
 
 private:
     ByteReader &decoder;
-    const HeaderPage &headerPage;
+    std::span<const Column> columns_;
     std::size_t rowStart;
 
     std::size_t nullBitmapSizeBytes = 0;

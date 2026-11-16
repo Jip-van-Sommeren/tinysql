@@ -46,6 +46,8 @@ add_library(db_core
     src/db_page_file.cpp
     src/db_constraint_validator.cpp
     src/db_index.cpp
+    src/db_index_codec.cpp
+    src/db_index_bulk.cpp
 )
 
 find_package(PkgConfig REQUIRED)
@@ -61,6 +63,12 @@ target_link_libraries(db PRIVATE db_core)
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(db_index_bulk_test tests/db_index_bulk_test.cpp)
+    db_configure_target(db_index_bulk_test PRIVATE)
+    target_link_libraries(db_index_bulk_test PRIVATE db_core)
+    target_link_options(db_index_bulk_test PRIVATE -Wl,--wrap=pwrite -Wl,--wrap=pread)
+    add_test(NAME db_index_bulk_test COMMAND db_index_bulk_test)
+
     add_executable(db_byte_io_test tests/db_byte_io_test.cpp)
     db_configure_target(db_byte_io_test PRIVATE)
     target_link_libraries(db_byte_io_test PRIVATE db_core)

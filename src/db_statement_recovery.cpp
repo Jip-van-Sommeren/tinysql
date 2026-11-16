@@ -14,10 +14,12 @@ namespace
 {
     void validateTablePath(const std::filesystem::path &path)
     {
-        // Table files are direct children of tables/. Never silently discard
-        // a journal path's directory components during replay.
-        const auto name = path.generic_string();
-        if (name.empty() || path != path.filename() || name == "." || name == ".." ||
+        // Preserve legacy table basenames. Index records use an explicit namespace.
+        const auto name = path.filename().generic_string();
+        const bool table = path == path.filename();
+        const bool index = path.parent_path() == "indexes" && path.extension() == ".index" &&
+                           path.generic_string() == "indexes/" + name;
+        if ((!table && !index) || name.empty() || name == "." || name == ".." ||
             name.find('\0') != std::string::npos)
             throw std::runtime_error("Invalid table path in journal");
     }
@@ -31,6 +33,13 @@ StatementRecovery::StatementRecovery(
       tableDir_(dbRootDir_, "tables")
 {
     uuid_copy(dbId_, dbId);
+}
+
+LinuxDirectory StatementRecovery::fileDirectory(const std::filesystem::path &path) const
+{
+    validateTablePath(path);
+    if (path.parent_path() == "indexes") return LinuxDirectory(dbRootDir_, "indexes");
+    return LinuxDirectory(tableDir_, ".");
 }
 
 void StatementRecovery::requireWritableStatement() const
@@ -114,7 +123,7 @@ void StatementRecovery::validateJournalForRecovery(std::uint64_t end)
                     // Resolve every existing target before any replay writes,
                     // including rejecting symlinks in later records.
                     if (!value.newFile)
-                        (void)LinuxFile(tableDir_, value.relativeFilePath, LinuxFile::OpenMode::ReadOnly);
+                        (void)LinuxFile(fileDirectory(value.relativeFilePath), value.relativeFilePath.filename(), LinuxFile::OpenMode::ReadOnly);
                 }
             },
             payload);
@@ -252,7 +261,7 @@ void StatementRecovery::captureFileOnce(const std::filesystem::path &relativePat
     {
         validateTablePath(relativePath);
         // const auto resolvedPath = tableDir_.getPath() / relativePath;
-        if (newFile && tableDir_.entryExists(relativePath))
+        if (newFile && fileDirectory(relativePath).entryExists(relativePath.filename()))
         {
             throw std::runtime_error("Table already exists: " + relativePath.string());
         }
@@ -264,7 +273,7 @@ void StatementRecovery::captureFileOnce(const std::filesystem::path &relativePat
         }
 
         // A new file does not exist yet; opening it here would violate write-ahead ordering.
-        const auto originalSize = newFile ? std::uint64_t{0} : PageFile(tableDir_, relativePath).size();
+        const auto originalSize = newFile ? std::uint64_t{0} : PageFile(fileDirectory(relativePath), relativePath.filename()).size();
         if (originalSize % PAGE_SIZE != 0)
             throw std::runtime_error("Invalid original table file size");
 
@@ -401,7 +410,7 @@ void StatementRecovery::rollback()
 
                     auto [it, inserted] = openedFiles.try_emplace(
                         value.relativeFilePath,
-                        tableDir_, value.relativeFilePath.filename(),
+                        fileDirectory(value.relativeFilePath), value.relativeFilePath.filename(),
                         LinuxFile::OpenMode::OpenExisting);
 
                     PageFile &file = it->second;
@@ -428,7 +437,7 @@ void StatementRecovery::rollback()
             image.value().record);
     }
 
-    bool tableDirChanged{false};
+    std::set<std::filesystem::path> changedDirectories;
 
     for (const auto &[relativePath, metadata] : rollbackFiles)
     {
@@ -438,7 +447,7 @@ void StatementRecovery::rollback()
             // LinuxDirectory dir{relativePath.parent_path()};
             try
             {
-                tableDir_.deleteFile(relativePath.filename());
+                fileDirectory(relativePath).deleteFile(relativePath.filename());
             }
             catch (const std::system_error &error)
             {
@@ -449,20 +458,20 @@ void StatementRecovery::rollback()
             }
             // (void)std::filesystem::remove(dbRootPath_ / relativePath);
 
-            tableDirChanged = true;
+            changedDirectories.insert(relativePath.parent_path());
 
             continue;
         }
         auto [it, inserted] = openedFiles.try_emplace(
             relativePath,
-            tableDir_, relativePath.filename(),
+            fileDirectory(relativePath), relativePath.filename(),
             LinuxFile::OpenMode::OpenExisting);
 
         it->second.resize(metadata.originalSize);
         it->second.sync();
     }
-    if (tableDirChanged)
-        tableDir_.sync();
+    for (const auto &directory : changedDirectories)
+        LinuxDirectory(dbRootDir_, directory.empty() ? std::filesystem::path{"tables"} : directory).sync();
     journalDir_.deleteFile("journal.log");
 
     retirement_ = Retirement::Rollback;
@@ -489,17 +498,12 @@ void StatementRecovery::commit()
         }
         // Table mutation methods synchronize file contents before commit. Persist
         // new names too, including callers using StorageEngine directly.
-        bool tableDirChanged{false};
+        std::set<std::filesystem::path> changedDirectories;
         for (const auto &[relativePath, metadata] : originalFiles_)
-        {
             if (metadata.beforeImage.newFile)
-            {
-                tableDirChanged = true;
-                break;
-            }
-        }
-        if (tableDirChanged)
-            tableDir_.sync();
+                changedDirectories.insert(relativePath.parent_path());
+        for (const auto &directory : changedDirectories)
+            LinuxDirectory(dbRootDir_, directory.empty() ? std::filesystem::path{"tables"} : directory).sync();
         journalDir_.deleteFile("journal.log");
 
         retirement_ = Retirement::Commit;

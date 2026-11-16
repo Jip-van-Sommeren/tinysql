@@ -130,6 +130,8 @@ namespace
         Image result;
         for (const auto &entry : std::filesystem::directory_iterator(root / "tables"))
             result.emplace(entry.path().filename(), journal_test::readFile(entry.path()));
+        for (const auto &entry : std::filesystem::directory_iterator(root / "indexes"))
+            result.emplace(Path{"indexes"} / entry.path().filename(), journal_test::readFile(entry.path()));
         return result;
     }
 
@@ -152,9 +154,9 @@ namespace
     Image crashImage(const State &state, unsigned namesMode, unsigned dataMode)
     {
         auto names = state.durableNames;
-        // Independent early persistence of tables/ and journal/ entries. A
+        // Independent early persistence of tables/, indexes/, and journal/ entries. A
         // rename within journal/ is atomic, but need not survive without sync.
-        for (const auto &[directory, bit] : {std::pair{Path{"tables"}, 1u}, std::pair{Path{"journal"}, 2u}})
+        for (const auto &[directory, bit] : {std::pair{Path{"tables"}, 1u}, std::pair{Path{"journal"}, 2u}, std::pair{Path{"indexes"}, 4u}})
         {
             if (!(namesMode & bit)) continue;
             std::erase_if(names, [&](const auto &entry) { return entry.first.parent_path() == directory; });
@@ -187,7 +189,7 @@ namespace
         {
             auto engine = StorageEngine::open(root);
             const auto result = files(root);
-            require(result == before || result == after, "Mixed/partial table state");
+            require(result == before || result == after, "Mixed/partial database state");
             require(!std::filesystem::exists(root / "journal/journal.log") &&
                     !std::filesystem::exists(root / "journal/journal.pending"), "Recovery left a journal");
             // New work must be permitted after restart, including cache access.
@@ -209,7 +211,7 @@ namespace
         for (const auto &cut : model.cuts)
         {
             const auto context = scenario + " cut " + std::to_string(index++) + " " + cut.event;
-            for (unsigned namesMode = 0; namesMode < 4; ++namesMode)
+            for (unsigned namesMode = 0; namesMode < 8; ++namesMode)
             for (unsigned dataMode = 0; dataMode < 3; ++dataMode)
             {
                 const auto image = crashImage(cut.state, namesMode, dataMode);
@@ -221,7 +223,8 @@ namespace
                     // Names may refer to an unlinked inode retained by the
                     // durable directory. Locate it in the selected namespace.
                     const auto &names = ((name.parent_path() == "tables" && (namesMode & 1)) ||
-                                         (name.parent_path() == "journal" && (namesMode & 2)))
+                                         (name.parent_path() == "journal" && (namesMode & 2)) ||
+                                         (name.parent_path() == "indexes" && (namesMode & 4)))
                         ? cut.state.names : cut.state.durableNames;
                     const auto &node = cut.state.inodes.at(names.at(name));
                     for (const auto sector : node.dirty)
@@ -274,6 +277,7 @@ namespace
         // boundary slots several times within the same statement.
         { auto added = engine.createTable(BoundCreateTable{"added", {}, {}}); }
         first.insertRows({.tableName = "items", .rows = {Row{{std::int32_t{4}, std::string(1500, 'e')}}}});
+        engine.createIndex(BoundCreateIndex{"items", "item_ids", {0}, false});
     }
 
     void testCommitAndRecoveryPowerLoss()
@@ -291,7 +295,7 @@ namespace
             engine.commitStatement();
         }
         const auto after = files(root);
-        require(before != after && after.contains("added.table"), "Commit fixture did not change all files");
+        require(before != after && after.contains("added.table") && after.contains("indexes/item_ids.index"), "Commit fixture did not change all files");
         exercise(commit, replay, before, after, "commit");
         verify(replay, crashImage(commit.state, 0, 0), after, after, "acknowledged commit");
         for (const auto &operation : {"create", "write", "sync", "rename", "unlink"})
@@ -305,6 +309,7 @@ namespace
             auto table = engine.openTable("items");
             table.insertRows({.tableName = "items", .rows = {Row{{std::int32_t{5}, std::string(1500, 'f')}}}});
             { auto added = engine.createTable(BoundCreateTable{"abandoned", {}, {}}); }
+            engine.createIndex(BoundCreateIndex{"items", "abandoned", {0}, false});
         }
         Model recovery{root};
         {
@@ -352,9 +357,12 @@ extern "C"
     ssize_t __wrap_pwrite(int fd, const void *bytes, size_t count, off_t offset)
     {
         const auto path = active ? descriptorPath(fd) : Path{};
-        if (active) active->cut("write", path, "before");
+        // Anonymous sort spools are outside the database and disappear on crash.
+        const auto relative = active ? active->relative(path) : Path{};
+        const bool tracked = active && !relative.empty() && *relative.begin() != "..";
+        if (tracked) active->cut("write", path, "before");
         const auto result = __real_pwrite(fd, bytes, count, offset);
-        if (active && result > 0)
+        if (tracked && result > 0)
         {
             active->write(path, bytes, static_cast<std::size_t>(result), static_cast<std::size_t>(offset));
             active->cut("write", path, "after");
