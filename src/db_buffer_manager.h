@@ -92,7 +92,7 @@ public:
 
     std::vector<LocatedRow> insertRows(const std::vector<Row> &rows);
     std::vector<LocatedRow> insertRow(const Row &row);
-    void updateRows(const std::vector<LocatedRow> &rows);
+    std::vector<LocatedRow> updateRows(const std::vector<LocatedRow> &rows);
     std::uint64_t deleteRow(const RowId &rowId);
 
     std::uint64_t deleteIndex(const PageId pageId, const size_t index);
@@ -115,7 +115,14 @@ public:
     void flushAll();
     void sync();
     void requireReadable() const;
-    RowSchema getSchema() { return schema_; };
+    const RowSchema &getSchema() const { return schema_; }
+
+    // Mutate one node. A split returns the separator for its new right sibling.
+    std::optional<InternalIndexEntry> insertIntoLeaf(PageGuard &currentPage, std::size_t index, const LeafIndexEntry &entry);
+
+    void createNewRoot(PageId leftPageId, std::uint16_t level, const InternalIndexEntry &internal);
+
+    std::optional<InternalIndexEntry> insertIntoInternal(PageGuard &parentPage, std::size_t childIndex, const InternalIndexEntry &internal);
 
 private:
     friend class PageGuard;
@@ -137,6 +144,9 @@ private:
     void prepareForWrite(PageId pageId);
 
     void setPage(const Page &page, PageId pageId);
+
+    PageGuard createIndexPage(std::uint16_t level, PageId firstChildPageId = 0);
+    void replaceIndexPage(PageGuard &page, IndexPage contents, PageId nextPageId);
 
     void evictCleanPages();
     Page &fetchPage(PageId pageId, const PageReader &reader);

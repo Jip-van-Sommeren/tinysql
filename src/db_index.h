@@ -40,8 +40,6 @@ public:
     std::optional<LeafIndexEntry> next();
     void seek(const Row &key);
     void seek(const Row &key, const RowId &targetRowId);
-    void insertIndex(const LeafIndexEntry &entry);
-    void deleteIndex();
 
 private:
     friend class Index;
@@ -69,9 +67,10 @@ public:
     static Index open(const LinuxDirectory &indexDir,
                       const std::filesystem::path &relIndexPath,
                       StatementRecovery &statementRecovery);
+    // Incremental insertion into a new or existing tree, in the active statement.
     void insertIndexes(std::vector<LeafIndexEntry> indexValues);
     void insertIndexes(std::vector<LocatedRow> rows);
-    void deleteIndexes(std::vector<LocatedRow> rows);
+    void deleteIndexes(const std::vector<LocatedRow> &rows);
 
     // Builds a newly created, empty index in the caller's active statement.
     // The source table must stay unchanged for the duration of the build.
@@ -90,6 +89,8 @@ private:
     StatementRecovery &statementRecovery_;
     std::string tableName_;
     std::string indexName_;
+
+    void insertIndex(const LeafIndexEntry &entry);
 
     void validateHeaderPage();
 

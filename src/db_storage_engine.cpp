@@ -284,16 +284,15 @@ QueryResult StorageEngine::updateRows(const BoundUpdate &update)
         schema, updatedRows, excludedRows, tableNames, *this);
     if (!validationResult.valid)
         throw std::runtime_error(validationResult.message.value());
-    table.updateRows(updatedLocatedRows);
-
     auto indexes = indexesForTable(update.tableName);
-    if (!indexes.empty())
-    {
-        for (auto &index : indexes)
-        {
-            index.insertIndexes(updatedLocatedRows);
-        }
-    }
+    // Remove the entire old key set first so rows in this UPDATE can exchange
+    // unique keys. All table/index writes share the statement's undo journal.
+    for (auto &index : indexes)
+        index.deleteIndexes(rowsToUpdate);
+
+    const auto storedRows = table.updateRows(updatedLocatedRows);
+    for (auto &index : indexes)
+        index.insertIndexes(storedRows);
 
     return QueryResult{
         .columns = {},
@@ -474,7 +473,7 @@ std::vector<Index> StorageEngine::indexesForTable(const std::string &tableName)
     result.reserve(fileNames.size());
     for (const auto &fileName : fileNames)
     {
-        auto index = openIndex(fileName);
+        auto index = openIndex(std::filesystem::path{fileName});
         const auto &name = index.getTableName();
         if (name == tableName)
         {

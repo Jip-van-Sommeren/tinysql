@@ -352,23 +352,195 @@ std::uint64_t BufferManager::deleteIndex(const PageId pageId, const size_t index
 {
     requireReadable();
     PageGuard data = getPage<IndexPage>(pageId);
-    const IndexPage &stored = data.as<IndexPage>();
-    if (stored.slots.at(index).has(SlotFlag::Deleted))
+    auto contents = data.as<IndexPage>();
+    auto &entries = std::get<std::vector<LeafIndexEntry>>(contents.entries);
+    if (index >= entries.size())
         return 0;
 
-    // Capture both before-images before changing either page. Vector positions
-    // shift after erase; the slot index remains the row's address.
-    IndexPage &dataPage = data.write<IndexPage>();
-    auto &mutableEntries =
-        std::get<std::vector<LeafIndexEntry>>(dataPage.entries);
-    mutableEntries.erase(mutableEntries.begin() + index);
-    dataPage.slots.at(index).set(SlotFlag::Deleted);
-    // --headerPage.totalRowCount;
-    data.markDirty();
+    entries.erase(entries.begin() + static_cast<std::ptrdiff_t>(index));
+    // Index slots are packed positions, not stable table-row addresses. Keep
+    // empty leaves linked; their parent separators still delimit valid ranges.
+    replaceIndexPage(data, std::move(contents), data.page().nextPageId());
     return 1;
 }
 
-void BufferManager::updateRows(const std::vector<LocatedRow> &rows)
+namespace
+{
+    constexpr std::size_t IndexPayloadBytes =
+        PAGE_SIZE - PageHeaderLayout::Size - IndexPageHeader::serializedSize();
+
+    template <typename Entry>
+    std::size_t indexSplitPosition(const std::vector<Entry> &entries, const RowSchema &schema)
+    {
+        constexpr bool internal = std::same_as<Entry, InternalIndexEntry>;
+        std::vector<std::size_t> sizes;
+        std::size_t total = 0;
+        for (const auto &entry : entries)
+        {
+            sizes.push_back(entry.serializedSize(schema) + encodedSlotSize());
+            total += sizes.back();
+        }
+        std::size_t left = 0;
+        std::size_t best = 0;
+        std::size_t imbalance = std::numeric_limits<std::size_t>::max();
+        // Both leaves need entries; both internal pages need at least two children.
+        for (std::size_t i = 1; i < entries.size() - (internal ? 1u : 0u); ++i)
+        {
+            left += sizes[i - 1];
+            const auto right = total - left - (internal ? sizes[i] : 0);
+            if (left > IndexPayloadBytes || right > IndexPayloadBytes)
+                continue;
+            const auto difference = left > right ? left - right : right - left;
+            if (difference < imbalance)
+            {
+                best = i;
+                imbalance = difference;
+            }
+        }
+        if (best == 0)
+            throw std::runtime_error("Index entries cannot be split into two pages");
+        return best;
+    }
+}
+
+void BufferManager::replaceIndexPage(PageGuard &guard, IndexPage contents, PageId nextPageId)
+{
+    // Prepare the entire packed layout before changing the cached page.
+    (void)guard.as<IndexPage>();
+    std::vector<Slot> slots;
+    std::size_t offset = PageHeaderLayout::Size + IndexPageHeader::serializedSize();
+    std::size_t end = PAGE_SIZE;
+    std::visit([&](const auto &entries)
+    {
+        slots.reserve(entries.size());
+        for (const auto &entry : entries)
+        {
+            const auto size = entry.serializedSize(schema_);
+            if (size + encodedSlotSize() > end - offset)
+                throw std::runtime_error("Not enough space in index page");
+            slots.push_back(Slot{static_cast<std::uint16_t>(offset),
+                                 static_cast<std::uint16_t>(size), 0});
+            offset += size;
+            end -= encodedSlotSize();
+        }
+    }, contents.entries);
+    contents.slots = std::move(slots);
+
+    auto &page = guard.writePage();
+    page.header.slotCount = static_cast<std::uint16_t>(contents.slots.size());
+    page.header.freeSpaceStart = static_cast<std::uint16_t>(offset);
+    page.header.freeSpaceEnd = static_cast<std::uint16_t>(end);
+    page.header.nextPageId = nextPageId;
+    page.data = std::move(contents);
+}
+
+PageGuard BufferManager::createIndexPage(std::uint16_t level, PageId firstChildPageId)
+{
+    if (!indexFile_ || (level == 0) != (firstChildPageId == 0))
+        throw std::logic_error("Invalid new index page");
+    auto header = getIndexHeaderPage();
+    const auto id = header.as<IndexHeaderPage>().nextUnusedPageId;
+    if (id == 0 || id == std::numeric_limits<PageId>::max())
+        throw std::overflow_error("No more index page IDs available");
+    if (id < pageCount() || pages.contains(id))
+        throw std::runtime_error("Index page allocation would overwrite an existing page");
+
+    auto page = makeEmptyPage<IndexPage>(id);
+    auto &index = std::get<IndexPage>(page.data);
+    index.header.level = level;
+    index.header.firstChildPageId = firstChildPageId;
+    if (level != 0)
+        index.entries = std::vector<InternalIndexEntry>{};
+
+    // Capture the metadata and original file length before allocating a page.
+    header.write<IndexHeaderPage>().nextUnusedPageId = id + 1;
+    prepareForWrite(id);
+    setPage(page, id);
+    return getPage<IndexPage>(id);
+}
+
+std::optional<InternalIndexEntry> BufferManager::insertIntoLeaf(
+    PageGuard &currentPage, std::size_t position, const LeafIndexEntry &entry)
+{
+    const auto &stored = currentPage.as<IndexPage>();
+    auto entries = std::get<std::vector<LeafIndexEntry>>(stored.entries);
+    if (position > entries.size())
+        throw std::out_of_range("Invalid index leaf insertion position");
+    const auto &header = currentPage.page().header;
+    if (header.freeSpaceEnd < header.freeSpaceStart)
+        throw std::runtime_error("Invalid index free space pointers");
+    const auto freeSpace = static_cast<std::size_t>(header.freeSpaceEnd - header.freeSpaceStart);
+    entries.insert(entries.begin() + static_cast<std::ptrdiff_t>(position), entry);
+    IndexPage left = stored;
+    if (entry.serializedSize(schema_) + encodedSlotSize() <= freeSpace)
+    {
+        left.entries = std::move(entries);
+        replaceIndexPage(currentPage, std::move(left), header.nextPageId);
+        return std::nullopt;
+    }
+
+    const auto middle = indexSplitPosition(entries, schema_);
+    auto rightPage = createIndexPage(0);
+    const auto rightId = rightPage.page().pageId();
+    InternalIndexEntry separator{entries[middle].key, entries[middle].rowId, rightId};
+    const auto split = entries.begin() + static_cast<std::ptrdiff_t>(middle);
+    IndexPage right{};
+    right.entries = std::vector<LeafIndexEntry>(split, entries.end());
+    entries.erase(split, entries.end());
+    left.entries = std::move(entries);
+    replaceIndexPage(rightPage, std::move(right), header.nextPageId);
+    replaceIndexPage(currentPage, std::move(left), rightId);
+    return separator;
+}
+
+std::optional<InternalIndexEntry> BufferManager::insertIntoInternal(
+    PageGuard &parentPage, std::size_t childIndex, const InternalIndexEntry &entry)
+{
+    const auto &stored = parentPage.as<IndexPage>();
+    auto entries = std::get<std::vector<InternalIndexEntry>>(stored.entries);
+    if (childIndex > entries.size())
+        throw std::out_of_range("Invalid index child insertion position");
+    const auto &header = parentPage.page().header;
+    if (header.freeSpaceEnd < header.freeSpaceStart)
+        throw std::runtime_error("Invalid index free space pointers");
+    const auto freeSpace = static_cast<std::size_t>(header.freeSpaceEnd - header.freeSpaceStart);
+    entries.insert(entries.begin() + static_cast<std::ptrdiff_t>(childIndex), entry);
+    IndexPage left = stored;
+    if (entry.serializedSize(schema_) + encodedSlotSize() <= freeSpace)
+    {
+        left.entries = std::move(entries);
+        replaceIndexPage(parentPage, std::move(left), header.nextPageId);
+        return std::nullopt;
+    }
+
+    const auto middle = indexSplitPosition(entries, schema_);
+    const auto promoted = entries[middle];
+    auto rightPage = createIndexPage(stored.header.level, promoted.pageId);
+    IndexPage right = rightPage.as<IndexPage>();
+    const auto split = entries.begin() + static_cast<std::ptrdiff_t>(middle);
+    right.entries = std::vector<InternalIndexEntry>(split + 1, entries.end());
+    entries.erase(split, entries.end());
+    left.entries = std::move(entries);
+    const auto rightId = rightPage.page().pageId();
+    replaceIndexPage(rightPage, std::move(right), 0);
+    replaceIndexPage(parentPage, std::move(left), 0);
+    return InternalIndexEntry{promoted.separatorKey, promoted.separatorRowId, rightId};
+}
+
+void BufferManager::createNewRoot(
+    PageId leftPageId, std::uint16_t level, const InternalIndexEntry &separator)
+{
+    if (level == std::numeric_limits<std::uint16_t>::max())
+        throw std::overflow_error("Index tree is too tall");
+    auto root = createIndexPage(static_cast<std::uint16_t>(level + 1), leftPageId);
+    auto contents = root.as<IndexPage>();
+    contents.entries = std::vector<InternalIndexEntry>{separator};
+    replaceIndexPage(root, std::move(contents), 0);
+    auto header = getIndexHeaderPage();
+    header.write<IndexHeaderPage>().rootPageId = root.page().pageId();
+}
+
+std::vector<LocatedRow> BufferManager::updateRows(const std::vector<LocatedRow> &rows)
 {
     auto delRowIds = rows | std::views::transform(
                                 [](const LocatedRow &located) -> const RowId &
@@ -383,7 +555,7 @@ void BufferManager::updateRows(const std::vector<LocatedRow> &rows)
                                        return located.row;
                                    });
 
-    insertRowsImpl(replacements);
+    return insertRowsImpl(replacements);
 }
 
 std::vector<LocatedRow> BufferManager::insertRow(const Row &row)

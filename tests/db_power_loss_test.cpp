@@ -2,6 +2,7 @@
 #include "db_storage_engine.h"
 #include "db_test_directory.h"
 #include "db_test_journal.h"
+#include "db_test_index.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -280,6 +281,76 @@ namespace
         engine.createIndex(BoundCreateIndex{"items", "item_ids", {0}, false});
     }
 
+    void testIndexInsertionPowerLoss()
+    {
+        TestDirectory directory{"db-index-insert-power-loss"};
+        const auto root = directory.path / "db";
+        const auto replay = directory.path / "replay";
+        {
+            auto db = Database::create(root, "test");
+            db.executeSql("CREATE TABLE items (id INT, value TEXT);");
+            db.executeSql("INSERT INTO items VALUES (1, '" + std::string(1900, 'a') +
+                          "'), (2, '" + std::string(1900, 'b') + "');");
+            db.executeSql("CREATE INDEX values_index ON items (value);");
+        }
+        const auto before = files(root);
+        const auto previousChecks = checked;
+        Model insertion{root};
+        {
+            auto db = Database::open(root, "test");
+            Observe observe{insertion};
+            db.executeSql("INSERT INTO items VALUES (3, '" + std::string(1900, 'c') +
+                          "'), (4, '" + std::string(1900, 'd') +
+                          "'), (5, '" + std::string(1900, 'e') + "');");
+        }
+        const auto after = files(root);
+        index_test::Tree tree(root, "values_index");
+        require(tree.height == 2 && tree.entries.size() == 5,
+                "Power-loss fixture did not split the leaf and internal root");
+        exercise(insertion, replay, before, after, "index insertion");
+        verify(replay, crashImage(insertion.state, 0, 0), after, after, "committed index insertion");
+        std::cout << "Verified " << checked - previousChecks << " index insertion power-loss images\n";
+    }
+
+    void testIndexMutationPowerLoss()
+    {
+        for (const bool update : {true, false})
+        {
+            TestDirectory directory{"db-index-mutation-power-loss"};
+            const auto root = directory.path / "db";
+            const auto replay = directory.path / "replay";
+            {
+                auto db = Database::create(root, "test");
+                db.executeSql("CREATE TABLE items (id INT, value TEXT);");
+                db.executeSql("INSERT INTO items VALUES (1, '" + std::string(1500, 'a') +
+                              "'), (2, '" + std::string(1500, 'b') +
+                              "'), (3, '" + std::string(1500, 'c') + "');");
+                db.executeSql("CREATE UNIQUE INDEX ids ON items (id);");
+                db.executeSql("CREATE INDEX values_index ON items (value);");
+            }
+            const auto before = files(root);
+            const auto previousChecks = checked;
+            Model mutation{root};
+            {
+                auto db = Database::open(root, "test");
+                Observe observe{mutation};
+                if (update)
+                    db.executeSql("UPDATE items SET id = 4 - id, value = '" + std::string(1900, 'z') + "';");
+                else
+                    db.executeSql("DELETE FROM items WHERE id <= 2;");
+            }
+            const auto after = files(root);
+            require(before != after, "Index mutation power-loss fixture did not change storage");
+            index_test::Tree tree(root, "values_index", true);
+            require(tree.entries.size() == (update ? 3u : 1u), "Index mutation missed rows");
+            tree.verifyRouting();
+            const std::string scenario = update ? "index update" : "index delete";
+            exercise(mutation, replay, before, after, scenario);
+            verify(replay, crashImage(mutation.state, 0, 0), after, after, "committed " + scenario);
+            std::cout << "Verified " << checked - previousChecks << ' ' << scenario << " power-loss images\n";
+        }
+    }
+
     void testCommitAndRecoveryPowerLoss()
     {
         TestDirectory directory{"db-power-loss"};
@@ -335,6 +406,17 @@ extern "C"
 
     long __wrap_syscall(long number, ...)
     {
+        // Index discovery enumerates the directory during SQL INSERT.
+        if (number == SYS_getdents64)
+        {
+            va_list args;
+            va_start(args, number);
+            const int fd = va_arg(args, int);
+            auto *buffer = va_arg(args, char *);
+            const auto size = va_arg(args, std::size_t);
+            va_end(args);
+            return __real_syscall(number, fd, buffer, size);
+        }
         if (number != SYS_openat2) { errno = ENOSYS; return -1; }
         va_list args;
         va_start(args, number);
@@ -423,7 +505,12 @@ extern "C"
 
 int main()
 {
-    try { testCommitAndRecoveryPowerLoss(); }
+    try
+    {
+        testCommitAndRecoveryPowerLoss();
+        testIndexInsertionPowerLoss();
+        testIndexMutationPowerLoss();
+    }
     catch (const std::exception &error)
     {
         std::cerr << error.what() << '\n';

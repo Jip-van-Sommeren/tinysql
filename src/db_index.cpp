@@ -1,6 +1,9 @@
 #include "db_index.h"
 #include "db_table.h"
 #include "db_index_codec.h"
+#include "db_row_validator.h"
+#include "db_write.h"
+#include <algorithm>
 #include <utility>
 #include <variant>
 
@@ -9,7 +12,8 @@ IndexCursor::IndexCursor(Index &index)
 {
     const PageGuard header = index_->bufferManager_.getIndexHeaderPage();
     pageId_ = header.as<IndexHeaderPage>().rootPageId;
-    remainingPages_ = index_->bufferManager_.pageCount();
+    // Include allocated pages that have not been flushed yet.
+    remainingPages_ = header.as<IndexHeaderPage>().nextUnusedPageId;
 }
 
 IndexCursor::IndexCursor(IndexCursor &&other) noexcept
@@ -17,7 +21,8 @@ IndexCursor::IndexCursor(IndexCursor &&other) noexcept
       pageId_(std::exchange(other.pageId_, 0)),
       rowIndex_(std::exchange(other.rowIndex_, 0)),
       currentPage_(std::move(other.currentPage_)),
-      remainingPages_(std::exchange(other.remainingPages_, 0))
+      remainingPages_(std::exchange(other.remainingPages_, 0)),
+      ancestorPages_(std::move(other.ancestorPages_))
 {
     other.currentPage_.reset();
 }
@@ -32,6 +37,7 @@ IndexCursor &IndexCursor::operator=(IndexCursor &&other) noexcept
         pageId_ = std::exchange(other.pageId_, 0);
         rowIndex_ = std::exchange(other.rowIndex_, 0);
         remainingPages_ = std::exchange(other.remainingPages_, 0);
+        ancestorPages_ = std::move(other.ancestorPages_);
     }
     return *this;
 }
@@ -59,7 +65,7 @@ void IndexCursor::seek(const Row &key, const RowId &targetRowId)
 
     pageId_ = metadata.rootPageId;
 
-    remainingPages_ = index_->bufferManager_.pageCount();
+    remainingPages_ = metadata.nextUnusedPageId;
 
     if (key.values.empty())
         return;
@@ -145,9 +151,8 @@ void IndexCursor::seek(const Row &key)
             index_->bufferManager_.getIndexHeaderPage();
 
         pageId_ = header.as<IndexHeaderPage>().rootPageId;
+        remainingPages_ = header.as<IndexHeaderPage>().nextUnusedPageId;
     }
-
-    remainingPages_ = index_->bufferManager_.pageCount();
 
     if (key.values.empty())
         return;
@@ -172,19 +177,6 @@ void IndexCursor::seek(const Row &key)
             const auto &internalEntries =
                 std::get<std::vector<InternalIndexEntry>>(page.entries);
             PageId child = page.header.firstChildPageId;
-            for (const auto &entry : internalEntries)
-            {
-                const int order =
-                    comparePartialIndexKeys(entry.separatorKey, key);
-
-                if (order >= 0)
-                {
-                    break;
-                }
-
-                child = entry.pageId;
-            }
-
             const auto position = std::lower_bound(
                 internalEntries.begin(),
                 internalEntries.end(),
@@ -227,15 +219,55 @@ void IndexCursor::seek(const Row &key)
     return;
 }
 
-void IndexCursor::insertIndex(const LeafIndexEntry &entry)
+void Index::insertIndex(const LeafIndexEntry &entry)
 {
-    auto &page = currentPage_->page();
-    auto header = page.header;
-    const auto space = header.freeSpaceEnd - header.freeSpaceStart;
-    if (space > entry.serializedSize(index_->bufferManager_.getSchema()))
+    const auto &schema = bufferManager_.getSchema();
+    const auto validation = validateRowAgainstSchema(schema.columns, entry.key);
+    if (!validation.valid)
+        throw std::invalid_argument(validation.message);
+    // Use the same key-size limit as bulk loading. Two separators must fit
+    // in an internal node so a split can leave two children on each side.
+    constexpr auto payloadBytes = PAGE_SIZE - PageHeaderLayout::Size - IndexPageHeader::serializedSize();
+    if (entry.serializedSize(schema) + sizeof(PageId) + encodedSlotSize() > payloadBytes / 2)
+        throw std::runtime_error("Index key is too large for an index page");
+
+    const bool unique = bufferManager_.getIndexHeaderPage().as<IndexHeaderPage>().unique;
+    if (unique && !indexKeyHasNull(entry.key))
     {
-        auto &page = currentPage_->write<IndexPage>();
-        auto &mutableEntries = std::get<std::vector<LeafIndexEntry>>(page.entries);
+        auto existing = seekLowerBound(entry.key);
+        const auto match = existing.next();
+        if (match && compareIndexKeys(match->key, entry.key) == 0)
+            throw std::runtime_error("UNIQUE INDEX can contain only unique non-NULL keys");
+    }
+
+    auto cursor = IndexCursor(*this);
+    cursor.seek(entry.key, entry.rowId);
+    if (!cursor.currentPage_)
+        throw std::runtime_error("Index has no root leaf");
+    const auto &entries = std::get<std::vector<LeafIndexEntry>>(
+        cursor.currentPage_->as<IndexPage>().entries);
+    if (cursor.rowIndex_ < entries.size() && entries[cursor.rowIndex_].rowId == entry.rowId &&
+        compareIndexKeys(entries[cursor.rowIndex_].key, entry.key) == 0)
+        throw std::runtime_error("Index entry already exists");
+
+    PageId leftPageId = cursor.pageId_;
+    std::uint16_t level = 0;
+    auto split = bufferManager_.insertIntoLeaf(*cursor.currentPage_, cursor.rowIndex_, entry);
+    cursor.currentPage_.reset();
+
+    while (split)
+    {
+        if (cursor.ancestorPages_.empty())
+        {
+            bufferManager_.createNewRoot(leftPageId, level, *split);
+            break;
+        }
+        const auto path = cursor.ancestorPages_.back();
+        cursor.ancestorPages_.pop_back();
+        auto parent = bufferManager_.getPage<IndexPage>(path.parentPageId);
+        leftPageId = path.parentPageId;
+        level = parent.as<IndexPage>().header.level;
+        split = bufferManager_.insertIntoInternal(parent, path.childIndex, *split);
     }
 }
 
@@ -281,14 +313,6 @@ std::optional<LeafIndexEntry> IndexCursor::next()
     }
 
     return std::nullopt;
-}
-
-void IndexCursor::deleteIndex()
-{
-    if (!index_)
-        return;
-    index_->bufferManager_.requireReadable();
-    index_->bufferManager_.deleteIndex(pageId_, rowIndex_);
 }
 
 Index::Index(const LinuxDirectory &indexDir,
@@ -338,48 +362,83 @@ void Index::initializeNewIndex(const CreateIndexPayload &createIndexPayload)
     bufferManager_.sync();
 }
 
-void Index::deleteIndexes(std::vector<LocatedRow> rows)
+void Index::deleteIndexes(const std::vector<LocatedRow> &rows)
 {
-    auto cursor = IndexCursor(*this);
-    const auto columnIds = bufferManager_.getIndexHeaderPage().as<IndexHeaderPage>().keyColumns;
-
-    for (const auto &locRow : rows)
+    bufferManager_.requireReadable();
+    if (rows.empty())
+        return;
+    try
     {
-        Row key{};
-        key.values.reserve(columnIds.size());
-        for (ColumnId id : columnIds)
-            key.values.push_back(locRow.row.values.at(id));
-        cursor.seek(key, locRow.id);
-        cursor.deleteIndex();
+        auto cursor = IndexCursor(*this);
+        const auto columnIds = bufferManager_.getIndexHeaderPage().as<IndexHeaderPage>().keyColumns;
+        for (const auto &locRow : rows)
+        {
+            Row key{};
+            key.values.reserve(columnIds.size());
+            for (ColumnId id : columnIds)
+                key.values.push_back(locRow.row.values.at(id));
+            cursor.seek(key, locRow.id);
+            if (!cursor.currentPage_)
+                continue;
+            const auto &entries = std::get<std::vector<LeafIndexEntry>>(
+                cursor.currentPage_->as<IndexPage>().entries);
+            // A lower bound can be the successor or the end of this leaf.
+            // Delete only the exact (key, table RowId) requested by the caller.
+            if (cursor.rowIndex_ == entries.size())
+                continue;
+            const auto &entry = entries[cursor.rowIndex_];
+            if (entry.rowId == locRow.id && compareIndexKeys(entry.key, key) == 0)
+                bufferManager_.deleteIndex(cursor.pageId_, cursor.rowIndex_);
+        }
+        bufferManager_.flushAll();
+        bufferManager_.sync();
+    }
+    catch (...)
+    {
+        statementRecovery_.statementFailed();
+        throw;
     }
 }
 
 void Index::insertIndexes(std::vector<LocatedRow> rows)
 {
-
-    const auto columnIds = bufferManager_.getIndexHeaderPage().as<IndexHeaderPage>().keyColumns;
-    auto cursor = IndexCursor(*this);
-
-    for (const auto &locRow : rows)
+    bufferManager_.requireReadable();
+    try
     {
-        Row key{};
-        key.values.reserve(columnIds.size());
-        for (ColumnId id : columnIds)
-            key.values.push_back(locRow.row.values.at(id));
-
-        const auto &newEntry = LeafIndexEntry{.key = std::move(key), .rowId = locRow.id};
-        cursor.seek(newEntry.key, newEntry.rowId);
-        cursor.insertIndex(newEntry);
+        const auto columnIds = bufferManager_.getIndexHeaderPage().as<IndexHeaderPage>().keyColumns;
+        for (const auto &locRow : rows)
+        {
+            Row key{};
+            key.values.reserve(columnIds.size());
+            for (ColumnId id : columnIds)
+                key.values.push_back(locRow.row.values.at(id));
+            insertIndex(LeafIndexEntry{std::move(key), locRow.id});
+        }
+        bufferManager_.flushAll();
+        bufferManager_.sync();
+    }
+    catch (...)
+    {
+        statementRecovery_.statementFailed();
+        throw;
     }
 }
 
 void Index::insertIndexes(std::vector<LeafIndexEntry> indexValues)
 {
-    std::size_t position = 0;
-    bulkLoad([&]() -> std::optional<LeafIndexEntry>
-             {
-        if (position == indexValues.size()) return std::nullopt;
-        return std::move(indexValues[position++]); });
+    bufferManager_.requireReadable();
+    try
+    {
+        for (const auto &entry : indexValues)
+            insertIndex(entry);
+        bufferManager_.flushAll();
+        bufferManager_.sync();
+    }
+    catch (...)
+    {
+        statementRecovery_.statementFailed();
+        throw;
+    }
 }
 
 IndexBulkLoadStats Index::bulkLoad(Table &table, const IndexBulkLoadOptions &options)

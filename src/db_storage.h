@@ -223,6 +223,11 @@ struct IndexPageHeader
     }
 };
 
+struct RowSchema
+{
+    std::vector<Column> columns;
+};
+
 struct LeafIndexEntry
 {
     Row key;
@@ -233,6 +238,8 @@ struct LeafIndexEntry
 
 struct InternalIndexEntry
 {
+    // Lower bound for this child's range. It remains valid after deletion
+    // even when the boundary key itself is no longer present in the leaves.
     Row separatorKey;
     RowId separatorRowId;
     PageId pageId;
@@ -243,11 +250,6 @@ struct InternalIndexEntry
 using IndexEntry = std::variant<
     std::vector<LeafIndexEntry>,
     std::vector<InternalIndexEntry>>;
-
-struct RowSchema
-{
-    std::vector<Column> columns;
-};
 
 struct IndexPage
 {

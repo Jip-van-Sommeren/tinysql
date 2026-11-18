@@ -4,6 +4,7 @@
 #include "db_page_factory.h"
 #include "db_read.h"
 #include "db_test_directory.h"
+#include "db_test_index.h"
 #include "db_test_journal.h"
 #include "db_write.h"
 
@@ -43,97 +44,8 @@ namespace
         throw std::runtime_error("Missing error: " + message);
     }
 
-    bool same(const LeafIndexEntry &a, const LeafIndexEntry &b)
-    {
-        return a.key.values == b.key.values && a.rowId == b.rowId;
-    }
-
-    struct Tree
-    {
-        PageFile file;
-        IndexHeaderPage metadata;
-        RowSchema schema;
-        std::set<PageId> visited;
-        std::vector<PageId> leaves;
-        std::vector<LeafIndexEntry> entries;
-        std::uint16_t height;
-
-        Tree(const std::filesystem::path &root, const std::string &name)
-            : file(LinuxDirectory(root / "indexes"), name + ".index", LinuxFile::OpenMode::ReadOnly),
-              metadata(std::get<IndexHeaderPage>(decodeIndexHeaderPage(file.readPage(0)).data)),
-              schema{metadata.columns}, height(0)
-        {
-            const auto page = decodeIndexPage(file.readPage(metadata.rootPageId), schema);
-            height = std::get<IndexPage>(page.data).header.level;
-            visit(metadata.rootPageId, height);
-            require(visited.size() + 1 == metadata.nextUnusedPageId, "Unreachable or missing tree pages");
-            require(file.size() == std::uint64_t{metadata.nextUnusedPageId} * PAGE_SIZE, "Incorrect index file length");
-            for (std::size_t i = 0; i < leaves.size(); ++i)
-            {
-                const auto leaf = decodeIndexPage(file.readPage(leaves[i]), schema);
-                require(leaf.nextPageId() == (i + 1 < leaves.size() ? leaves[i + 1] : 0), "Leaf sibling order is incorrect");
-            }
-            for (std::size_t i = 1; i < entries.size(); ++i)
-                require(indexEntryLess(entries[i - 1], entries[i]), "Leaf order is not strict by key and RowId");
-        }
-
-        std::optional<LeafIndexEntry> visit(PageId id, std::uint16_t level)
-        {
-            require(id != 0 && id < metadata.nextUnusedPageId && visited.insert(id).second, "Invalid child or cycle");
-            const auto page = decodeIndexPage(file.readPage(id), schema);
-            require(page.pageId() == id, "Stored page ID mismatch");
-            const auto &node = std::get<IndexPage>(page.data);
-            require(node.header.level == level, "Unbalanced tree");
-            if (level == 0)
-            {
-                leaves.push_back(id);
-                const auto &values = std::get<std::vector<LeafIndexEntry>>(node.entries);
-                require(!values.empty() || id == metadata.rootPageId, "Empty non-root leaf");
-                entries.insert(entries.end(), values.begin(), values.end());
-                if (values.empty()) return std::nullopt;
-                return values.front();
-            }
-            const auto &values = std::get<std::vector<InternalIndexEntry>>(node.entries);
-            require(!values.empty(), "Internal page has fewer than two children");
-            auto minimum = visit(node.header.firstChildPageId, static_cast<std::uint16_t>(level - 1));
-            for (const auto &separator : values)
-            {
-                const auto previousMaximum = entries.back();
-                auto childMin = visit(separator.pageId, static_cast<std::uint16_t>(level - 1));
-                require(childMin && same(*childMin, {separator.separatorKey, separator.separatorRowId}),
-                        "Separator is not the minimum of the right subtree");
-                require(indexEntryLess(previousMaximum, *childMin), "Child key ranges overlap");
-            }
-            return minimum;
-        }
-
-        // Route each stored entry using separators, independently of the leaf chain.
-        void verifyRouting()
-        {
-            for (const auto &entry : entries)
-            {
-                auto id = metadata.rootPageId;
-                for (;;)
-                {
-                    const auto page = decodeIndexPage(file.readPage(id), schema);
-                    const auto &node = std::get<IndexPage>(page.data);
-                    if (node.header.level == 0)
-                    {
-                        const auto &values = std::get<std::vector<LeafIndexEntry>>(node.entries);
-                        require(std::ranges::any_of(values, [&](const auto &v) { return same(v, entry); }),
-                                "Separator search routed to the wrong leaf");
-                        break;
-                    }
-                    id = node.header.firstChildPageId;
-                    for (const auto &separator : std::get<std::vector<InternalIndexEntry>>(node.entries))
-                    {
-                        if (indexEntryLess(entry, {separator.separatorKey, separator.separatorRowId})) break;
-                        id = separator.pageId;
-                    }
-                }
-            }
-        }
-    };
+    using index_test::same;
+    using index_test::Tree;
 
     CreateIndexPayload payload(const std::string &name, bool unique = false)
     {
@@ -262,13 +174,15 @@ namespace
             auto db = Database::create(root, "test");
             db.executeSql("CREATE TABLE items (id INT, text TEXT, number INT);");
             db.executeSql("CREATE INDEX empty_index ON items (text, number);");
+            Tree empty(root, "empty_index");
+            require(empty.entries.empty() && empty.height == 0 && empty.leaves.size() == 1, "Invalid empty root");
             db.executeSql("INSERT INTO items VALUES (1, 'b', -2), (2, 'a', 9), (3, NULL, 5), (4, NULL, 5);");
             db.executeSql("CREATE UNIQUE INDEX populated ON items (text, number);");
             requireError([&] { db.executeSql("CREATE INDEX populated ON items (id);"); }, "already exists");
             db.executeSql("CREATE INDEX reversed ON items (number, text);");
         }
-        Tree empty(root, "empty_index");
-        require(empty.entries.empty() && empty.height == 0 && empty.leaves.size() == 1, "Invalid empty root");
+        Tree maintained(root, "empty_index");
+        require(maintained.entries.size() == 4, "INSERT did not maintain the existing index");
         Tree populated(root, "populated");
         require(populated.entries.size() == 4 && populated.metadata.unique, "SQL CREATE INDEX did not populate entries");
         Tree reversed(root, "reversed");

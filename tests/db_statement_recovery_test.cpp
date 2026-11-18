@@ -991,6 +991,17 @@ extern "C"
 
     long __wrap_syscall(long number, ...)
     {
+        // Index discovery enumerates the directory during SQL INSERT.
+        if (number == SYS_getdents64)
+        {
+            va_list args;
+            va_start(args, number);
+            const int fd = va_arg(args, int);
+            auto *buffer = va_arg(args, char *);
+            const auto size = va_arg(args, std::size_t);
+            va_end(args);
+            return __real_syscall(number, fd, buffer, size);
+        }
         if (number != SYS_openat2) { errno = ENOSYS; return -1; }
         va_list args;
         va_start(args, number);

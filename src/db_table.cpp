@@ -146,16 +146,17 @@ std::vector<LocatedRow> Table::insertRows(const BoundInsert &insert)
     return locatedRows;
 }
 
-void Table::updateRows(const std::vector<LocatedRow> &updateRows)
+std::vector<LocatedRow> Table::updateRows(const std::vector<LocatedRow> &updateRows)
 {
     bufferManager.requireReadable();
     if (updateRows.empty())
     {
-        return;
+        return {};
     }
-    bufferManager.updateRows(updateRows);
+    auto locatedRows = bufferManager.updateRows(updateRows);
     bufferManager.flushAll();
     bufferManager.sync();
+    return locatedRows;
 }
 
 TableCursor Table::scan() &

@@ -63,6 +63,16 @@ target_link_libraries(db PRIVATE db_core)
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(db_index_mutation_test tests/db_index_mutation_test.cpp)
+    db_configure_target(db_index_mutation_test PRIVATE)
+    target_link_libraries(db_index_mutation_test PRIVATE db_core)
+    add_test(NAME db_index_mutation_test COMMAND db_index_mutation_test)
+
+    add_executable(db_index_insert_test tests/db_index_insert_test.cpp)
+    db_configure_target(db_index_insert_test PRIVATE)
+    target_link_libraries(db_index_insert_test PRIVATE db_core)
+    add_test(NAME db_index_insert_test COMMAND db_index_insert_test)
+
     add_executable(db_index_bulk_test tests/db_index_bulk_test.cpp)
     db_configure_target(db_index_bulk_test PRIVATE)
     target_link_libraries(db_index_bulk_test PRIVATE db_core)

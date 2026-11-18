@@ -48,7 +48,8 @@ public:
     static Table open(const LinuxDirectory &dbRoot, const std::filesystem::path &relTablePath, StatementRecovery &statementRecovery);
 
     std::vector<LocatedRow> insertRows(const BoundInsert &insert);
-    void updateRows(const std::vector<LocatedRow> &updateRows);
+    // Replacements may move; return their actual stored RowIds.
+    std::vector<LocatedRow> updateRows(const std::vector<LocatedRow> &updateRows);
 
     TableCursor scan() &;
     std::uint64_t deleteRows(const std::vector<LocatedRow> &delRows);
