@@ -340,6 +340,24 @@ std::unique_ptr<BoundExpr> HeaderPageDecoder::decodeExpression()
                     decoder.readUnsigned<std::uint32_t>())},
                 type);
 
+        case DataType::Date:
+            return std::make_unique<BoundLiteralExpr>(
+                Value{DateValue{std::bit_cast<std::int32_t>(
+                    decoder.readUnsigned<std::uint32_t>())}},
+                type);
+
+        case DataType::DateTimeOffset:
+        {
+            const auto msSinceEpoch = std::bit_cast<std::int64_t>(
+                decoder.readUnsigned<std::uint64_t>());
+            const auto offset = std::bit_cast<std::int32_t>(decoder.readUnsigned<std::uint32_t>());
+
+            return std::make_unique<BoundLiteralExpr>(
+                Value{DateTimeOffsetValue{
+                    .msSinceEpoch = msSinceEpoch,
+                    .minutesOffset = offset}},
+                type);
+        }
         case DataType::BigInt:
             return std::make_unique<BoundLiteralExpr>(
                 Value{std::bit_cast<std::int64_t>(
@@ -439,6 +457,22 @@ Value ValueDeserializer::decodeFixed(
 {
     switch (type)
     {
+    case DataType::Date:
+        return DateValue{std::bit_cast<std::int32_t>(
+            decoder.readUnsignedAt<std::uint32_t>(absoluteOffset))};
+
+    case DataType::DateTimeOffset:
+    {
+        const auto msSinceEpoch = std::bit_cast<std::int64_t>(
+            decoder.readUnsignedAt<std::uint64_t>(absoluteOffset));
+        const auto offset = std::bit_cast<std::int32_t>(
+            decoder.readUnsignedAt<std::uint32_t>(
+                absoluteOffset + sizeof(std::int64_t)));
+        return DateTimeOffsetValue{
+            .msSinceEpoch = msSinceEpoch,
+            .minutesOffset = offset};
+    }
+
     case DataType::Int:
     {
         std::uint32_t raw =

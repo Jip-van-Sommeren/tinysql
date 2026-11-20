@@ -1,4 +1,5 @@
 #include "db_index.h"
+#include "db_query_exception.h"
 #include "db_index_codec.h"
 #include "db_page_factory.h"
 #include "db_read.h"
@@ -209,7 +210,7 @@ namespace
             // Guarantee room for two separators, so internal pages have fanout
             // of at least three and a trailing singleton can be redistributed.
             if (entry->serializedSize(schema) + sizeof(PageId) + encodedSlotSize() > NodeBytes / 2)
-                throw std::runtime_error("Index key is too large for an index page");
+                throw QueryException(QueryErrorCode::Validation, "Index key is too large for an index page");
             const auto charge = memoryCharge(*entry);
             if (charge > options.memoryBudgetBytes)
                 throw std::runtime_error("Index sort memory budget is too small for one entry");
@@ -321,7 +322,7 @@ IndexBulkLoadStats Index::bulkLoad(EntrySource next, const IndexBulkLoadOptions 
         {
             if (metadata.unique && !indexKeyHasNull(entry->key) && previousKey &&
                 compareIndexKeys(*previousKey, entry->key) == 0)
-                throw std::runtime_error("UNIQUE INDEX can contain only unique non-NULL keys");
+                throw QueryException(QueryErrorCode::Constraint, "UNIQUE INDEX can contain only unique non-NULL keys");
             if (metadata.unique)
                 previousKey = entry->key;
             const auto size = entry->serializedSize(schema) + encodedSlotSize();

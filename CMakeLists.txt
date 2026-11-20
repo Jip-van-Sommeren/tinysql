@@ -63,6 +63,20 @@ target_link_libraries(db PRIVATE db_core)
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(db_query_error_test tests/db_query_error_test.cpp)
+    db_configure_target(db_query_error_test PRIVATE)
+    target_link_libraries(db_query_error_test PRIVATE db_core)
+    add_test(NAME db_query_error_test COMMAND db_query_error_test)
+
+    add_executable(db_date_test tests/db_date_test.cpp)
+    db_configure_target(db_date_test PRIVATE)
+    target_link_libraries(db_date_test PRIVATE db_core)
+    foreach(date_group conversion parser binding evaluator storage sql defaults indexes
+            offset_conversion offset_parser offset_binding offset_evaluator offset_storage
+            offset_sql offset_defaults offset_indexes cross_binding cross_evaluator cross_sql)
+        add_test(NAME db_date_${date_group}_test COMMAND db_date_test ${date_group})
+    endforeach()
+
     add_executable(db_index_mutation_test tests/db_index_mutation_test.cpp)
     db_configure_target(db_index_mutation_test PRIVATE)
     target_link_libraries(db_index_mutation_test PRIVATE db_core)

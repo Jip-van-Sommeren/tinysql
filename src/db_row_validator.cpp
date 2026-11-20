@@ -18,6 +18,12 @@ namespace
         case DataType::Int:
             return std::holds_alternative<std::int32_t>(value);
 
+        case DataType::Date:
+            return std::holds_alternative<DateValue>(value);
+
+        case DataType::DateTimeOffset:
+            return std::holds_alternative<DateTimeOffsetValue>(value);
+
         case DataType::BigInt:
             return std::holds_alternative<std::int64_t>(value);
 
@@ -49,6 +55,10 @@ namespace
             return "null";
         case DataType::Int:
             return "int";
+        case DataType::Date:
+            return "date";
+        case DataType::DateTimeOffset:
+            return "datetimeoffset";
         case DataType::BigInt:
             return "bigint";
         case DataType::Double:
@@ -66,6 +76,10 @@ namespace
 
     std::string valueTypeName(const Value &value)
     {
+        if (std::holds_alternative<DateValue>(value))
+            return "date";
+        if (std::holds_alternative<DateTimeOffsetValue>(value))
+            return "datetimeoffset";
         if (std::holds_alternative<std::monostate>(value))
         {
             return "null";

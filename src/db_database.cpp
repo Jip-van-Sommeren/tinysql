@@ -1,6 +1,7 @@
 #include "db_database.h"
 
 #include "db_query_executor.h"
+#include "db_query_exception.h"
 #include "db_sql_lexer.h"
 #include "db_sql_parser.h"
 
@@ -58,4 +59,20 @@ QueryResult Database::executeSql(const std::string &sql)
 
     QueryExecutor executor{storageEngine, dbName};
     return executor.execute(query);
+}
+
+std::expected<QueryResult, QueryError> Database::tryExecuteSql(const std::string &sql)
+{
+    try
+    {
+        return executeSql(sql);
+    }
+    catch (const QueryException &error)
+    {
+        return std::unexpected(QueryError{error.code(), error.what()});
+    }
+    catch (const QueryNumericOverflow &error)
+    {
+        return std::unexpected(QueryError{QueryErrorCode::Numeric, error.what()});
+    }
 }

@@ -1,4 +1,5 @@
 #include "db_decimal.h"
+#include "db_query_exception.h"
 
 #include <algorithm>
 #include <charconv>
@@ -40,7 +41,7 @@ namespace
             if (value > std::numeric_limits<std::int64_t>::max() / 10 ||
                 value < std::numeric_limits<std::int64_t>::min() / 10)
             {
-                throw std::overflow_error("Decimal coefficient overflow");
+                throw QueryNumericOverflow("Decimal coefficient overflow");
             }
 
             value *= 10;
@@ -56,7 +57,7 @@ namespace
             (right < 0 &&
              left < std::numeric_limits<std::int64_t>::min() - right))
         {
-            throw std::overflow_error("Decimal coefficient overflow");
+            throw QueryNumericOverflow("Decimal coefficient overflow");
         }
 
         return left + right;
@@ -74,7 +75,7 @@ namespace
             (right == -1 &&
              left == std::numeric_limits<std::int64_t>::min()))
         {
-            throw std::overflow_error("Decimal coefficient overflow");
+            throw QueryNumericOverflow("Decimal coefficient overflow");
         }
 
         if (left > 0)
@@ -84,7 +85,7 @@ namespace
                 (right < 0 &&
                  right < std::numeric_limits<std::int64_t>::min() / left))
             {
-                throw std::overflow_error("Decimal coefficient overflow");
+                throw QueryNumericOverflow("Decimal coefficient overflow");
             }
         }
         else if ((right > 0 &&
@@ -92,7 +93,7 @@ namespace
                  (right < 0 &&
                   left < std::numeric_limits<std::int64_t>::max() / right))
         {
-            throw std::overflow_error("Decimal coefficient overflow");
+            throw QueryNumericOverflow("Decimal coefficient overflow");
         }
 
         return left * right;
@@ -147,7 +148,7 @@ DecimalValue parseDecimalLiteral(std::string_view text)
 {
     if (text.empty())
     {
-        throw std::runtime_error("Empty decimal literal");
+        throw QueryException(QueryErrorCode::Numeric, "Empty decimal literal");
     }
 
     bool negative = false;
@@ -161,14 +162,14 @@ DecimalValue parseDecimalLiteral(std::string_view text)
     if (decimalPoint == std::string_view::npos ||
         text.find('.', decimalPoint + 1) != std::string_view::npos)
     {
-        throw std::runtime_error("Invalid decimal literal");
+        throw QueryException(QueryErrorCode::Numeric, "Invalid decimal literal");
     }
 
     std::string integral{text.substr(0, decimalPoint)};
     std::string fractional{text.substr(decimalPoint + 1)};
     if (integral.empty() || fractional.empty())
     {
-        throw std::runtime_error("Invalid decimal literal");
+        throw QueryException(QueryErrorCode::Numeric, "Invalid decimal literal");
     }
 
     const auto isDigit = [](char character)
@@ -178,7 +179,7 @@ DecimalValue parseDecimalLiteral(std::string_view text)
     if (!std::all_of(integral.begin(), integral.end(), isDigit) ||
         !std::all_of(fractional.begin(), fractional.end(), isDigit))
     {
-        throw std::runtime_error("Invalid decimal literal");
+        throw QueryException(QueryErrorCode::Numeric, "Invalid decimal literal");
     }
 
     while (!fractional.empty() && fractional.back() == '0')
@@ -187,7 +188,7 @@ DecimalValue parseDecimalLiteral(std::string_view text)
     }
     if (fractional.size() > MAX_DECIMAL_SCALE)
     {
-        throw std::overflow_error("Decimal scale exceeds 18 digits");
+        throw QueryNumericOverflow("Decimal scale exceeds 18 digits");
     }
 
     std::string digits = integral + fractional;
@@ -206,7 +207,7 @@ DecimalValue parseDecimalLiteral(std::string_view text)
     if (result.ec == std::errc::result_out_of_range ||
         result.ptr != digits.data() + digits.size())
     {
-        throw std::overflow_error("Decimal coefficient exceeds 64 bits");
+        throw QueryNumericOverflow("Decimal coefficient exceeds 64 bits");
     }
 
     const std::uint64_t positiveLimit =
@@ -215,7 +216,7 @@ DecimalValue parseDecimalLiteral(std::string_view text)
     if ((!negative && parsed > positiveLimit) ||
         (negative && parsed > negativeLimit))
     {
-        throw std::overflow_error("Decimal coefficient exceeds int64 range");
+        throw QueryNumericOverflow("Decimal coefficient exceeds int64 range");
     }
 
     std::int64_t coefficient;
@@ -246,7 +247,7 @@ DecimalValue decimalAbs(const DecimalValue &value)
 {
     if (value.coefficient == std::numeric_limits<std::int64_t>::min())
     {
-        throw std::overflow_error("Decimal coefficient overflow");
+        throw QueryNumericOverflow("Decimal coefficient overflow");
     }
 
     return DecimalValue{
@@ -336,7 +337,7 @@ DecimalValue negateDecimal(const DecimalValue &value)
 {
     if (value.coefficient == std::numeric_limits<std::int64_t>::min())
     {
-        throw std::overflow_error("Decimal coefficient overflow");
+        throw QueryNumericOverflow("Decimal coefficient overflow");
     }
 
     return DecimalValue{
@@ -369,7 +370,7 @@ DecimalValue multiplyDecimals(
 {
     if (left.scale + right.scale > MAX_DECIMAL_SCALE)
     {
-        throw std::overflow_error("Decimal scale exceeds 18 digits");
+        throw QueryNumericOverflow("Decimal scale exceeds 18 digits");
     }
 
     return normalizeDecimal(DecimalValue{
@@ -385,7 +386,7 @@ DecimalValue divideDecimals(
 {
     if (right.coefficient == 0)
     {
-        throw std::runtime_error("Division by zero in decimal expression");
+        throw QueryException(QueryErrorCode::Numeric, "Division by zero in decimal expression");
     }
 
     for (std::uint32_t scale = 0; scale <= MAX_DECIMAL_SCALE; ++scale)
@@ -415,7 +416,7 @@ DecimalValue divideDecimals(
             if (numerator == std::numeric_limits<std::int64_t>::min() &&
                 denominator == -1)
             {
-                throw std::overflow_error("Decimal coefficient overflow");
+                throw QueryNumericOverflow("Decimal coefficient overflow");
             }
 
             if (numerator % denominator == 0)
@@ -430,8 +431,7 @@ DecimalValue divideDecimals(
         }
     }
 
-    throw std::runtime_error(
-        "Decimal division has no exact result within 18 fractional digits");
+    throw QueryException(QueryErrorCode::Numeric, "Decimal division has no exact result within 18 fractional digits");
 }
 
 bool operator==(const DecimalValue &left, const DecimalValue &right)

@@ -63,6 +63,20 @@ struct StringExpr : Expr
     explicit StringExpr(std::string value);
 };
 
+struct DateExpr : Expr
+{
+    DateValue value;
+
+    explicit DateExpr(DateValue value);
+};
+
+struct DateTimeOffsetExpr : Expr
+{
+    DateTimeOffsetValue value;
+
+    explicit DateTimeOffsetExpr(DateTimeOffsetValue value);
+};
+
 struct FunctionCallExpr : Expr
 {
     std::string name;
@@ -479,6 +493,11 @@ public:
     UpdateStatement parseUpdateStatement();
     CreateTableStatement parseCreateTableStatement();
     CreateIndexStatement parseCreateIndexStatement(bool unique);
+
+    static std::int32_t dateToDays(const std::string &text);
+    static std::int64_t dateTimeToMilliseconds(const std::string &text);
+
+    static std::pair<std::int64_t, std::int32_t> dateTimeOffsetToMilliseconds(const std::string &text);
 
 private:
     std::vector<Token> tokens;

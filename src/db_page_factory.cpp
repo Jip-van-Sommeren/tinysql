@@ -162,10 +162,18 @@ std::vector<Column> buildStoredColumns(const std::vector<Column> &columns)
         switch (column.type)
         {
         case DataType::Int:
+        case DataType::Date:
             column.storage = FixedColumnStorage{
                 .offset = fixedOffset,
                 .size = static_cast<std::uint32_t>(sizeof(std::int32_t))};
             fixedOffset += static_cast<std::uint32_t>(sizeof(std::int32_t));
+            break;
+
+        case DataType::DateTimeOffset:
+            column.storage = FixedColumnStorage{
+                .offset = fixedOffset,
+                .size = static_cast<std::uint32_t>(sizeof(std::int32_t) + sizeof(std::int64_t))};
+            fixedOffset += static_cast<std::uint32_t>(sizeof(std::int32_t) + sizeof(std::int64_t));
             break;
 
         case DataType::BigInt:

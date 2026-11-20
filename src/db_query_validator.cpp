@@ -1,4 +1,5 @@
 #include "db_query_validator.h"
+#include "db_query_exception.h"
 #include "db_decimal.h"
 #include "db_expression_evaluator.h"
 
@@ -17,9 +18,110 @@
 #include <uuid/uuid.h>
 #include <algorithm>
 #include <variant>
+#include <chrono>
 
 namespace
 {
+
+    DateValue parseDate(const std::string &rawDate)
+    {
+        const auto daysSinceDate = Parser::dateToDays(rawDate);
+        return DateValue{daysSinceDate};
+    }
+
+    DateTimeOffsetValue parseDateTimeOffset(const std::string &rawDateTimeOffset)
+    {
+        const auto [msSinceEpoch, offset] = Parser::dateTimeOffsetToMilliseconds(rawDateTimeOffset);
+        return DateTimeOffsetValue{.msSinceEpoch = msSinceEpoch, .minutesOffset = offset};
+    }
+
+    void convertTemporalLiteral(std::unique_ptr<BoundExpr> &operand)
+    {
+        if (operand->type() != DataType::Text ||
+            operand->kind() != BoundExprKind::Literal)
+            return;
+
+        const auto &literal =
+            static_cast<const BoundLiteralExpr &>(*operand);
+        const auto &text = std::get<std::string>(literal.value);
+
+        std::istringstream input{text};
+        std::chrono::year_month_day date{};
+        std::chrono::from_stream(input, "%F", date);
+
+        const bool dateOnly =
+            !input.fail() &&
+            date.ok() &&
+            input.peek() == std::char_traits<char>::eof();
+
+        if (dateOnly)
+        {
+            operand = std::make_unique<BoundLiteralExpr>(
+                parseDate(text), DataType::Date);
+        }
+        else
+        {
+            operand = std::make_unique<BoundLiteralExpr>(
+                parseDateTimeOffset(text), DataType::DateTimeOffset);
+        }
+    }
+
+    std::int64_t dateToUtcMilliseconds(const DateValue &date)
+    {
+        using namespace std::chrono;
+
+        const local_days midnight{days{date.daysSinceEpoch}};
+        const auto *zone = current_zone();
+
+        if (zone->get_info(midnight).result != local_info::unique)
+        {
+            throw QueryException(
+                QueryErrorCode::Validation,
+                "Date has an ambiguous or nonexistent local midnight");
+        }
+
+        const auto utc = zone->to_sys(midnight);
+
+        return static_cast<std::int64_t>(
+            duration_cast<milliseconds>(
+                utc.time_since_epoch())
+                .count());
+    }
+
+    void convertDateLiteral(std::unique_ptr<BoundExpr> &operand)
+    {
+        if (operand->type() != DataType::Text || operand->kind() != BoundExprKind::Literal)
+            return;
+        const auto &literal = static_cast<const BoundLiteralExpr &>(*operand);
+        const auto date = parseDate(std::get<std::string>(literal.value));
+        operand = std::make_unique<BoundLiteralExpr>(date, DataType::Date);
+    }
+
+    void convertDateTimeOffsetLiteral(std::unique_ptr<BoundExpr> &operand)
+    {
+        if (operand->type() != DataType::Text ||
+            operand->kind() != BoundExprKind::Literal)
+            return;
+
+        const auto &literal =
+            static_cast<const BoundLiteralExpr &>(*operand);
+        const auto &text = std::get<std::string>(literal.value);
+
+        std::istringstream input{text};
+        std::chrono::year_month_day date{};
+        std::chrono::from_stream(input, "%F", date);
+
+        const bool dateOnly =
+            !input.fail() &&
+            date.ok() &&
+            input.peek() == std::char_traits<char>::eof();
+
+        const auto value = parseDateTimeOffset(
+            dateOnly ? text + " 00:00:00" : text);
+
+        operand = std::make_unique<BoundLiteralExpr>(
+            value, DataType::DateTimeOffset);
+    }
 
     std::string uuidToString(const uuid_t &id)
     {
@@ -96,7 +198,7 @@ namespace
             return parts[1];
         }
 
-        throw std::runtime_error("Unsupported column reference");
+        throw QueryException(QueryErrorCode::Validation, "Unsupported column reference");
     }
 
     bool isNumericType(DataType type)
@@ -123,8 +225,7 @@ namespace
         if (!isNumericType(leftType) ||
             !isNumericType(rightType))
         {
-            throw std::runtime_error(
-                "Arithmetic operands must be numeric");
+            throw QueryException(QueryErrorCode::Validation, "Arithmetic operands must be numeric");
         }
 
         if (op == BinaryOperator::Divide)
@@ -226,6 +327,15 @@ namespace
         case BinaryOperator::Le:
         case BinaryOperator::Gt:
         case BinaryOperator::Ge:
+            if ((((leftType == DataType::Date || leftType == DataType::DateTimeOffset) && (rightType != DataType::Date && rightType != DataType::DateTimeOffset && rightType != DataType::Null)) ||
+                 ((rightType == DataType::Date || rightType == DataType::DateTimeOffset) && (leftType != DataType::Date && leftType != DataType::DateTimeOffset && leftType != DataType::Null))))
+            {
+                throw QueryException(
+                    QueryErrorCode::Validation,
+                    "Cannot compare DATE or DATETIMEOFFSET with a different type");
+            }
+            return DataType::Boolean;
+
         case BinaryOperator::And:
         case BinaryOperator::Or:
             return DataType::Boolean;
@@ -254,8 +364,7 @@ namespace
         {
             if (!isNumericType(operandType))
             {
-                throw std::runtime_error(
-                    "Unary '+' and '-' require a numeric operand");
+                throw QueryException(QueryErrorCode::Validation, "Unary '+' and '-' require a numeric operand");
             }
 
             return operandType;
@@ -266,8 +375,7 @@ namespace
             if (operandType != DataType::Boolean &&
                 operandType != DataType::Null)
             {
-                throw std::runtime_error(
-                    "NOT requires a boolean operand");
+                throw QueryException(QueryErrorCode::Validation, "NOT requires a boolean operand");
             }
 
             return DataType::Boolean;
@@ -461,6 +569,13 @@ namespace
             return quoteString(string->value);
         }
 
+        if (const auto *date = dynamic_cast<const DateExpr *>(&expr))
+        {
+            std::ostringstream stream;
+            stream << date->value;
+            return "DATE " + quoteString(stream.str());
+        }
+
         if (const auto *boolean = dynamic_cast<const BooleanExpr *>(&expr))
         {
             return boolean->value ? "TRUE" : "FALSE";
@@ -580,8 +695,7 @@ namespace
                     const auto converted = decimalToInt64Exact(inner);
                     if (!converted)
                     {
-                        throw std::runtime_error(
-                            "Expected an integer numeric value");
+                        throw QueryException(QueryErrorCode::Validation, "Expected an integer numeric value");
                     }
                     return *converted;
                 }
@@ -598,17 +712,17 @@ namespace
                     const long double limit = std::ldexp(1.0L, 63);
                     if (!std::isfinite(number) || number < -limit || number >= limit)
                     {
-                        throw std::overflow_error("Integer value is out of range");
+                        throw QueryNumericOverflow("Integer value is out of range");
                     }
                     if (std::trunc(number) != number)
                     {
-                        throw std::runtime_error("Expected an integer numeric value");
+                        throw QueryException(QueryErrorCode::Validation, "Expected an integer numeric value");
                     }
                     return static_cast<std::int64_t>(number);
                 }
                 else
                 {
-                    throw std::runtime_error("Expected numeric value");
+                    throw QueryException(QueryErrorCode::Validation, "Expected numeric value");
                 }
             },
             value);
@@ -685,7 +799,7 @@ namespace
         {
             return *integer;
         }
-        throw std::runtime_error("Expected an integer value");
+        throw QueryException(QueryErrorCode::Validation, "Expected an integer value");
     }
 
     DecimalValue valueToDecimal(const Value &value)
@@ -723,7 +837,7 @@ namespace
             (right < 0 &&
              left < std::numeric_limits<std::int64_t>::min() - right))
         {
-            throw std::overflow_error("Integer expression overflow");
+            throw QueryNumericOverflow("Integer expression overflow");
         }
         return left + right;
     }
@@ -737,7 +851,7 @@ namespace
             (right < 0 &&
              left > std::numeric_limits<std::int64_t>::max() + right))
         {
-            throw std::overflow_error("Integer expression overflow");
+            throw QueryNumericOverflow("Integer expression overflow");
         }
         return left - right;
     }
@@ -755,7 +869,7 @@ namespace
             (right == -1 &&
              left == std::numeric_limits<std::int64_t>::min()))
         {
-            throw std::overflow_error("Integer expression overflow");
+            throw QueryNumericOverflow("Integer expression overflow");
         }
         if (left > 0)
         {
@@ -764,7 +878,7 @@ namespace
                 (right < 0 &&
                  right < std::numeric_limits<std::int64_t>::min() / left))
             {
-                throw std::overflow_error("Integer expression overflow");
+                throw QueryNumericOverflow("Integer expression overflow");
             }
         }
         else if ((right > 0 &&
@@ -772,7 +886,7 @@ namespace
                  (right < 0 &&
                   left < std::numeric_limits<std::int64_t>::max() / right))
         {
-            throw std::overflow_error("Integer expression overflow");
+            throw QueryNumericOverflow("Integer expression overflow");
         }
         return left * right;
     }
@@ -834,7 +948,7 @@ BoundUpdate QueryValidator::validateStatement(const UpdateStatement &statement)
     const auto &tableName = statement.tableName;
     if (!catalog_.tableExists(tableName))
     {
-        throw std::runtime_error("Table does not exist: " + tableName);
+        throw QueryException(QueryErrorCode::Validation, "Table does not exist: " + tableName);
     }
     bContext_ = createBindContext(tableName);
 
@@ -846,7 +960,20 @@ BoundUpdate QueryValidator::validateStatement(const UpdateStatement &statement)
         const auto &colName = resolveColumnName(assignment.target->parts, tableName);
         const auto &column = bContext_.resolveColumn(colName, tableName);
 
-        boundAssignments.push_back({.columnId = column.columnIndex, .expr = bindExpr(*assignment.value)});
+        auto value = bindExpr(*assignment.value);
+        if (column.type == DataType::Date)
+        {
+            convertDateLiteral(value);
+            if (!canAssign(value->type(), column.type))
+                throw QueryException(QueryErrorCode::Validation, "Expected a date or date string for column: " + column.name);
+        }
+        if (column.type == DataType::DateTimeOffset)
+        {
+            convertDateTimeOffsetLiteral(value);
+            if (!canAssign(value->type(), column.type))
+                throw QueryException(QueryErrorCode::Validation, "Expected a datetime or datetime string for column: " + column.name);
+        }
+        boundAssignments.push_back({.columnId = column.columnIndex, .expr = std::move(value)});
     }
 
     std::unique_ptr<BoundExpr> where;
@@ -866,12 +993,12 @@ BoundDelete QueryValidator::validateStatement(const DeleteStatement &statement)
 {
     if (!statement.from || std::holds_alternative<EmptyTableRef>(statement.from->value))
     {
-        throw std::runtime_error("DELETE requires a FROM clause");
+        throw QueryException(QueryErrorCode::Validation, "DELETE requires a FROM clause");
     }
 
     if (!std::holds_alternative<NamedTableRef>(statement.from->value))
     {
-        throw std::runtime_error("Only single-table DELETE is supported");
+        throw QueryException(QueryErrorCode::Validation, "Only single-table DELETE is supported");
     }
     auto tableRef = bindTableRef(*statement.from);
 
@@ -896,7 +1023,7 @@ BoundTableRef QueryValidator::bindTableRef(const TableRef &tableRef)
             if constexpr (std::is_same_v<T, NamedTableRef>)
             {
                 if (!catalog_.tableExists(value.name))
-                    throw std::runtime_error("Table does not exist: " + value.name);
+                    throw QueryException(QueryErrorCode::Validation, "Table does not exist: " + value.name);
                 bContext_.insert(value.name, value.alias, catalog_.getTableHeader(value.name));
 
                 return BoundTableRef{.value = BoundNamedTableRef{value.name, value.alias}};
@@ -936,7 +1063,7 @@ BoundSelect QueryValidator::validateStatement(const SelectStatement &statement)
 {
     if (!statement.from || std::holds_alternative<EmptyTableRef>(statement.from->value))
     {
-        throw std::runtime_error("SELECT requires a FROM clause");
+        throw QueryException(QueryErrorCode::Validation, "SELECT requires a FROM clause");
     }
 
     auto tableRef = bindTableRef(*statement.from);
@@ -975,7 +1102,7 @@ BoundSelect QueryValidator::validateStatement(const SelectStatement &statement)
             if (qualifiedWildcard->qualifierParts.size() != 1 ||
                 !bContext_.resolveTable(qualifiedWildcard->qualifierParts[0]))
             {
-                throw std::runtime_error("Unknown table qualifier in wildcard");
+                throw QueryException(QueryErrorCode::Validation, "Unknown table qualifier in wildcard");
             }
             const auto &name = qualifiedWildcard->qualifierParts[0];
             for (const ColumnContext &columnContext :
@@ -1019,8 +1146,7 @@ BoundSelect QueryValidator::validateStatement(const SelectStatement &statement)
         {
             if (isNumericLiteral(*groupByExpr))
             {
-                throw std::runtime_error(
-                    "Positional references in GROUP BY are not supported");
+                throw QueryException(QueryErrorCode::Validation, "Positional references in GROUP BY are not supported");
             }
             groupBy.push_back(bindExpr(*groupByExpr));
         }
@@ -1031,7 +1157,7 @@ BoundSelect QueryValidator::validateStatement(const SelectStatement &statement)
         having = bindExpr(*statement.having, true);
         if (having->type() != DataType::Boolean && having->type() != DataType::Null)
         {
-            throw std::runtime_error("Expected a boolean or NULL in HAVING");
+            throw QueryException(QueryErrorCode::Validation, "Expected a boolean or NULL in HAVING");
         }
     }
 
@@ -1062,7 +1188,7 @@ BoundCreateIndex QueryValidator::validateStatement(
 {
     if (!catalog_.tableExists(statement.tableName))
     {
-        throw std::runtime_error("Table does not exist: " + statement.tableName);
+        throw QueryException(QueryErrorCode::Validation, "Table does not exist: " + statement.tableName);
     }
 
     bContext_ = createBindContext(statement.tableName);
@@ -1073,11 +1199,11 @@ BoundCreateIndex QueryValidator::validateStatement(
     {
         if (columnExpr->parts.size() > 1)
         {
-            throw std::runtime_error("Qualified column names are not allowed when creating indexes");
+            throw QueryException(QueryErrorCode::Validation, "Qualified column names are not allowed when creating indexes");
         }
         if (columnExpr->parts.empty())
         {
-            throw std::runtime_error("No Column name specified");
+            throw QueryException(QueryErrorCode::Validation, "No Column name specified");
         }
         Column &column = bContext_.resolveColumn(columnExpr->parts.at(0), statement.tableName);
         columnIds.push_back(column.columnIndex);
@@ -1099,7 +1225,7 @@ BoundCreateTable QueryValidator::validateStatement(
     for (const auto &columnDef : statement.columns)
     {
         if (result.columns.size() > std::numeric_limits<std::uint32_t>::max())
-            throw std::runtime_error("Too many table columns");
+            throw QueryException(QueryErrorCode::Validation, "Too many table columns");
         result.columns.push_back(
             bindColumnDefinition(
                 *columnDef,
@@ -1182,7 +1308,7 @@ BoundConstraint QueryValidator::bindConstraintExpr(
         Column &column = bContext_.resolveColumn(defaultExpr.columnName, tableName);
         if (bContext_.hasDefaultConstraint(column.columnIndex, tableName))
         {
-            throw std::runtime_error("Multiple DEFAULT constraints for column: " + column.name);
+            throw QueryException(QueryErrorCode::Validation, "Multiple DEFAULT constraints for column: " + column.name);
         }
         uuid_t constraintId{};
         uuid_generate(constraintId);
@@ -1193,17 +1319,19 @@ BoundConstraint QueryValidator::bindConstraintExpr(
                         uuidToString(constraintId))); // Use a format for the constraint name if not provided
         uuid_clear(constraintId);
         auto boundValue = bindExpr(*defaultExpr.value);
+        if (column.type == DataType::Date)
+            convertDateLiteral(boundValue);
+        if (column.type == DataType::DateTimeOffset)
+            convertDateTimeOffsetLiteral(boundValue);
         if (containsColumnReference(*boundValue))
         {
-            throw std::runtime_error(
-                "DEFAULT expressions cannot reference table columns");
+            throw QueryException(QueryErrorCode::Validation, "DEFAULT expressions cannot reference table columns");
         }
         if (!canAssign(boundValue->type(), column.type))
         {
-            throw std::runtime_error(
-                std::format(
-                    "Default value type is incompatible with column '{}'",
-                    column.name));
+            throw QueryException(QueryErrorCode::Validation, std::format(
+                                                                 "Default value type is incompatible with column '{}'",
+                                                                 column.name));
         }
 
         return BoundDefaultConstraintExpr{
@@ -1237,10 +1365,9 @@ BoundConstraint QueryValidator::bindConstraintExpr(
 
             if (!seenColumns.insert(column.columnIndex).second)
             {
-                throw std::runtime_error(
-                    std::format(
-                        "Column '{}' appears more than once in primary key",
-                        columnName));
+                throw QueryException(QueryErrorCode::Validation, std::format(
+                                                                     "Column '{}' appears more than once in primary key",
+                                                                     columnName));
             }
 
             column.nullable = false;
@@ -1280,8 +1407,7 @@ BoundConstraint QueryValidator::bindConstraintExpr(
         }
         if (localColumnIds.size() != referencedColumnIds.size())
         {
-            throw std::runtime_error(
-                "Foreign key column count does not match referenced column count");
+            throw QueryException(QueryErrorCode::Validation, "Foreign key column count does not match referenced column count");
         }
         for (std::size_t i = 0; i < localColumnIds.size(); ++i)
         {
@@ -1294,8 +1420,7 @@ BoundConstraint QueryValidator::bindConstraintExpr(
 
             if (local.type != referenced.type)
             {
-                throw std::runtime_error(
-                    "Foreign key column types are incompatible");
+                throw QueryException(QueryErrorCode::Validation, "Foreign key column types are incompatible");
             }
         }
         uuid_t constraintId{};
@@ -1350,7 +1475,7 @@ BoundConstraint QueryValidator::bindConstraintExpr(
 
         if (condition->type() != DataType::Boolean)
         {
-            throw std::runtime_error("CHECK condition must be boolean");
+            throw QueryException(QueryErrorCode::Validation, "CHECK condition must be boolean");
         }
         uuid_t constraintId{};
         uuid_generate(constraintId);
@@ -1377,7 +1502,7 @@ BoundInsert QueryValidator::validateStatement(const InsertStatement &statement)
 {
     if (!catalog_.tableExists(statement.tableName))
     {
-        throw std::runtime_error("Table does not exist: " + statement.tableName);
+        throw QueryException(QueryErrorCode::Validation, "Table does not exist: " + statement.tableName);
     }
 
     // HeaderPage schema = catalog.getTableHeader(statement.tableName);
@@ -1405,7 +1530,7 @@ BoundInsert QueryValidator::validateStatement(const InsertStatement &statement)
             const Column &column = bContext_.resolveColumn(columnName, statement.tableName);
             if (suppliedColumns[column.columnIndex])
             {
-                throw std::runtime_error("Duplicate INSERT column: " + column.name);
+                throw QueryException(QueryErrorCode::Validation, "Duplicate INSERT column: " + column.name);
             }
             targetColumns.push_back(&column);
             suppliedColumns[column.columnIndex] = true;
@@ -1418,7 +1543,7 @@ BoundInsert QueryValidator::validateStatement(const InsertStatement &statement)
 
         if (targetColumns.size() != rowValues.size())
         {
-            throw std::runtime_error("INSERT column count does not match value count");
+            throw QueryException(QueryErrorCode::Validation, "INSERT column count does not match value count");
         }
 
         Row row{
@@ -1448,8 +1573,7 @@ BoundInsert QueryValidator::validateStatement(const InsertStatement &statement)
             if (!column.nullable &&
                 std::holds_alternative<std::monostate>(row.values[column.columnIndex]))
             {
-                throw std::runtime_error(
-                    "Missing value for NOT NULL column: " + column.name);
+                throw QueryException(QueryErrorCode::Constraint, "Missing value for NOT NULL column: " + column.name);
             }
         }
         rows.push_back(std::move(row));
@@ -1466,16 +1590,17 @@ Value QueryValidator::bindLiteralValue(
 {
     if (expr.kind() == ExprKind::FunctionCall)
     {
-        throw std::runtime_error(
-            "Function calls are not allowed in INSERT values");
+        throw QueryException(QueryErrorCode::Validation, "Function calls are not allowed in INSERT values");
     }
 
     if (!isNumericLiteral(expr) &&
+        !dynamic_cast<const DateExpr *>(&expr) &&
+        !dynamic_cast<const DateTimeOffsetExpr *>(&expr) &&
         !dynamic_cast<const StringExpr *>(&expr) &&
         !dynamic_cast<const BooleanExpr *>(&expr) &&
         !dynamic_cast<const NullExpr *>(&expr))
     {
-        throw std::runtime_error("INSERT values must be literals or signed numeric literals");
+        throw QueryException(QueryErrorCode::Validation, "INSERT values must be literals or signed numeric literals");
     }
 
     const auto bound = bindExpr(expr);
@@ -1490,8 +1615,7 @@ Value QueryValidator::convertForColumn(
     {
         if (!targetColumn.nullable)
         {
-            throw std::runtime_error(
-                "NULL provided for NOT NULL column: " + targetColumn.name);
+            throw QueryException(QueryErrorCode::Constraint, "NULL provided for NOT NULL column: " + targetColumn.name);
         }
 
         return std::monostate{};
@@ -1505,12 +1629,32 @@ Value QueryValidator::convertForColumn(
         if (integer < std::numeric_limits<std::int32_t>::min() ||
             integer > std::numeric_limits<std::int32_t>::max())
         {
-            throw std::runtime_error(
-                "Integer value is out of range for column: " +
-                targetColumn.name);
+            throw QueryException(QueryErrorCode::Numeric, "Integer value is out of range for column: " +
+                                                              targetColumn.name);
         }
 
         return static_cast<std::int32_t>(integer);
+    }
+    case DataType::Date:
+    {
+        if (const auto *date = std::get_if<DateValue>(&value))
+            return *date;
+
+        if (const auto *text = std::get_if<std::string>(&value))
+            return parseDate(*text); // Validate and return DateValue.
+
+        throw QueryException(QueryErrorCode::Validation, "Expected a date or date string");
+    }
+
+    case DataType::DateTimeOffset:
+    {
+        if (const auto *date = std::get_if<DateTimeOffsetValue>(&value))
+            return *date;
+
+        if (const auto *text = std::get_if<std::string>(&value))
+            return parseDateTimeOffset(*text); // Validate and return DateValue.
+
+        throw QueryException(QueryErrorCode::Validation, "Expected a date or date string");
     }
 
     case DataType::BigInt:
@@ -1529,13 +1673,13 @@ Value QueryValidator::convertForColumn(
         const std::float64_t floating = valueToFloat64(value);
         if (!std::isfinite(floating))
         {
-            throw std::overflow_error("Floating-point value is out of range for column: " + targetColumn.name);
+            throw QueryNumericOverflow("Floating-point value is out of range for column: " + targetColumn.name);
         }
         if (targetColumn.type == DataType::Float)
         {
             if (std::abs(floating) > std::numeric_limits<std::float32_t>::max())
             {
-                throw std::overflow_error("FLOAT value is out of range for column: " + targetColumn.name);
+                throw QueryNumericOverflow("FLOAT value is out of range for column: " + targetColumn.name);
             }
             return static_cast<std::float32_t>(floating);
         }
@@ -1548,23 +1692,21 @@ Value QueryValidator::convertForColumn(
 
         if (!string)
         {
-            throw std::runtime_error(
-                "Expected string value for column: " + targetColumn.name);
+            throw QueryException(QueryErrorCode::Validation, "Expected string value for column: " + targetColumn.name);
         }
 
         return *string;
     }
 
     case DataType::Null:
-        throw std::runtime_error("Cannot bind non-null value to NULL column");
+        throw QueryException(QueryErrorCode::Validation, "Cannot bind non-null value to NULL column");
 
     case DataType::Boolean:
     {
         const auto *boolean = std::get_if<bool>(&value);
         if (!boolean)
         {
-            throw std::runtime_error(
-                "Expected boolean value for column: " + targetColumn.name);
+            throw QueryException(QueryErrorCode::Validation, "Expected boolean value for column: " + targetColumn.name);
         }
         return *boolean;
     }
@@ -1614,8 +1756,7 @@ Value evaluateConstantBinary(
         case BinaryOperator::Divide:
             if (rhs == 0)
             {
-                throw std::runtime_error(
-                    "Division by zero in constant expression");
+                throw QueryException(QueryErrorCode::Numeric, "Division by zero in constant expression");
             }
             return Value{lhs / rhs};
         default:
@@ -1643,12 +1784,11 @@ Value evaluateConstantBinary(
         case BinaryOperator::Divide:
             if (rhs == 0)
             {
-                throw std::runtime_error(
-                    "Division by zero in constant expression");
+                throw QueryException(QueryErrorCode::Numeric, "Division by zero in constant expression");
             }
             if (lhs == std::numeric_limits<std::int64_t>::min() && rhs == -1)
             {
-                throw std::overflow_error("Integer expression overflow");
+                throw QueryNumericOverflow("Integer expression overflow");
             }
             result = lhs / rhs;
             break;
@@ -1662,7 +1802,7 @@ Value evaluateConstantBinary(
             if (result < std::numeric_limits<std::int32_t>::min() ||
                 result > std::numeric_limits<std::int32_t>::max())
             {
-                throw std::overflow_error("Integer expression overflow");
+                throw QueryNumericOverflow("Integer expression overflow");
             }
             return Value{static_cast<std::int32_t>(result)};
         }
@@ -1695,6 +1835,20 @@ std::unique_ptr<BoundExpr> QueryValidator::bindExpr(
             numberDataType(number->value));
     }
 
+    if (const auto *date = dynamic_cast<const DateExpr *>(&expr))
+    {
+        return std::make_unique<BoundLiteralExpr>(
+            Value{date->value},
+            DataType::Date);
+    }
+
+    if (const auto *date = dynamic_cast<const DateTimeOffsetExpr *>(&expr))
+    {
+        return std::make_unique<BoundLiteralExpr>(
+            Value{date->value},
+            DataType::DateTimeOffset);
+    }
+
     if (const auto *string = dynamic_cast<const StringExpr *>(&expr))
     {
         return std::make_unique<BoundLiteralExpr>(
@@ -1721,20 +1875,18 @@ std::unique_ptr<BoundExpr> QueryValidator::bindExpr(
         auto id = resolveFunctionName(functionCall->name);
         if (!id)
         {
-            throw std::runtime_error("Unknown function: " + functionCall->name);
+            throw QueryException(QueryErrorCode::Validation, "Unknown function: " + functionCall->name);
         }
         auto category = resolveFunctionCategory(*id);
 
         if (category == FunctionCategory::Aggregate && !allowAggregates)
         {
-            throw std::runtime_error(
-                "Aggregate functions are not allowed in this expression");
+            throw QueryException(QueryErrorCode::Validation, "Aggregate functions are not allowed in this expression");
         }
 
         if (functionCall->starArgument && *id != FunctionId::Count)
         {
-            throw std::runtime_error(
-                "Only COUNT accepts '*' as an argument");
+            throw QueryException(QueryErrorCode::Validation, "Only COUNT accepts '*' as an argument");
         }
 
         std::vector<std::unique_ptr<BoundExpr>> boundList;
@@ -1754,7 +1906,7 @@ std::unique_ptr<BoundExpr> QueryValidator::bindExpr(
         case FunctionId::Count:
             if (functionCall->starArgument ? !boundList.empty() : boundList.size() != 1)
             {
-                throw std::runtime_error("COUNT requires '*' or exactly one argument");
+                throw QueryException(QueryErrorCode::Validation, "COUNT requires '*' or exactly one argument");
             }
             resultType = DataType::BigInt;
             break;
@@ -1764,7 +1916,7 @@ std::unique_ptr<BoundExpr> QueryValidator::bindExpr(
                 (!isNumericType(boundList[0]->type()) &&
                  boundList[0]->type() != DataType::Null))
             {
-                throw std::runtime_error("SUM requires exactly one numeric argument");
+                throw QueryException(QueryErrorCode::Validation, "SUM requires exactly one numeric argument");
             }
             resultType = boundList[0]->type();
             if (resultType == DataType::Int)
@@ -1781,15 +1933,13 @@ std::unique_ptr<BoundExpr> QueryValidator::bindExpr(
             if (boundList.size() != 1 ||
                 !isNumericType(boundList[0]->type()))
             {
-                throw std::runtime_error(
-                    "ABS requires exactly one numeric argument");
+                throw QueryException(QueryErrorCode::Validation, "ABS requires exactly one numeric argument");
             }
             resultType = boundList[0]->type();
             break;
 
         default:
-            throw std::runtime_error(
-                "Function is not supported yet: " + functionCall->name);
+            throw QueryException(QueryErrorCode::Validation, "Function is not supported yet: " + functionCall->name);
         }
 
         auto boundFunction = std::make_unique<BoundFunctionCall>(
@@ -1812,6 +1962,48 @@ std::unique_ptr<BoundExpr> QueryValidator::bindExpr(
     {
         auto leftBound = bindExpr(*binary->left, allowAggregates);
         auto rightBound = bindExpr(*binary->right, allowAggregates);
+        const auto op = binary->op;
+
+        if (op == BinaryOperator::Eq || op == BinaryOperator::Ne ||
+            op == BinaryOperator::Lt || op == BinaryOperator::Le ||
+            op == BinaryOperator::Gt || op == BinaryOperator::Ge)
+        {
+
+            const auto isTemporal = [](DataType type)
+            {
+                return type == DataType::Date ||
+                       type == DataType::DateTimeOffset;
+            };
+
+            if (isTemporal(leftBound->type()) ||
+                isTemporal(rightBound->type()))
+            {
+                convertTemporalLiteral(leftBound);
+                convertTemporalLiteral(rightBound);
+            }
+
+            const auto convertDateLiteral = [](std::unique_ptr<BoundExpr> &expr)
+            {
+                if (expr->type() != DataType::Date ||
+                    expr->kind() != BoundExprKind::Literal)
+                    return;
+
+                const auto &literal =
+                    static_cast<const BoundLiteralExpr &>(*expr);
+                const auto &date = std::get<DateValue>(literal.value);
+
+                expr = std::make_unique<BoundLiteralExpr>(
+                    DateTimeOffsetValue{
+                        .msSinceEpoch = dateToUtcMilliseconds(date),
+                        .minutesOffset = 0},
+                    DataType::DateTimeOffset);
+            };
+
+            if (leftBound->type() == DataType::DateTimeOffset)
+                convertDateLiteral(rightBound);
+            else if (rightBound->type() == DataType::DateTimeOffset)
+                convertDateLiteral(leftBound);
+        }
         DataType resultType = resolveBinaryResultType(
             binary->op,
             leftBound->type(),
@@ -1875,7 +2067,7 @@ std::unique_ptr<BoundExpr> QueryValidator::bindExpr(
 
                     if (value == std::numeric_limits<std::int32_t>::min())
                     {
-                        throw std::overflow_error(
+                        throw QueryNumericOverflow(
                             "Integer negation overflow");
                     }
 
@@ -1891,7 +2083,7 @@ std::unique_ptr<BoundExpr> QueryValidator::bindExpr(
 
                     if (value == std::numeric_limits<std::int64_t>::min())
                     {
-                        throw std::overflow_error(
+                        throw QueryNumericOverflow(
                             "BIGINT negation overflow");
                     }
 

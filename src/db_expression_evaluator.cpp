@@ -1,4 +1,5 @@
 #include "db_expression_evaluator.h"
+#include "db_query_exception.h"
 
 #include "db_decimal.h"
 
@@ -10,9 +11,11 @@
 #include <type_traits>
 #include <variant>
 #include <vector>
+#include <chrono>
 
 namespace
 {
+
     template <typename T>
     constexpr bool isExactNumericValue =
         std::is_same_v<T, std::int32_t> ||
@@ -24,6 +27,33 @@ namespace
         isExactNumericValue<T> ||
         std::is_same_v<T, std::float32_t> ||
         std::is_same_v<T, std::float64_t>;
+
+    template <typename T>
+    constexpr bool isTemporalValue =
+        std::is_same_v<T, DateValue> ||
+        std::is_same_v<T, DateTimeOffsetValue>;
+
+    std::int64_t dateToUtcMilliseconds(const DateValue &date)
+    {
+        using namespace std::chrono;
+
+        const local_days midnight{days{date.daysSinceEpoch}};
+        const auto *zone = current_zone();
+
+        if (zone->get_info(midnight).result != local_info::unique)
+        {
+            throw QueryException(
+                QueryErrorCode::Validation,
+                "Date has an ambiguous or nonexistent local midnight");
+        }
+
+        const auto utc = zone->to_sys(midnight);
+
+        return static_cast<std::int64_t>(
+            duration_cast<milliseconds>(
+                utc.time_since_epoch())
+                .count());
+    }
 
     DecimalValue asDecimal(const Value &value)
     {
@@ -88,7 +118,7 @@ namespace
             (right < 0 &&
              left < std::numeric_limits<std::int64_t>::min() - right))
         {
-            throw std::overflow_error("Integer expression overflow");
+            throw QueryNumericOverflow("Integer expression overflow");
         }
         return left + right;
     }
@@ -100,7 +130,7 @@ namespace
             (right < 0 &&
              left > std::numeric_limits<std::int64_t>::max() + right))
         {
-            throw std::overflow_error("Integer expression overflow");
+            throw QueryNumericOverflow("Integer expression overflow");
         }
         return left - right;
     }
@@ -116,7 +146,7 @@ namespace
             (right == -1 &&
              left == std::numeric_limits<std::int64_t>::min()))
         {
-            throw std::overflow_error("Integer expression overflow");
+            throw QueryNumericOverflow("Integer expression overflow");
         }
         if (left > 0)
         {
@@ -125,7 +155,7 @@ namespace
                 (right < 0 &&
                  right < std::numeric_limits<std::int64_t>::min() / left))
             {
-                throw std::overflow_error("Integer expression overflow");
+                throw QueryNumericOverflow("Integer expression overflow");
             }
         }
         else if ((right > 0 &&
@@ -133,7 +163,7 @@ namespace
                  (right < 0 &&
                   left < std::numeric_limits<std::int64_t>::max() / right))
         {
-            throw std::overflow_error("Integer expression overflow");
+            throw QueryNumericOverflow("Integer expression overflow");
         }
         return left * right;
     }
@@ -154,12 +184,12 @@ namespace
         case BinaryOperator::Divide:
             if (right == 0)
             {
-                throw std::runtime_error("Division by zero");
+                throw QueryException(QueryErrorCode::Numeric, "Division by zero");
             }
             if (left == std::numeric_limits<std::int64_t>::min() &&
                 right == -1)
             {
-                throw std::overflow_error("Integer expression overflow");
+                throw QueryNumericOverflow("Integer expression overflow");
             }
             return left / right;
 
@@ -191,7 +221,7 @@ namespace
             if (result < std::numeric_limits<std::int32_t>::min() ||
                 result > std::numeric_limits<std::int32_t>::max())
             {
-                throw std::overflow_error("Integer expression overflow");
+                throw QueryNumericOverflow("Integer expression overflow");
             }
             return static_cast<std::int32_t>(result);
         }
@@ -222,7 +252,7 @@ namespace
             case BinaryOperator::Divide:
                 if (rhs == 0)
                 {
-                    throw std::runtime_error("Division by zero");
+                    throw QueryException(QueryErrorCode::Numeric, "Division by zero");
                 }
                 result = lhs / rhs;
                 break;
@@ -252,7 +282,7 @@ namespace
             case BinaryOperator::Divide:
                 if (rhs.coefficient == 0)
                 {
-                    throw std::runtime_error("Division by zero");
+                    throw QueryException(QueryErrorCode::Numeric, "Division by zero");
                 }
                 return divideDecimals(lhs, rhs);
             default:
@@ -312,7 +342,7 @@ namespace
         {
             return *boolean ? SqlTruth::True : SqlTruth::False;
         }
-        throw std::runtime_error("Expected a boolean or NULL in a logical expression");
+        throw QueryException(QueryErrorCode::Validation, "Expected a boolean or NULL in a logical expression");
     }
 
     Value truthAsValue(SqlTruth truth)
@@ -346,6 +376,29 @@ namespace
                 {
                     return SqlTruth::Unknown;
                 }
+                else if constexpr (
+                    isTemporalValue<L> && isTemporalValue<R> &&
+                    (std::is_same_v<L, DateTimeOffsetValue> ||
+                     std::is_same_v<R, DateTimeOffsetValue>))
+                {
+                    const auto toUtcMilliseconds = [](const auto &value)
+                        -> std::int64_t
+                    {
+                        using T = std::decay_t<decltype(value)>;
+
+                        if constexpr (std::is_same_v<T, DateValue>)
+                            return dateToUtcMilliseconds(value);
+                        else
+                            return value.msSinceEpoch;
+                    };
+
+                    return applyComparison(
+                               op,
+                               toUtcMilliseconds(lhs),
+                               toUtcMilliseconds(rhs))
+                               ? SqlTruth::True
+                               : SqlTruth::False;
+                }
                 else if constexpr (!std::is_same_v<L, R>)
                 {
                     if constexpr (isExactNumericValue<L> &&
@@ -375,10 +428,10 @@ namespace
                                    ? SqlTruth::True
                                    : SqlTruth::False;
                     }
+
                     else
                     {
-                        throw std::runtime_error(
-                            "Cannot compare values of different types");
+                        throw QueryException(QueryErrorCode::Validation, "Cannot compare values of different types");
                     }
                 }
                 else
@@ -402,7 +455,7 @@ namespace
         {
             if (*integer == std::numeric_limits<std::int32_t>::min())
             {
-                throw std::overflow_error("ABS result is out of range");
+                throw QueryNumericOverflow("ABS result is out of range");
             }
             return static_cast<std::int32_t>(std::abs(*integer));
         }
@@ -410,7 +463,7 @@ namespace
         {
             if (*integer == std::numeric_limits<std::int64_t>::min())
             {
-                throw std::overflow_error("ABS result is out of range");
+                throw QueryNumericOverflow("ABS result is out of range");
             }
             return static_cast<std::int64_t>(std::abs(*integer));
         }
@@ -478,7 +531,7 @@ namespace
             const std::int32_t value = std::get<std::int32_t>(operand);
             if (value == std::numeric_limits<std::int32_t>::min())
             {
-                throw std::overflow_error("Integer negation overflow");
+                throw QueryNumericOverflow("Integer negation overflow");
             }
             return static_cast<std::int32_t>(-value);
         }
@@ -487,7 +540,7 @@ namespace
             const std::int64_t value = std::get<std::int64_t>(operand);
             if (value == std::numeric_limits<std::int64_t>::min())
             {
-                throw std::overflow_error("BIGINT negation overflow");
+                throw QueryNumericOverflow("BIGINT negation overflow");
             }
             return -value;
         }

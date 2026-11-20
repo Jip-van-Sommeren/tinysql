@@ -1,8 +1,13 @@
 #include "db_sql_parser.h"
+#include "db_query_exception.h"
 
 #include <limits>
+#include <charconv>
 #include <stdexcept>
 #include <utility>
+#include <chrono>
+#include <cstdint>
+#include <sstream>
 
 namespace
 {
@@ -20,7 +25,17 @@ namespace
 
         if (keyword == "DATE")
         {
-            throw std::runtime_error("DATE data type is not supported");
+            return DataType::Date;
+        }
+
+        if (keyword == "DATETIME")
+        {
+            return DataType::DateTimeOffset;
+        }
+
+        if (keyword == "DATETIMEOFFSET")
+        {
+            return DataType::DateTimeOffset;
         }
 
         if (keyword == "DOUBLE")
@@ -48,8 +63,14 @@ namespace
             return DataType::Null;
         }
 
-        throw std::runtime_error("Unknown data type: " + keyword);
+        throw QueryException(QueryErrorCode::Syntax, "Unknown data type: " + keyword);
     }
+
+    // std::chrono::year_month_day date{
+    // std::chrono::sys_days{
+    //     std::chrono::days{value.daysSinceEpoch}
+    // }
+
 }
 
 ColumnExpr::ColumnExpr(std::vector<std::string> parts)
@@ -63,6 +84,24 @@ NumberExpr::NumberExpr(NumberValue value)
 StringExpr::StringExpr(std::string value)
     : Expr(ExprKind::Literal),
       value(std::move(value)) {}
+
+DateExpr::DateExpr(DateValue value)
+    : Expr(ExprKind::Literal), value(value) {}
+
+DateTimeOffsetExpr::DateTimeOffsetExpr(DateTimeOffsetValue value)
+    : Expr(ExprKind::Literal), value(value) {}
+
+std::ostream &operator<<(std::ostream &stream, const DateValue &value)
+{
+    return stream << std::chrono::year_month_day{
+               std::chrono::sys_days{std::chrono::days{value.daysSinceEpoch}}};
+}
+
+std::ostream &operator<<(std::ostream &stream, const DateTimeOffsetValue &value)
+{
+    return stream << std::chrono::milliseconds{
+               std::chrono::milliseconds{std::chrono::milliseconds{value.msSinceEpoch}}};
+}
 
 FunctionCallExpr::FunctionCallExpr(
     std::string name,
@@ -221,7 +260,110 @@ Statement Parser::parseStatement()
         }
     }
 
-    throw std::runtime_error("Expected SQL statement, got: " + peek().text);
+    throw QueryException(QueryErrorCode::Syntax, "Expected SQL statement, got: " + peek().text);
+}
+
+std::int32_t Parser::dateToDays(const std::string &text)
+{
+    std::istringstream input{text};
+    std::chrono::year_month_day date{};
+
+    std::chrono::from_stream(input, "%F", date);
+
+    if (input.fail() || !date.ok() ||
+        input.peek() != std::char_traits<char>::eof())
+    {
+        throw QueryException(QueryErrorCode::Validation, "Invalid date: " + text);
+    }
+
+    return static_cast<std::int32_t>(
+        std::chrono::sys_days{date}.time_since_epoch().count());
+}
+
+std::int64_t Parser::dateTimeToMilliseconds(const std::string &text)
+{
+    std::istringstream input{text};
+    std::chrono::sys_time<std::chrono::milliseconds> datetime{};
+
+    std::chrono::from_stream(input, "%F %H:%M:%S", datetime);
+
+    if (input.fail() ||
+        input.peek() != std::char_traits<char>::eof())
+    {
+        throw QueryException(
+            QueryErrorCode::Validation,
+            "Invalid datetime: " + text);
+    }
+
+    return static_cast<std::int64_t>(
+        datetime.time_since_epoch().count());
+}
+
+std::pair<std::int64_t, std::int32_t>
+Parser::dateTimeOffsetToMilliseconds(const std::string &text)
+{
+    using namespace std::chrono;
+
+    sys_time<milliseconds> datetime{};
+    minutes offset{};
+
+    // First try a datetime with an explicit offset.
+    {
+        std::istringstream input{text};
+        from_stream(input, "%F %H:%M:%S%Ez", datetime,
+                    static_cast<std::string *>(nullptr), &offset);
+
+        if (!input.fail() &&
+            input.peek() == std::char_traits<char>::eof())
+        {
+            return {
+                static_cast<std::int64_t>(
+                    datetime.time_since_epoch().count()),
+                static_cast<std::int32_t>(offset.count())};
+        }
+    }
+
+    // Otherwise require a complete datetime without an offset.
+    std::istringstream input{text};
+    local_time<milliseconds> local{};
+    from_stream(input, "%F %H:%M:%S", local);
+
+    if (input.fail() ||
+        input.peek() != std::char_traits<char>::eof())
+    {
+        throw QueryException(
+            QueryErrorCode::Validation, "Invalid datetime: " + text);
+    }
+
+    const auto *zone = current_zone();
+    const auto info = zone->get_info(local);
+
+    if (info.result != local_info::unique)
+    {
+        throw QueryException(
+            QueryErrorCode::Validation,
+            "Ambiguous or nonexistent local datetime; "
+            "provide an explicit offset: " +
+                text);
+    }
+
+    datetime = zone->to_sys(local);
+    offset = duration_cast<minutes>(info.first.offset);
+
+    // Some historical timezone offsets include seconds.
+    if (offset != info.first.offset)
+    {
+        throw QueryException(
+            QueryErrorCode::Validation,
+            "Local UTC offset cannot be represented "
+            "in whole minutes: " +
+                text);
+    }
+
+    return {
+        static_cast<std::int64_t>(
+            datetime.time_since_epoch().count()),
+        static_cast<std::int32_t>(offset.count())};
 }
 
 CreateIndexStatement Parser::parseCreateIndexStatement(bool unique)
@@ -328,39 +470,6 @@ ParsedCreateTableElements Parser::parseCreateTableElements()
     return result;
 }
 
-// std::vector<std::unique_ptr<ColumnDefExpr>> Parser::parseColumnDefinitions()
-// {
-//     std::vector<std::unique_ptr<ColumnDefExpr>> items;
-
-//     items.push_back(parseColumnDefinition());
-
-//     while (match(TokenType::Comma))
-//     {
-//         items.push_back(parseColumnDefinition());
-//     }
-
-//     return items;
-// }
-
-// std::unique_ptr<ColumnDefExpr> Parser::parseColumnDefinition()
-// {
-//     Token columnNameToken = expect(TokenType::Identifier);
-//     std::string columnName = std::move(columnNameToken.text);
-
-//     auto dataType = parseDataType();
-
-//     std::vector<std::unique_ptr<ConstraintExpr>> constraints;
-//     if (isColumnConstraintStart())
-//     {
-//         constraints = parseColumnConstraints();
-//     }
-
-//     return std::make_unique<ColumnDefExpr>(
-//         std::move(columnName),
-//         std::move(dataType),
-//         std::move(constraints));
-// }
-
 ParsedColumnDefinition Parser::parseColumnDefinition()
 {
     auto columnNameToken = expect(TokenType::Identifier);
@@ -406,19 +515,6 @@ std::unique_ptr<DataTypeExpr> Parser::parseDataType()
         type,
         std::move(typeArguments));
 }
-
-// std::vector<std::unique_ptr<ConstraintExpr>> Parser::parseColumnConstraints()
-// {
-//     std::vector<std::unique_ptr<ConstraintExpr>> constraints;
-
-//     while (
-//         isColumnConstraintStart())
-//     {
-//         constraints.push_back(parseConstraint());
-//     }
-
-//     return constraints;
-// }
 
 bool Parser::isColumnConstraintStart() const
 {
@@ -533,8 +629,7 @@ std::unique_ptr<ConstraintExpr> Parser::parseColumnConstraintBody(const std::str
             std::move(reference.columns));
     }
 
-    throw std::runtime_error(
-        "Expected column constraint, found: " + peek().text);
+    throw QueryException(QueryErrorCode::Syntax, "Expected column constraint, found: " + peek().text);
 }
 
 ForeignKeyReference Parser::parseReferenceClause()
@@ -561,21 +656,6 @@ std::unique_ptr<ConstraintExpr> Parser::parseTableConstraint()
     constraint->constraintName = std::move(name);
     return constraint;
 }
-
-// std::unique_ptr<ConstraintExpr> Parser::parseConstraint()
-// {
-//     std::optional<std::string> name;
-
-//     if (matchKeyword("CONSTRAINT"))
-//     {
-//         name = parseIdentifier();
-//     }
-
-//     auto constraint = parseConstraintBody();
-//     constraint->constraintName = std::move(name);
-
-//     return constraint;
-// }
 
 std::unique_ptr<ConstraintExpr> Parser::parseTableConstraintBody()
 {
@@ -623,61 +703,8 @@ std::unique_ptr<ConstraintExpr> Parser::parseTableConstraintBody()
             std::move(reference.columns));
     }
 
-    throw std::runtime_error(
-        "Expected table constraint, found: " + peek().text);
+    throw QueryException(QueryErrorCode::Syntax, "Expected table constraint, found: " + peek().text);
 }
-
-// std::unique_ptr<ConstraintExpr> Parser::parseConstraintBody()
-// {
-//     if (matchKeyword("DEFAULT"))
-//     {
-//         return std::make_unique<DefaultConstraintExpr>(
-//             parseExpression());
-//     }
-
-//     if (matchKeyword("PRIMARY"))
-//     {
-//         expectKeyword("KEY");
-
-//         return std::make_unique<ConstraintExpr>(
-//             ConstraintType::PrimaryKey);
-//     }
-
-//     if (matchKeyword("NOT"))
-//     {
-//         expectKeyword("NULL");
-
-//         return std::make_unique<ConstraintExpr>(
-//             ConstraintType::NotNull);
-//     }
-
-//     if (matchKeyword("UNIQUE"))
-//     {
-//         return std::make_unique<ConstraintExpr>(
-//             ConstraintType::Unique);
-//     }
-
-//     if (matchKeyword("NULL"))
-//     {
-//         return std::make_unique<ConstraintExpr>(
-//             ConstraintType::Null);
-//     }
-
-//     if (matchKeyword("CHECK"))
-//     {
-//         expect(TokenType::LeftParen);
-
-//         auto condition = parseExpression();
-
-//         expect(TokenType::RightParen);
-
-//         return std::make_unique<CheckConstraintExpr>(
-//             std::move(condition));
-//     }
-
-//     throw std::runtime_error(
-//         "Expected column constraint, found: " + peek().text);
-// }
 
 std::vector<std::unique_ptr<Expr>> Parser::parseOptionalGroupBy()
 {
@@ -894,7 +921,7 @@ Token Parser::expect(TokenType type)
 {
     if (!check(type))
     {
-        throw std::runtime_error("Unexpected token: " + peek().text);
+        throw QueryException(QueryErrorCode::Syntax, "Unexpected token: " + peek().text);
     }
 
     return advance();
@@ -904,7 +931,7 @@ void Parser::expectKeyword(const std::string &keyword)
 {
     if (!matchKeyword(keyword))
     {
-        throw std::runtime_error("Expected keyword: " + keyword);
+        throw QueryException(QueryErrorCode::Syntax, "Expected keyword: " + keyword);
     }
 }
 
@@ -912,7 +939,7 @@ void Parser::expectOperator(const std::string &op)
 {
     if (!matchOperator(op))
     {
-        throw std::runtime_error("Expected operator: " + op);
+        throw QueryException(QueryErrorCode::Syntax, "Expected operator: " + op);
     }
 }
 
@@ -1122,7 +1149,7 @@ JoinType Parser::parseJoinType()
         return JoinType::Cross;
     }
 
-    throw std::runtime_error("Expected join type");
+    throw QueryException(QueryErrorCode::Syntax, "Expected join type");
 }
 
 TableRef Parser::parseOptionalFrom()
@@ -1300,7 +1327,7 @@ BinaryOperator Parser::binaryOpFromToken(const Token &token)
     {
         return BinaryOperator::Ne;
     }
-    throw std::runtime_error("Unknown binary operator token");
+    throw QueryException(QueryErrorCode::Syntax, "Unknown binary operator token");
 }
 
 BinaryOperator Parser::parseBinaryOp()
@@ -1327,7 +1354,7 @@ UnaryOperator Parser::unaryOpFromToken(const Token &token)
     {
         return UnaryOperator::Not;
     }
-    throw std::runtime_error("Unknown unary operator token");
+    throw QueryException(QueryErrorCode::Syntax, "Unknown unary operator token");
 }
 
 UnaryOperator Parser::parseUnaryOp()
@@ -1359,7 +1386,16 @@ std::unique_ptr<Expr> Parser::parsePrimary()
                 NumberValue{DecimalLiteral{.text = text}});
         }
 
-        const std::int64_t value = std::stoll(text);
+        std::int64_t value{};
+        const auto parsed = std::from_chars(text.data(), text.data() + text.size(), value);
+        if (parsed.ec == std::errc::result_out_of_range)
+        {
+            throw QueryNumericOverflow("Integer literal is out of range: " + text);
+        }
+        if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size())
+        {
+            throw QueryException(QueryErrorCode::Syntax, "Invalid integer literal: " + text);
+        }
         if (value >= std::numeric_limits<std::int32_t>::min() &&
             value <= std::numeric_limits<std::int32_t>::max())
         {
@@ -1368,6 +1404,26 @@ std::unique_ptr<Expr> Parser::parsePrimary()
         }
 
         return std::make_unique<NumberExpr>(NumberValue{value});
+    }
+
+    if (matchKeyword("DATE"))
+    {
+        const auto token = expect(TokenType::String);
+        return std::make_unique<DateExpr>(DateValue{dateToDays(token.text)});
+    }
+
+    if (matchKeyword("DATETIME"))
+    {
+        const auto token = expect(TokenType::String);
+        const auto [msSinceEpoch, offset] = dateTimeOffsetToMilliseconds(token.text);
+        return std::make_unique<DateTimeOffsetExpr>(DateTimeOffsetValue{.msSinceEpoch = msSinceEpoch, .minutesOffset = offset});
+    }
+
+    if (matchKeyword("DATETIMEOFFSET"))
+    {
+        const auto token = expect(TokenType::String);
+        const auto [msSinceEpoch, offset] = dateTimeOffsetToMilliseconds(token.text);
+        return std::make_unique<DateTimeOffsetExpr>(DateTimeOffsetValue{.msSinceEpoch = msSinceEpoch, .minutesOffset = offset});
     }
 
     if (check(TokenType::String))
@@ -1390,7 +1446,7 @@ std::unique_ptr<Expr> Parser::parsePrimary()
         return std::make_unique<NullExpr>();
     }
 
-    throw std::runtime_error("Expected expression, got: " + peek().text);
+    throw QueryException(QueryErrorCode::Syntax, "Expected expression, got: " + peek().text);
 }
 
 std::unique_ptr<Expr> Parser::parseExpression()

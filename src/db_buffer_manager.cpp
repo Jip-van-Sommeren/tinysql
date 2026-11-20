@@ -1,4 +1,5 @@
 #include "db_buffer_manager.h"
+#include "db_query_exception.h"
 
 #include "db_page_factory.h"
 #include "db_read.h"
@@ -587,12 +588,12 @@ std::vector<LocatedRow> BufferManager::insertRowsImpl(Rows &&rows)
         const Row &row = *current;
         const auto validation = validateRowAgainstSchema(headerPage.columns, row);
         if (!validation.valid)
-            throw std::runtime_error(validation.message);
+            throw QueryException(QueryErrorCode::Validation, validation.message);
 
         const auto rowSize = encodedRowSize(headerPage, row);
         const auto maxRowSize = PAGE_SIZE - PageHeaderLayout::Size - encodedSlotSize();
         if (rowSize > maxRowSize)
-            throw std::runtime_error("Row is too large to fit on a page");
+            throw QueryException(QueryErrorCode::Validation, "Row is too large to fit on a page");
 
         if (headerPage.lastDataPageId == 0)
             currentPageId = createPage<DataPage>(header);

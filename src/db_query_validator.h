@@ -1,5 +1,7 @@
 #pragma once
 
+#include "db_query_exception.h"
+
 #include <string>
 #include <algorithm>
 #include <vector>
@@ -48,7 +50,7 @@ private:
             if (tables_[i].alias == qualifier)
                 return i;
         }
-        throw std::runtime_error("Unknown table: " + qualifier);
+        throw QueryException(QueryErrorCode::Validation, "Unknown table: " + qualifier);
     }
 
 public:
@@ -60,9 +62,9 @@ public:
     {
         const std::string qualifier = alias.value_or(tableName);
         if (resolveTable(qualifier))
-            throw std::runtime_error("Duplicate table alias: " + qualifier);
+            throw QueryException(QueryErrorCode::Validation, "Duplicate table alias: " + qualifier);
         if (columns.size() > std::numeric_limits<std::uint32_t>::max() - columnCount_)
-            throw std::runtime_error("Too many columns in binding context");
+            throw QueryException(QueryErrorCode::Validation, "Too many columns in binding context");
 
         TableContext table{
             .tableName = tableName,
@@ -108,13 +110,13 @@ public:
                     if (column.column.name == parts[0])
                     {
                         if (matchingTable)
-                            throw std::runtime_error("Ambiguous column name: " + parts[0]);
+                            throw QueryException(QueryErrorCode::Validation, "Ambiguous column name: " + parts[0]);
                         matchingTable = &table;
                     }
                 }
             }
             if (!matchingTable)
-                throw std::runtime_error("Unknown column: " + parts[0]);
+                throw QueryException(QueryErrorCode::Validation, "Unknown column: " + parts[0]);
             return {parts[0], matchingTable->alias};
         }
         if (parts.size() == 2)
@@ -122,7 +124,7 @@ public:
             const auto &table = tables_[tableIndex(parts[0])];
             return {parts[1], table.alias};
         }
-        throw std::runtime_error("Unsupported column reference");
+        throw QueryException(QueryErrorCode::Validation, "Unsupported column reference");
     }
 
     const std::vector<ColumnContext> &getColumns(const std::string &qualifier) const
@@ -156,7 +158,7 @@ public:
         const auto column = std::find_if(columns.begin(), columns.end(), [&](const ColumnContext &c)
                                          { return c.column.name == name; });
         if (column == columns.end())
-            throw std::runtime_error(std::format("Unknown column '{}.{}'", qualifier, name));
+            throw QueryException(QueryErrorCode::Validation, std::format("Unknown column '{}.{}'", qualifier, name));
         return *column;
     }
 
@@ -166,7 +168,7 @@ public:
         const auto column = std::find_if(columns.begin(), columns.end(), [&](const ColumnContext &c)
                                          { return c.column.name == name; });
         if (column == columns.end())
-            throw std::runtime_error(std::format("Unknown column '{}.{}'", qualifier, name));
+            throw QueryException(QueryErrorCode::Validation, std::format("Unknown column '{}.{}'", qualifier, name));
         return *column;
     }
 
@@ -213,7 +215,7 @@ public:
                                              { return std::visit([&](const auto &value)
                                                                  { return value.constraintName == name; }, c); });
         if (constraint == constraints.end())
-            throw std::runtime_error(std::format("Unknown constraint '{}.{}'", qualifier, name));
+            throw QueryException(QueryErrorCode::Validation, std::format("Unknown constraint '{}.{}'", qualifier, name));
         return *constraint;
     }
 

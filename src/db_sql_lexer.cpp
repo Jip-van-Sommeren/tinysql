@@ -1,4 +1,5 @@
 #include "db_sql_lexer.h"
+#include "db_query_exception.h"
 
 #include <cctype>
 #include <stdexcept>
@@ -62,7 +63,7 @@ std::vector<Token> Lexer::tokenize()
         }
         else
         {
-            throw std::runtime_error(std::string("Unexpected character: ") + c);
+            throw QueryException(QueryErrorCode::Syntax, std::string("Unexpected character: ") + c);
         }
     }
 
@@ -148,7 +149,7 @@ Token Lexer::readString()
 
     if (isAtEnd())
     {
-        throw std::runtime_error("Unterminated string literal");
+        throw QueryException(QueryErrorCode::Syntax, "Unterminated string literal");
     }
 
     std::string text = input.substr(start, pos - start);
@@ -239,5 +240,7 @@ bool Lexer::isDataTypeKeyword(const std::string &word) const
            word == "DECIMAL" ||
            word == "NUMERIC" ||
            word == "BIGINT" ||
-           word == "BOOLEAN";
+           word == "BOOLEAN" ||
+           word == "DATETIME" ||
+           word == "DATETIMEOFFSET";
 }

@@ -1,4 +1,5 @@
 #include "db_storage_engine.h"
+#include "db_query_exception.h"
 #include "db_query_validator.h"
 #include "db_linux_file.h"
 #include "db_write.h"
@@ -240,7 +241,7 @@ QueryResult StorageEngine::insertRows(const BoundInsert &insert)
 
     const auto validationResult = constraintValidator.validateConstraint(schema, insert.rows);
     if (!validationResult.valid)
-        throw std::runtime_error(validationResult.message.value());
+        throw QueryException(QueryErrorCode::Constraint, validationResult.message.value());
     auto table = openTable(insert.tableName);
 
     const auto &locatedRows = table.insertRows(insert);
@@ -283,7 +284,7 @@ QueryResult StorageEngine::updateRows(const BoundUpdate &update)
     const auto validationResult = constraintValidator.validateUpdateConstraint(
         schema, updatedRows, excludedRows, tableNames, *this);
     if (!validationResult.valid)
-        throw std::runtime_error(validationResult.message.value());
+        throw QueryException(QueryErrorCode::Constraint, validationResult.message.value());
     auto indexes = indexesForTable(update.tableName);
     // Remove the entire old key set first so rows in this UPDATE can exchange
     // unique keys. All table/index writes share the statement's undo journal.
@@ -320,7 +321,7 @@ QueryResult StorageEngine::deleteRows(const BoundDelete &del)
 
     const auto validationResult = constraintValidator.validateFkConstraintForDelete(tableName, tableNames, *this, delRows);
     if (!validationResult.valid)
-        throw std::runtime_error(validationResult.message.value());
+        throw QueryException(QueryErrorCode::Constraint, validationResult.message.value());
 
     const auto deletedCount = table.deleteRows(delRows);
 
@@ -345,7 +346,7 @@ Index StorageEngine::createIndex(const BoundCreateIndex &createIndex, const Inde
     requireReadable();
     if (indexDirectory_.entryExists(createIndex.name + ".index"))
     {
-        throw std::runtime_error("Index already exists: " + createIndex.name);
+        throw QueryException(QueryErrorCode::Validation, "Index already exists: " + createIndex.name);
     }
 
     Table table = openTable(createIndex.tableName);
@@ -381,7 +382,7 @@ HeaderPage StorageEngine::getTableHeader(const std::string &tableName) const
 
     if (!tableExists(tableName))
     {
-        throw std::runtime_error("Table does not exist: " + tableName);
+        throw QueryException(QueryErrorCode::Validation, "Table does not exist: " + tableName);
     }
 
     RawPage rawPage = readPageFromFile(tablesDirectory_, fileName, HeaderPageId);
@@ -398,7 +399,7 @@ std::vector<Column> StorageEngine::getTableSchema(const std::string &tableName) 
 
     if (!tableExists(tableName))
     {
-        throw std::runtime_error("Table does not exist: " + tableName);
+        throw QueryException(QueryErrorCode::Validation, "Table does not exist: " + tableName);
     }
 
     RawPage rawPage = readPageFromFile(tablesDirectory_, fileName, HeaderPageId);
@@ -413,7 +414,7 @@ Table StorageEngine::createTable(
     requireReadable();
     if (tablesDirectory_.entryExists(createTable.tableName + ".table"))
     {
-        throw std::runtime_error("Table already exists: " + createTable.tableName);
+        throw QueryException(QueryErrorCode::Validation, "Table already exists: " + createTable.tableName);
     }
 
     StorageConstraintLookup lookup{*this};
@@ -421,7 +422,7 @@ Table StorageEngine::createTable(
 
     const auto validationResult = constraintValidator.validateFkConstraintForTableCreation(createTable.constraints, *this);
     if (!validationResult.valid)
-        throw std::runtime_error(validationResult.message.value());
+        throw QueryException(QueryErrorCode::Constraint, validationResult.message.value());
 
     return Table::create(
         tablesDirectory_,
@@ -436,7 +437,7 @@ Table StorageEngine::openTable(const std::string &tableName)
     const auto fileName = getTablePath(tableName).filename();
     if (!tablesDirectory_.entryExists(fileName))
     {
-        throw std::runtime_error("Table does not exist: " + tableName);
+        throw QueryException(QueryErrorCode::Validation, "Table does not exist: " + tableName);
     }
 
     return Table::open(tablesDirectory_, fileName, statementRecovery_);

@@ -1,4 +1,5 @@
 #include "db_write.h"
+#include "db_query_exception.h"
 #include "db_decimal.h"
 #include "db_query_validator.h"
 
@@ -240,6 +241,37 @@ std::vector<std::byte> ValueSerializer::serializeValue(
 {
     switch (type)
     {
+    case DataType::Date:
+    {
+        if (!std::holds_alternative<DateValue>(value))
+            throw std::runtime_error("Expected DATE value");
+
+        const std::int32_t intValue = std::get<DateValue>(value).daysSinceEpoch;
+        const auto *data = reinterpret_cast<const std::byte *>(&intValue);
+
+        return std::vector<std::byte>(data, data + sizeof(intValue));
+    }
+
+    case DataType::DateTimeOffset:
+    {
+        if (!std::holds_alternative<DateTimeOffsetValue>(value))
+            throw std::runtime_error("Expected DATETIME value");
+        const auto dateTimeOffset = std::get<DateTimeOffsetValue>(value);
+        const std::int64_t intValue = dateTimeOffset.msSinceEpoch;
+        const std::int32_t minutesOffset = dateTimeOffset.minutesOffset;
+
+        const auto *data = reinterpret_cast<const std::byte *>(&intValue);
+        const auto *offsetData = reinterpret_cast<const std::byte *>(&minutesOffset);
+
+        std::vector<std::byte> result{};
+        result.reserve(sizeof(intValue) + sizeof(minutesOffset));
+
+        result.insert(result.end(), data, data + sizeof(intValue));
+        result.insert(result.end(), offsetData, offsetData + sizeof(minutesOffset));
+
+        return result;
+    }
+
     case DataType::Int:
     {
         if (!std::holds_alternative<std::int32_t>(value))
@@ -439,6 +471,24 @@ void RowWriter::writeFixedValue(
 
     switch (column.type)
     {
+    case DataType::Date:
+        if (!std::holds_alternative<DateValue>(value))
+            throw std::runtime_error("Expected DATE value");
+        writer.writeUnsignedAt<std::uint32_t>(absoluteOffset,
+                                              std::bit_cast<std::uint32_t>(std::get<DateValue>(value).daysSinceEpoch));
+        return;
+
+    case DataType::DateTimeOffset:
+    {
+        if (!std::holds_alternative<DateTimeOffsetValue>(value))
+            throw std::runtime_error("Expected DATETIMEOFFSET value");
+        writer.writeUnsignedAt<std::uint64_t>(absoluteOffset,
+                                              std::bit_cast<std::uint64_t>(std::get<DateTimeOffsetValue>(value).msSinceEpoch));
+        writer.writeUnsignedAt<std::uint32_t>(absoluteOffset + sizeof(std::int64_t),
+                                              std::bit_cast<std::uint32_t>(std::get<DateTimeOffsetValue>(value).minutesOffset));
+        return;
+    }
+
     case DataType::Int:
         if (!std::holds_alternative<std::int32_t>(value))
         {
@@ -944,8 +994,8 @@ void ExpressionSerializer::serialize(
     switch (expression.kind())
     {
     case BoundExprKind::FunctionCall:
-        throw std::runtime_error(
-            "Stored function expressions are not supported");
+        throw QueryException(QueryErrorCode::Validation,
+                             "Stored function expressions are not supported");
 
     case BoundExprKind::ColumnReference:
     {
@@ -968,6 +1018,22 @@ void ExpressionSerializer::serialize(
 
         switch (literal.type())
         {
+        case DataType::Date:
+            writer.writeUnsigned<std::uint32_t>(
+                std::bit_cast<std::uint32_t>(std::get<DateValue>(literal.value).daysSinceEpoch));
+            break;
+
+        case DataType::DateTimeOffset:
+        {
+            const DateTimeOffsetValue dateTimeOffset =
+                std::get<DateTimeOffsetValue>(literal.value);
+
+            writer.writeUnsigned<std::uint64_t>(
+                std::bit_cast<std::uint64_t>(dateTimeOffset.msSinceEpoch));
+            writer.writeUnsigned<std::uint32_t>(std::bit_cast<std::uint32_t>(dateTimeOffset.minutesOffset));
+            break;
+        }
+
         case DataType::Null:
             break;
 

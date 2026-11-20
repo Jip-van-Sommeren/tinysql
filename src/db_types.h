@@ -68,6 +68,32 @@ struct DecimalValue
     std::uint32_t scale;
 };
 
+struct DateValue
+{
+    std::int32_t daysSinceEpoch; // Days since 1970-01-01.
+
+    auto operator<=>(const DateValue &) const = default;
+};
+
+struct DateTimeOffsetValue
+{
+    std::int64_t msSinceEpoch;
+    std::int32_t minutesOffset;
+
+    auto operator<=>(const DateTimeOffsetValue &other) const
+    {
+        return msSinceEpoch <=> other.msSinceEpoch;
+    }
+
+    bool operator==(const DateTimeOffsetValue &other) const
+    {
+        return msSinceEpoch == other.msSinceEpoch;
+    }
+};
+
+std::ostream &operator<<(std::ostream &stream, const DateValue &value);
+std::ostream &operator<<(std::ostream &stream, const DateTimeOffsetValue &value);
+
 bool operator==(const DecimalValue &left, const DecimalValue &right);
 std::strong_ordering operator<=>(
     const DecimalValue &left,
@@ -81,8 +107,11 @@ using Value = std::variant<
     std::float32_t,
     std::float64_t,
     DecimalValue,
+    DateValue,
+    DateTimeOffsetValue,
     std::string,
     bool>;
+
 using NumberValue =
     std::variant<std::int32_t, std::int64_t, std::float32_t, std::float64_t, DecimalLiteral>;
 
@@ -95,7 +124,9 @@ enum class DataType : std::uint8_t
     Float = 4,
     Decimal = 5,
     BigInt = 6,
-    Boolean = 7
+    Boolean = 7,
+    Date = 8,
+    DateTimeOffset = 9
 };
 
 enum class BinaryOperator : std::uint8_t

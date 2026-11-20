@@ -1,4 +1,5 @@
 #include "db_index.h"
+#include "db_query_exception.h"
 #include "db_table.h"
 #include "db_index_codec.h"
 #include "db_row_validator.h"
@@ -229,7 +230,7 @@ void Index::insertIndex(const LeafIndexEntry &entry)
     // in an internal node so a split can leave two children on each side.
     constexpr auto payloadBytes = PAGE_SIZE - PageHeaderLayout::Size - IndexPageHeader::serializedSize();
     if (entry.serializedSize(schema) + sizeof(PageId) + encodedSlotSize() > payloadBytes / 2)
-        throw std::runtime_error("Index key is too large for an index page");
+        throw QueryException(QueryErrorCode::Validation, "Index key is too large for an index page");
 
     const bool unique = bufferManager_.getIndexHeaderPage().as<IndexHeaderPage>().unique;
     if (unique && !indexKeyHasNull(entry.key))
@@ -237,7 +238,7 @@ void Index::insertIndex(const LeafIndexEntry &entry)
         auto existing = seekLowerBound(entry.key);
         const auto match = existing.next();
         if (match && compareIndexKeys(match->key, entry.key) == 0)
-            throw std::runtime_error("UNIQUE INDEX can contain only unique non-NULL keys");
+            throw QueryException(QueryErrorCode::Constraint, "UNIQUE INDEX can contain only unique non-NULL keys");
     }
 
     auto cursor = IndexCursor(*this);

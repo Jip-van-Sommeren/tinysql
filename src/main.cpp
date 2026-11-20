@@ -1,5 +1,6 @@
 #include "db_database.h"
 
+#include <exception>
 #include <filesystem>
 #include <iostream>
 #include <string>
@@ -68,7 +69,7 @@ namespace
     }
 }
 
-int main()
+int main() try
 {
     std::filesystem::path dbPath{"/tmp/query_test_db"};
     std::filesystem::remove_all(dbPath);
@@ -91,7 +92,20 @@ int main()
     for (const std::string &query : queries)
     {
         std::cout << "SQL> " << query << '\n';
-        printQueryResult(db.executeSql(query));
+        auto result = db.tryExecuteSql(query);
+        if (result)
+        {
+            printQueryResult(*result);
+        }
+        else
+        {
+            std::cerr << "Query rejected: " << result.error().message << '\n';
+        }
         std::cout << '\n';
     }
+}
+catch (const std::exception &error)
+{
+    std::cerr << "Fatal error: " << error.what() << '\n';
+    return 1;
 }

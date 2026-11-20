@@ -1,4 +1,5 @@
 #include "db_query_executor.h"
+#include "db_query_exception.h"
 #include "db_storage_engine.h"
 #include "db_decimal.h"
 #include "db_expression_evaluator.h"
@@ -186,7 +187,7 @@ namespace
                 {
                     if (containsAggregate(*argument))
                     {
-                        throw std::runtime_error("Nested aggregate functions are not allowed");
+                        throw QueryException(QueryErrorCode::Validation, "Nested aggregate functions are not allowed");
                     }
                 }
 
@@ -227,8 +228,7 @@ namespace
 
         case BoundExprKind::ColumnReference:
 
-            throw std::runtime_error(
-                "Column reference outside an aggregate requires GROUP BY");
+            throw QueryException(QueryErrorCode::Validation, "Column reference outside an aggregate requires GROUP BY");
 
         case BoundExprKind::Literal:
             return;
@@ -244,7 +244,7 @@ namespace
             (right < 0 &&
              left < std::numeric_limits<std::int64_t>::min() - right))
         {
-            throw std::overflow_error("Aggregate integer overflow");
+            throw QueryNumericOverflow("Aggregate integer overflow");
         }
         return left + right;
     }
@@ -531,8 +531,7 @@ QueryResult SelectExecutor::execute(
 
     if (select.where && containsAggregate(*select.where))
     {
-        throw std::runtime_error(
-            "Aggregate functions are not supported in WHERE");
+        throw QueryException(QueryErrorCode::Validation, "Aggregate functions are not supported in WHERE");
     }
     const auto [rows, columnCount] = executeTableRef(*select.from, storageEngine);
 

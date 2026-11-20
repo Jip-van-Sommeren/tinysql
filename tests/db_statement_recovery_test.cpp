@@ -848,7 +848,7 @@ namespace
             probe.skipMatches = 1; // First sync persists journal creation.
             {
                 Observe observe{probe};
-                requireError([&] { database.executeSql("INSERT INTO items VALUES (2, 'b');"); }, "fsync");
+                requireError([&] { static_cast<void>(database.tryExecuteSql("INSERT INTO items VALUES (2, 'b');")); }, "fsync");
             }
             require(probe.failed && !std::filesystem::exists(root / "journal/journal.log"),
                     "Did not fail after journal unlink");
@@ -856,10 +856,42 @@ namespace
             requireError([&] { database.executeSql("INSERT INTO items VALUES (3, 'blocked');"); }, "recovery is required");
             requireError([&] { database.executeSql("DELETE FROM items;"); }, "recovery is required");
             requireError([&] { database.executeSql("CREATE TABLE blocked (id INT);"); }, "recovery is required");
+            requireError([&] { static_cast<void>(database.tryExecuteSql("SELECT * FROM items;")); }, "recovery is required");
+            requireError([&] { static_cast<void>(database.tryExecuteSql("invalid SQL")); }, "recovery is required");
         }
         // In-process failure requires reopening; this is not a power-loss test.
         auto database = Database::open(root, "test");
         require(database.executeSql("SELECT * FROM items;").rows.size() == 2, "Uncertain commit was blindly undone");
+    }
+
+    void testQueryRejectionRollbackFailure()
+    {
+        TestDirectory directory{"db-query-rollback-failure"};
+        const Path root = directory.path / "db";
+        {
+            auto database = Database::create(root, "test");
+            database.executeSql("CREATE TABLE items (id INT PRIMARY KEY);");
+            database.executeSql("INSERT INTO items VALUES (1);");
+            Probe probe{};
+            probe.root = root;
+            probe.target = root / "tables/items.table";
+            probe.failOperation = "sync";
+            probe.failPath = root / "journal";
+            probe.skipMatches = 1; // Allow journal publication, then fail rollback cleanup.
+            {
+                Observe observe{probe};
+                requireError([&] {
+                    static_cast<void>(database.tryExecuteSql("INSERT INTO items VALUES (1);"));
+                }, "fsync");
+            }
+            require(probe.failed, "Rollback failure was not reached");
+            requireError([&] {
+                static_cast<void>(database.tryExecuteSql("SELECT * FROM items;"));
+            }, "recovery is required");
+        }
+        auto database = Database::open(root, "test");
+        require(database.executeSql("SELECT * FROM items;").rows.size() == 1,
+                "Failed rollback of a rejected query changed stored rows");
     }
 
     void testDirectDirectorySyncFailures()
@@ -1098,6 +1130,7 @@ int main()
         testAppendFailureAfterWriteback();
         testRetirementFailures();
         testFinalCleanupReadGating();
+        testQueryRejectionRollbackFailure();
         testDirectDirectorySyncFailures();
         testRestartableRecoveryFailures();
         testPartialInitialization();
