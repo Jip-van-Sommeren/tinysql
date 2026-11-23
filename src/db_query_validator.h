@@ -341,6 +341,23 @@ struct BoundCreateTable
     std::vector<BoundConstraint> constraints;
 };
 
+struct BoundDropTable
+{
+    std::vector<std::string> tableNames;
+    bool cascade;
+};
+
+struct BoundDropIndex
+{
+    std::string indexName;
+};
+
+struct BoundTruncateTable
+{
+    std::vector<std::string> tableNames;
+    bool cascade;
+};
+
 struct BoundCreateIndex
 {
     std::string tableName;
@@ -362,7 +379,8 @@ struct BoundUpdate
     std::unique_ptr<BoundExpr> where;
 };
 
-using BoundQuery = std::variant<BoundSelect, BoundInsert, BoundDelete, BoundCreateTable, BoundCreateIndex, BoundUpdate>;
+using BoundQuery = std::variant<BoundSelect, BoundInsert, BoundDelete, BoundCreateTable, BoundCreateIndex, BoundUpdate,
+                               BoundDropTable, BoundDropIndex, BoundTruncateTable>;
 
 enum class SerializedExprType : std::uint8_t
 {
@@ -389,6 +407,10 @@ private:
     BoundUpdate validateStatement(const UpdateStatement &statement);
     BoundCreateTable validateStatement(const CreateTableStatement &statement);
     BoundCreateIndex validateStatement(const CreateIndexStatement &statement);
+
+    BoundDropTable validateStatement(const DropTableStatement &statement);
+    BoundDropIndex validateStatement(const DropIndexStatement &statement);
+    BoundTruncateTable validateStatement(const TruncateTableStatement &statement);
 
     BoundTableRef bindTableRef(const TableRef &tableRef);
     BoundConstraint bindConstraintExpr(const ConstraintExpr &expr, const std::string &tableName);

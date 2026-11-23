@@ -37,4 +37,8 @@ private:
     QueryResult executeStatement(const BoundCreateTable &create);
     QueryResult executeStatement(const BoundUpdate &update);
     QueryResult executeStatement(const BoundCreateIndex &createIndex);
+
+    QueryResult executeStatement(const BoundDropTable &dropTable);
+    QueryResult executeStatement(const BoundDropIndex &dropIndex);
+    QueryResult executeStatement(const BoundTruncateTable &truncateTable);
 };

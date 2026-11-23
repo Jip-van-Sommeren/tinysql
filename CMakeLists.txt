@@ -63,6 +63,11 @@ target_link_libraries(db PRIVATE db_core)
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(db_ddl_test tests/db_ddl_test.cpp)
+    db_configure_target(db_ddl_test PRIVATE)
+    target_link_libraries(db_ddl_test PRIVATE db_core)
+    add_test(NAME db_ddl_test COMMAND db_ddl_test)
+
     add_executable(db_query_error_test tests/db_query_error_test.cpp)
     db_configure_target(db_query_error_test PRIVATE)
     target_link_libraries(db_query_error_test PRIVATE db_core)

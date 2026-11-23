@@ -9,6 +9,7 @@
 
 #include <filesystem>
 #include <string>
+#include <set>
 #include <vector>
 
 struct BoundInsert;
@@ -16,6 +17,9 @@ struct BoundDelete;
 struct BoundUpdate;
 struct BoundCreateTable;
 struct BoundCreateIndex;
+struct BoundDropTable;
+struct BoundTruncateTable;
+struct BoundDropIndex;
 
 class StorageEngine final : public Catalog
 {
@@ -24,6 +28,7 @@ public:
     static StorageEngine open(const std::filesystem::path &path);
 
     bool tableExists(const std::string &name) const override;
+    bool indexExists(const std::string &name) const override;
     HeaderPage getTableHeader(const std::string &name) const override;
     std::vector<Column> getTableSchema(const std::string &tableName) const;
 
@@ -58,14 +63,28 @@ public:
     QueryResult deleteRows(const BoundDelete &del);
     QueryResult updateRows(const BoundUpdate &update);
 
+    QueryResult dropTable(const BoundDropTable &dropTable);
+    QueryResult dropIndex(const BoundDropIndex &dropIndex);
+    QueryResult truncateTable(const BoundTruncateTable &truncateTable);
+
     Index createIndex(const BoundCreateIndex &createIndex, const IndexBulkLoadOptions &options = {});
     Index openIndex(const std::string &indexName);
     Index openIndex(const std::filesystem::path &fileName);
     std::vector<Index> indexesForTable(const std::string &indexName);
+    std::vector<std::string> indexNamesForTable(const std::string &tableName);
 
     // const std::filesystem::path &getTablesPath() const;
 
 private:
+    enum class TableOperation { Drop, Truncate };
+    struct TableDdlPlan
+    {
+        std::set<std::string> targets;
+        std::set<std::string> referencingTables;
+    };
+    TableDdlPlan planTableDdl(const std::vector<std::string> &requested,
+                             bool cascade, TableOperation operation);
+
     void syncDirectory(LinuxDirectory &directory)
     {
         requireReadable();

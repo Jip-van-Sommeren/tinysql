@@ -8,6 +8,13 @@
 #include <utility>
 #include <variant>
 
+void Index::truncate()
+{
+    bufferManager_.truncateIndex();
+    bufferManager_.flushAll();
+    bufferManager_.sync();
+}
+
 IndexCursor::IndexCursor(Index &index)
     : index_(&index)
 {

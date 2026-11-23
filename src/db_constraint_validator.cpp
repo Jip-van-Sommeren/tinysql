@@ -36,6 +36,40 @@ namespace
 
 }
 
+std::pair<ConstraintValidationResult, std::vector<std::string>> ConstraintValidator::findReferencingTables(
+    const std::string &targetTableName,
+    const std::vector<std::string> &tableNames,
+    const StorageEngine &storageEngine,
+    bool cascade) const
+{
+    ConstraintValidationResult validation{
+        .valid = true, .constraintName = std::nullopt, .message = std::nullopt};
+    std::set<std::string> referencingTables;
+    for (const auto &tableName : tableNames)
+    {
+        const auto schema = storageEngine.getTableHeader(tableName);
+        for (const auto &constraint : schema.constraints)
+        {
+            const auto *fk = std::get_if<BoundForeignKeyConstraintExpr>(&constraint);
+            if (!fk || fk->referencedTableName != targetTableName)
+                continue;
+
+            referencingTables.insert(schema.tableName);
+            if (!cascade && schema.tableName != targetTableName && validation.valid)
+            {
+                validation = {
+                    .valid = false,
+                    .constraintName = fk->constraintName,
+                    .message = std::format(
+                        "FOREIGN KEY constraint '{}' in table '{}' references table '{}', DROP TABLE requires CASCADE",
+                        fk->constraintName, schema.tableName, targetTableName)};
+            }
+            break;
+        }
+    }
+    return {std::move(validation), {referencingTables.begin(), referencingTables.end()}};
+}
+
 ConstraintValidationResult ConstraintValidator::validateFkConstraintForDelete(
     const std::string &targetTableName,
     const std::vector<std::string> &tableNames,

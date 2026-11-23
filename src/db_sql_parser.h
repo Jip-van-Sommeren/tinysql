@@ -473,13 +473,40 @@ struct CreateIndexStatement
           unique(unique) {};
 };
 
+struct DropTableStatement
+{
+    std::vector<std::string> tableNames;
+    bool cascade;
+    DropTableStatement(std::vector<std::string> tableNames, bool cascade)
+        : tableNames(std::move(tableNames)), cascade(cascade) {}
+};
+
+struct DropIndexStatement
+{
+    std::string indexName;
+    explicit DropIndexStatement(std::string indexName) : indexName(std::move(indexName)) {}
+};
+
+struct TruncateTableStatement
+{
+    std::vector<std::string> tableNames;
+    bool cascade;
+    TruncateTableStatement(std::vector<std::string> tableNames, bool cascade)
+        : tableNames(std::move(tableNames)), cascade(cascade) {}
+};
+
 using Statement = std::variant<
     InsertStatement,
     SelectStatement,
     DeleteStatement,
     CreateTableStatement,
     UpdateStatement,
-    CreateIndexStatement>;
+    CreateIndexStatement,
+    DropTableStatement,
+    DropIndexStatement,
+    TruncateTableStatement
+
+    >;
 
 class Parser
 {
@@ -493,6 +520,12 @@ public:
     UpdateStatement parseUpdateStatement();
     CreateTableStatement parseCreateTableStatement();
     CreateIndexStatement parseCreateIndexStatement(bool unique);
+
+    DropTableStatement parseDropTableStatement();
+
+    DropIndexStatement parseDropIndexStatement();
+
+    TruncateTableStatement parseTruncateTableStatement();
 
     static std::int32_t dateToDays(const std::string &text);
     static std::int64_t dateTimeToMilliseconds(const std::string &text);

@@ -2,6 +2,7 @@
 
 #include "db_expression_evaluator.h"
 #include "db_query_validator.h"
+#include "db_write.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -193,6 +194,33 @@ void Table::initializeNewTable(
 {
     // bufferManager.initializeNewTable(tableName, magic, columns, constraints);
     bufferManager.initializeNewTable(payload);
+    bufferManager.flushAll();
+    bufferManager.sync();
+}
+
+void Table::truncateTable()
+{
+    bufferManager.truncateTable();
+    bufferManager.flushAll();
+    bufferManager.sync();
+}
+
+void Table::removeForeignKeysTo(const std::set<std::string> &tableNames)
+{
+    {
+        auto guard = bufferManager.getHeaderPage();
+        auto &page = guard.writePage();
+        auto &schema = std::get<HeaderPage>(page.data);
+        std::erase_if(schema.constraints, [&](const BoundConstraint &constraint)
+        {
+            const auto *fk = std::get_if<BoundForeignKeyConstraintExpr>(&constraint);
+            return fk && tableNames.contains(fk->referencedTableName);
+        });
+        ByteWriter writer(PAGE_SIZE);
+        writer.seek(PageHeaderLayout::Size);
+        HeaderPageWriter(writer).write(schema);
+        page.header.freeSpaceStart = static_cast<std::uint16_t>(writer.position());
+    }
     bufferManager.flushAll();
     bufferManager.sync();
 }

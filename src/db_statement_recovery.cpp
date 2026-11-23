@@ -84,6 +84,8 @@ void StatementRecovery::validateJournalForRecovery(std::uint64_t end)
 
     std::unordered_map<std::filesystem::path, FileBeforeImage> rollbackFiles;
     std::set<std::pair<std::filesystem::path, std::uint32_t>> seenPages;
+    std::unordered_map<std::filesystem::path, std::uint64_t> pageCounts;
+    deletedFiles_.clear();
     while (auto image = journalFile_->readNext(end))
     {
         auto payload = image.value().record;
@@ -106,6 +108,7 @@ void StatementRecovery::validateJournalForRecovery(std::uint64_t end)
                     {
                         throw std::runtime_error("Page before-image has no valid original file metadata");
                     }
+                    ++pageCounts[value.relativeFilePath];
                 }
                 else if constexpr (std::is_same_v<T, FileBeforeImage>)
                 {
@@ -120,13 +123,32 @@ void StatementRecovery::validateJournalForRecovery(std::uint64_t end)
                     {
                         throw std::runtime_error("Conflicting original file metadata in journal");
                     }
-                    // Resolve every existing target before any replay writes,
-                    // including rejecting symlinks in later records.
-                    if (!value.newFile)
-                        (void)LinuxFile(fileDirectory(value.relativeFilePath), value.relativeFilePath.filename(), LinuxFile::OpenMode::ReadOnly);
+                }
+                else if constexpr (std::is_same_v<T, FileDeletion>)
+                {
+                    const auto metadata = rollbackFiles.find(value.relativeFilePath);
+                    if (metadata == rollbackFiles.end() ||
+                        pageCounts[value.relativeFilePath] != metadata->second.originalSize / PAGE_SIZE ||
+                        !deletedFiles_.insert(value.relativeFilePath).second)
+                        throw std::runtime_error("File deletion requires a complete original file image");
                 }
             },
             payload);
+    }
+    // Preflight all paths before replay writes. Only a complete, explicit
+    // deletion record authorizes recreating a missing original file.
+    for (const auto &[path, metadata] : rollbackFiles)
+    {
+        if (metadata.newFile) continue;
+        try
+        {
+            (void)LinuxFile(fileDirectory(path), path.filename(), LinuxFile::OpenMode::ReadOnly);
+        }
+        catch (const std::system_error &error)
+        {
+            if (error.code() != std::errc::no_such_file_or_directory || !deletedFiles_.contains(path))
+                throw;
+        }
     }
     journalFile_->rewind();
     return;
@@ -290,6 +312,53 @@ void StatementRecovery::captureFileOnce(const std::filesystem::path &relativePat
     }
 }
 
+void StatementRecovery::captureFileContents(const std::filesystem::path &relativePath)
+{
+    requireWritableStatement();
+    try
+    {
+        if (cacheEpoch_ == std::numeric_limits<std::uint64_t>::max())
+            throw std::overflow_error("Cache epoch exhausted");
+        captureFileOnce(relativePath);
+        PageFile file{fileDirectory(relativePath), relativePath.filename()};
+        const auto pageCount = getOriginalFileSize(relativePath) / PAGE_SIZE;
+        if (pageCount > std::uint64_t{std::numeric_limits<std::uint32_t>::max()} + 1)
+            throw std::overflow_error("File has too many pages");
+        for (std::uint64_t id = 0; id < pageCount; ++id)
+        {
+            const auto pageId = static_cast<std::uint32_t>(id);
+            if (!hasCapturedPage(relativePath, pageId))
+                capturePageOnce({relativePath, pageId, file.readPage(pageId)});
+        }
+        invalidateHandlesOnCommit_ = true;
+    }
+    catch (...)
+    {
+        failed_ = true;
+        throw;
+    }
+}
+
+void StatementRecovery::deleteFile(const std::filesystem::path &relativePath)
+{
+    requireWritableStatement();
+    try
+    {
+        captureFileContents(relativePath);
+        appendOffset_ = journalFile_->writeFileDeletion({relativePath});
+        recoveryEnd_ = appendOffset_;
+        ensureDurable();
+        auto directory = fileDirectory(relativePath);
+        directory.deleteFile(relativePath.filename());
+        directory.sync();
+    }
+    catch (...)
+    {
+        failed_ = true;
+        throw;
+    }
+}
+
 bool StatementRecovery::isNewFile(const std::filesystem::path &relativePath) const
 {
     requireWritableStatement();
@@ -388,6 +457,7 @@ void StatementRecovery::rollback()
         throw std::overflow_error("Cache epoch exhausted");
     std::unordered_map<std::filesystem::path, PageFile> openedFiles;
     std::unordered_map<std::filesystem::path, FileBeforeImage> rollbackFiles;
+    std::set<std::filesystem::path> changedDirectories;
 
     validateJournalForRecovery(recoveryEnd_);
     // journalFile_->rewind();
@@ -432,12 +502,28 @@ void StatementRecovery::rollback()
                     {
                         throw std::runtime_error("Conflicting original file metadata in journal");
                     }
+                    if (!value.newFile && deletedFiles_.contains(value.relativeFilePath))
+                    {
+                        const auto &path = value.relativeFilePath;
+                        // Include this directory on every retry: a previous replay
+                        // may have created its file and failed before directory sync.
+                        changedDirectories.insert(path.parent_path());
+                        try
+                        {
+                            openedFiles.try_emplace(path, fileDirectory(path), path.filename(),
+                                                   LinuxFile::OpenMode::OpenExisting);
+                        }
+                        catch (const std::system_error &error)
+                        {
+                            if (error.code() != std::errc::no_such_file_or_directory) throw;
+                            openedFiles.try_emplace(path, fileDirectory(path), path.filename(),
+                                                   LinuxFile::OpenMode::CreateNew);
+                        }
+                    }
                 }
             },
             image.value().record);
     }
-
-    std::set<std::filesystem::path> changedDirectories;
 
     for (const auto &[relativePath, metadata] : rollbackFiles)
     {
@@ -504,6 +590,8 @@ void StatementRecovery::commit()
                 changedDirectories.insert(relativePath.parent_path());
         for (const auto &directory : changedDirectories)
             LinuxDirectory(dbRootDir_, directory.empty() ? std::filesystem::path{"tables"} : directory).sync();
+        if (invalidateHandlesOnCommit_)
+            ++cacheEpoch_;
         journalDir_.deleteFile("journal.log");
 
         retirement_ = Retirement::Commit;
@@ -523,6 +611,8 @@ void StatementRecovery::finish()
     capturedPages_.clear();
     originalFiles_.clear();
     participants_.clear();
+    deletedFiles_.clear();
+    invalidateHandlesOnCommit_ = false;
     appendOffset_ = 0;
     syncOffset_ = 0;
     recoveryEnd_ = 0;

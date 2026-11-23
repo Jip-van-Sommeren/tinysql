@@ -5,6 +5,7 @@
 #include <span>
 #include <set>
 #include <ranges>
+#include <utility>
 
 class StorageEngine;
 
@@ -59,6 +60,15 @@ public:
     ConstraintValidationResult validateFkConstraintForTableCreation(
         const std::vector<BoundConstraint> &constraints,
         const StorageEngine &storageEngine);
+
+    // Returns validation and sorted, distinct names of all direct referencing tables,
+    // including self-references, regardless of rows. Without cascade, references
+    // from other tables make validation fail; self-references do not block a drop.
+    std::pair<ConstraintValidationResult, std::vector<std::string>> findReferencingTables(
+        const std::string &targetTableName,
+        const std::vector<std::string> &tableNames,
+        const StorageEngine &storageEngine,
+        bool cascade) const;
 
     ConstraintValidationResult validateFkConstraintForDelete(
         const std::string &targetTableName,

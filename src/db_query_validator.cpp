@@ -931,6 +931,12 @@ BoundQuery QueryValidator::validate(const Statement &statement)
             {
                 return validateStatement(value);
             }
+            else if constexpr (std::is_same_v<T, DropTableStatement> ||
+                               std::is_same_v<T, DropIndexStatement> ||
+                               std::is_same_v<T, TruncateTableStatement>)
+            {
+                return validateStatement(value);
+            }
             else
             {
                 throw std::runtime_error("Unknown Statement Type");
@@ -1496,6 +1502,39 @@ BoundConstraint QueryValidator::bindConstraintExpr(
     default:
         throw std::runtime_error("Unsupported constraint type");
     }
+}
+
+BoundDropTable QueryValidator::validateStatement(const DropTableStatement &statement)
+{
+    for (auto tableName : statement.tableNames)
+    {
+        if (!catalog_.tableExists(tableName))
+        {
+            throw QueryException(QueryErrorCode::Validation, "Table does not exist: " + tableName);
+        }
+    }
+    return BoundDropTable{statement.tableNames, statement.cascade};
+}
+
+BoundDropIndex QueryValidator::validateStatement(const DropIndexStatement &statement)
+{
+    if (!catalog_.indexExists(statement.indexName))
+    {
+        throw QueryException(QueryErrorCode::Validation, "Index does not exist: " + statement.indexName);
+    }
+    return BoundDropIndex{statement.indexName};
+}
+
+BoundTruncateTable QueryValidator::validateStatement(const TruncateTableStatement &statement)
+{
+    for (auto tableName : statement.tableNames)
+    {
+        if (!catalog_.tableExists(tableName))
+        {
+            throw QueryException(QueryErrorCode::Validation, "Table does not exist: " + tableName);
+        }
+    }
+    return BoundTruncateTable{statement.tableNames, statement.cascade};
 }
 
 BoundInsert QueryValidator::validateStatement(const InsertStatement &statement)

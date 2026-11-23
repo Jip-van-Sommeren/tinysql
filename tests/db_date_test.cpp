@@ -102,6 +102,7 @@ namespace
     class MemoryCatalog final : public Catalog
     {
     public:
+        bool indexExists(const std::string &) const override { return false; }
         bool tableExists(const std::string &name) const override { return name == "events"; }
         HeaderPage getTableHeader(const std::string &) const override
         {
@@ -118,6 +119,7 @@ namespace
     class OffsetMemoryCatalog final : public Catalog
     {
     public:
+        bool indexExists(const std::string &) const override { return false; }
         bool tableExists(const std::string &name) const override { return name == "events"; }
         HeaderPage getTableHeader(const std::string &) const override
         {

@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <set>
 #include <vector>
 #include <unordered_set>
 
@@ -54,6 +55,8 @@ public:
     TableCursor scan() &;
     std::uint64_t deleteRows(const std::vector<LocatedRow> &delRows);
     std::vector<BoundConstraint> getConstraints();
+    void truncateTable();
+    void removeForeignKeysTo(const std::set<std::string> &tableNames);
 
 private:
     friend class TableCursor;

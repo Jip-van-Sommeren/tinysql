@@ -1,7 +1,9 @@
 #include "db_constraint_validator.h"
 #include "db_database.h"
 #include "db_linux_file.h"
+#include "db_page_file.h"
 #include "db_test_directory.h"
+#include "db_write.h"
 
 #include <cstdint>
 #include <iostream>
@@ -439,6 +441,88 @@ namespace
         }, "UNIQUE");
     }
 
+    void testReferencingTables()
+    {
+        TestDirectory directory{"db-constraint-referencing-tables"};
+        const auto root = directory.path / "db";
+        {
+            auto database = Database::create(root, "test");
+            database.executeSql("CREATE TABLE parents (id INT PRIMARY KEY);");
+            database.executeSql("CREATE TABLE unrelated (id INT PRIMARY KEY);");
+            database.executeSql("CREATE TABLE children (id INT PRIMARY KEY, first_parent INT, second_parent INT, "
+                                "FOREIGN KEY (first_parent) REFERENCES parents (id), "
+                                "FOREIGN KEY (second_parent) REFERENCES parents (id));");
+            database.executeSql("CREATE TABLE other_children (parent_id INT, "
+                                "CONSTRAINT fk_other_parent FOREIGN KEY (parent_id) REFERENCES parents (id));");
+            database.executeSql("CREATE TABLE grandchildren (child_id INT REFERENCES children (id));");
+            database.executeSql("CREATE TABLE unrelated_children (parent_id INT REFERENCES unrelated (id));");
+            database.executeSql("CREATE TABLE nodes (id INT PRIMARY KEY, parent_id INT);");
+        }
+        // CREATE binding does not yet support self-references. Seed their stored metadata.
+        {
+            PageFile file{LinuxDirectory{root / "tables"}, "nodes.table"};
+            auto page = decodeHeaderPage(file.readPage(HeaderPageId));
+            auto &schema = std::get<HeaderPage>(page.data);
+            schema.constraints.push_back(BoundForeignKeyConstraintExpr{
+                "nodes_parent", {1}, "nodes", {0}});
+            file.writePage(HeaderPageId, encodeHeaderPage(page.header, schema));
+            file.sync();
+        }
+
+        auto engine = StorageEngine::open(root);
+        StorageConstraintLookup lookup{engine};
+        const ConstraintValidator validator{lookup};
+        const std::vector<std::string> tables{
+            "parents", "other_children", "unrelated", "grandchildren",
+            "children", "unrelated_children", "children", "nodes"};
+
+        for (const bool cascade : {false, true})
+        {
+            const auto [parentsValidation, parents] =
+                validator.findReferencingTables("parents", tables, engine, cascade);
+            require(parents == std::vector<std::string>{"children", "other_children"},
+                    "Expected each direct referencing table once, even when validation fails or tables are empty");
+            require(parentsValidation.valid == cascade,
+                    "Incoming references should require CASCADE");
+            if (cascade)
+            {
+                require(!parentsValidation.constraintName && !parentsValidation.message,
+                        "Successful CASCADE validation returned an error");
+            }
+            else
+            {
+                require(parentsValidation.constraintName == "fk_other_parent" && parentsValidation.message &&
+                            parentsValidation.message->find("other_children") != std::string::npos &&
+                            parentsValidation.message->find("parents") != std::string::npos,
+                        "Failed DROP validation did not identify the blocking FK and tables");
+            }
+
+            const auto [childrenValidation, children] =
+                validator.findReferencingTables("children", tables, engine, cascade);
+            require(childrenValidation.valid == cascade && children == std::vector<std::string>{"grandchildren"},
+                    "Incoming FK lookup returned an outgoing or unrelated reference");
+            const auto [unrelatedValidation, unrelated] =
+                validator.findReferencingTables("unrelated", tables, engine, cascade);
+            require(unrelatedValidation.valid == cascade && unrelated == std::vector<std::string>{"unrelated_children"},
+                    "Incoming FK lookup ignored a different target table");
+
+            const auto [unreferencedValidation, unreferenced] =
+                validator.findReferencingTables("grandchildren", tables, engine, cascade);
+            require(unreferencedValidation.valid && !unreferencedValidation.constraintName &&
+                        !unreferencedValidation.message && unreferenced.empty(),
+                    "A table without incoming FKs should not require CASCADE");
+            const auto [emptyValidation, empty] =
+                validator.findReferencingTables("parents", {}, engine, cascade);
+            require(emptyValidation.valid && empty.empty(), "An empty table list had referencing tables");
+
+            const auto [selfValidation, self] =
+                validator.findReferencingTables("nodes", tables, engine, cascade);
+            require(selfValidation.valid && !selfValidation.constraintName && !selfValidation.message &&
+                        self == std::vector<std::string>{"nodes"},
+                    "Self-references should be returned without blocking DROP TABLE");
+        }
+    }
+
     void testNonSqlNumericKeys()
     {
         // SQL binding rejects NaN and normalizes decimal literals. Exercise
@@ -496,6 +580,7 @@ int main()
         testForeignKeyDeleteIndependentReferences();
         testForeignKeyDeleteBatchAndReopen();
         testNumericKeyEquality();
+        testReferencingTables();
         testNonSqlNumericKeys();
     }
     catch (const std::exception &error)

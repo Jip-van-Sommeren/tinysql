@@ -71,6 +71,7 @@ public:
     void insertIndexes(std::vector<LeafIndexEntry> indexValues);
     void insertIndexes(std::vector<LocatedRow> rows);
     void deleteIndexes(const std::vector<LocatedRow> &rows);
+    void truncate();
 
     // Builds a newly created, empty index in the caller's active statement.
     // The source table must stay unchanged for the duration of the build.

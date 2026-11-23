@@ -38,6 +38,9 @@ public:
     void rollback();
     bool isActive() const { return active_; }
     void captureFileOnce(const std::filesystem::path &relativePath, bool newFile = false);
+    // Capture every original page before truncating or unlinking a file.
+    void captureFileContents(const std::filesystem::path &relativePath);
+    void deleteFile(const std::filesystem::path &relativePath);
     bool isNewFile(const std::filesystem::path &relativePath) const;
     bool hasCapturedPage(const std::filesystem::path &path, std::uint32_t pageId) const;
     std::uint64_t getOriginalFileSize(const std::filesystem::path &relativePath) const;
@@ -64,6 +67,8 @@ private:
         capturedPages_;
     std::unordered_map<std::filesystem::path, CapturedFile> originalFiles_;
     std::vector<std::shared_ptr<Participant>> participants_;
+    std::unordered_set<std::filesystem::path> deletedFiles_;
+    bool invalidateHandlesOnCommit_ = false;
 
     bool journalDirectoryNeedsSync_ = false;
     bool failed_ = false;

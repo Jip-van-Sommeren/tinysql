@@ -233,7 +233,11 @@ std::optional<JournalRecord> JournalFile::readRecord(
     {
         throw std::runtime_error("Invalid page journal record size");
     }
-    if (journalType != JournalRecordType::FileBeforeImage && journalType != JournalRecordType::PageBeforeImage)
+    if (journalType == JournalRecordType::FileDeletion &&
+        (recordSize < JournalRecordHeaderBytes + 4 + MinPathBytes || recordSize > maxDeletionRecord))
+        throw std::runtime_error("Invalid deletion journal record size");
+    if (journalType != JournalRecordType::FileBeforeImage && journalType != JournalRecordType::PageBeforeImage &&
+        journalType != JournalRecordType::FileDeletion)
     {
         throw std::runtime_error("invalid Journal Record Type");
     }
@@ -305,7 +309,7 @@ std::optional<JournalRecord> JournalFile::readRecord(
         }
         record.newFile = newFile != 0;
     }
-    else // Type was already validated as PageBeforeImage.
+    else if (journalType == JournalRecordType::PageBeforeImage)
     {
         auto &record = result.record.emplace<PageBeforeImage>();
 
@@ -313,6 +317,12 @@ std::optional<JournalRecord> JournalFile::readRecord(
         (void)encodedPath(record.relativeFilePath);
         record.pageId = reader.readUnsigned<std::uint32_t>();
         reader.readBytes(record.originalPage.data(), record.originalPage.size());
+    }
+    else
+    {
+        auto &record = result.record.emplace<FileDeletion>();
+        record.relativeFilePath = reader.readString();
+        (void)encodedPath(record.relativeFilePath);
     }
 
     if (reader.position() != reader.size())
@@ -373,6 +383,14 @@ std::uint64_t JournalFile::writePage(const PageBeforeImage &pageBeforeImage)
         throw std::out_of_range("Journal append offset overflow");
     }
     return appendRecord(JournalRecordType::PageBeforeImage, writer.bytes());
+}
+
+std::uint64_t JournalFile::writeFileDeletion(const FileDeletion &deletion)
+{
+    const auto path = encodedPath(deletion.relativeFilePath);
+    ByteWriter writer(4 + path.size());
+    writer.writeString(path);
+    return appendRecord(JournalRecordType::FileDeletion, writer.bytes());
 }
 
 void JournalFile::writeJournalBoundary(const JournalBoundary &boundary, const std::uint8_t slot)

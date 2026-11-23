@@ -87,6 +87,9 @@ public:
     template <PagePayload T>
     PageGuard getPage(PageId pageId);
 
+    void truncateTable();
+    void truncateIndex();
+
     void initializeNewTable(const CreateTablePayload &createTablePayload);
     void initializeNewIndex(const CreateIndexPayload &CreateIndexPayload);
 
@@ -126,6 +129,7 @@ public:
 
 private:
     friend class PageGuard;
+    void resetToEmpty();
 
     // Instantiated only by the concrete insertion/update methods in the .cpp.
     RowSchema schema_;

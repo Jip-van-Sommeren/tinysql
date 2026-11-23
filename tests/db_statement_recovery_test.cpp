@@ -12,6 +12,7 @@
 #include <linux/openat2.h>
 #include <sys/syscall.h>
 #include <iostream>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <unistd.h>
@@ -598,6 +599,69 @@ namespace
         }
     }
 
+    void testDdlIoFailures()
+    {
+        const auto snapshot = [](const Path &root)
+        {
+            std::map<Path, std::vector<std::byte>> result;
+            for (const auto &dir : {"tables", "indexes"})
+                for (const auto &entry : std::filesystem::directory_iterator(root / dir))
+                    result.emplace(entry.path().lexically_relative(root), readFile(entry.path()));
+            return result;
+        };
+        for (const std::string phase : {"drop-unlink", "drop-directory-sync", "truncate-resize",
+                                       "restore-create", "restore-write", "restore-sync", "restore-directory-sync"})
+        {
+            TestDirectory directory{"db-ddl-io-failure"};
+            const auto root = directory.path / "db";
+            {
+                auto db = Database::create(root, "test");
+                db.executeSql("CREATE TABLE a (id INT PRIMARY KEY);");
+                db.executeSql("CREATE TABLE b (id INT REFERENCES a(id));");
+                db.executeSql("CREATE INDEX a_index ON a(id);");
+                db.executeSql("CREATE INDEX b_index ON b(id);");
+                db.executeSql("INSERT INTO a VALUES (1);");
+                db.executeSql("INSERT INTO b VALUES (1);");
+            }
+            const auto before = snapshot(root);
+            Probe probe{};
+            probe.root = root;
+            probe.target = root / "tables/a.table";
+            if (phase.starts_with("restore-"))
+            {
+                auto engine = StorageEngine::open(root);
+                engine.beginStatement();
+                engine.dropTable({{"a"}, true});
+                probe.failOperation = phase == "restore-create" ? "create" :
+                                      phase == "restore-write" ? "write" : "sync";
+                probe.failPath = phase == "restore-directory-sync" ? root / "tables" : probe.target;
+                {
+                    Observe observe{probe};
+                    requireError([&] { engine.rollbackStatement(); }, "Input/output error");
+                }
+                require(probe.failed && std::filesystem::exists(root / "journal/journal.log"),
+                        "Failed DDL recovery lost its journal");
+                engine.rollbackStatement();
+            }
+            else
+            {
+                auto db = Database::open(root, "test");
+                probe.failOperation = phase == "drop-unlink" ? "unlink" :
+                                      phase == "truncate-resize" ? "resize" : "sync";
+                probe.failPath = phase == "drop-directory-sync" ? root / "indexes" :
+                                 phase == "truncate-resize" ? root / "tables/b.table" : probe.target;
+                Observe observe{probe};
+                requireError([&]
+                {
+                    db.executeSql(phase == "truncate-resize" ? "TRUNCATE TABLE a CASCADE;" : "DROP TABLE a CASCADE;");
+                }, "Input/output error");
+            }
+            require(probe.failed, "DDL I/O failure was not reached: " + phase);
+            require(snapshot(root) == before, "DDL I/O failure left partial changes: " + phase);
+            require(!std::filesystem::exists(root / "journal/journal.log"), "DDL rollback retained its journal");
+        }
+    }
+
     void testDeleteRollback()
     {
         TestDirectory directory{"db-delete-rollback"};
@@ -1125,6 +1189,7 @@ int main()
         testCommitChecksEveryHandle();
         testExistingWriteFailuresAndGrowth();
         testDeleteRollback();
+        testDdlIoFailures();
         testUpdateFailureAfterDeletion();
         testMultipleFileFailureAndReadGating();
         testAppendFailureAfterWriteback();

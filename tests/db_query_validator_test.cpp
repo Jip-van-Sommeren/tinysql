@@ -49,6 +49,7 @@ namespace
     class MemoryCatalog final : public Catalog
     {
     public:
+        bool indexExists(const std::string &) const override { return false; }
         bool tableExists(const std::string &name) const override
         {
             return tables.contains(name);

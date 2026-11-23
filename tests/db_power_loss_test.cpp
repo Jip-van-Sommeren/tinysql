@@ -351,6 +351,57 @@ namespace
         }
     }
 
+    void testDdlPowerLoss()
+    {
+        for (const std::string sql : {"DROP TABLE parents CASCADE;", "DROP INDEX parent_index;",
+                                     "TRUNCATE TABLE parents CASCADE;"})
+        {
+            TestDirectory directory{"db-ddl-power-loss"};
+            const auto root = directory.path / "db";
+            const auto replay = directory.path / "replay";
+            {
+                auto db = Database::create(root, "test");
+                db.executeSql("CREATE TABLE items (id INT);");
+                db.executeSql("INSERT INTO items VALUES (1);");
+                db.executeSql("CREATE TABLE parents (id INT PRIMARY KEY);");
+                db.executeSql("CREATE TABLE children (id INT REFERENCES parents(id));");
+                db.executeSql("CREATE INDEX parent_index ON parents(id);");
+                db.executeSql("CREATE INDEX child_index ON children(id);");
+                db.executeSql("INSERT INTO parents VALUES (1);");
+                db.executeSql("INSERT INTO children VALUES (1);");
+            }
+            const auto before = files(root);
+            const auto previousChecks = checked;
+            Model mutation{root};
+            const auto initialImage = crashImage(mutation.state, 0, 0);
+            {
+                auto db = Database::open(root, "test");
+                Observe observe{mutation};
+                db.executeSql(sql);
+            }
+            const auto after = files(root);
+            exercise(mutation, replay, before, after, sql);
+            verify(replay, crashImage(mutation.state, 0, 0), after, after, "committed " + sql);
+
+            install(root, initialImage);
+            {
+                auto engine = StorageEngine::open(root);
+                engine.beginStatement();
+                if (sql.starts_with("DROP TABLE")) engine.dropTable({{"parents"}, true});
+                else if (sql.starts_with("DROP INDEX")) engine.dropIndex({"parent_index"});
+                else engine.truncateTable({{"parents"}, true});
+            }
+            Model recovery{root};
+            {
+                Observe observe{recovery};
+                auto engine = StorageEngine::open(root);
+            }
+            require(files(root) == before, "DDL recovery lost original bytes");
+            exercise(recovery, replay, before, before, "recovery " + sql);
+            std::cout << "Verified " << checked - previousChecks << " power-loss images for " << sql << '\n';
+        }
+    }
+
     void testCommitAndRecoveryPowerLoss()
     {
         TestDirectory directory{"db-power-loss"};
@@ -508,6 +559,7 @@ int main()
     try
     {
         testCommitAndRecoveryPowerLoss();
+        testDdlPowerLoss();
         testIndexInsertionPowerLoss();
         testIndexMutationPowerLoss();
     }

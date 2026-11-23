@@ -164,7 +164,7 @@ void BufferManager::requireReadable() const
 {
     statementRecovery_.requireReadable();
     if (cacheEpoch_ != statementRecovery_.cacheEpoch())
-        throw std::runtime_error("Table handle was invalidated by rollback; reopen the table");
+        throw std::runtime_error("Table handle was invalidated by rollback or DDL; reopen the table");
 }
 
 void BufferManager::prepareForWrite(PageId pageId)
@@ -412,7 +412,7 @@ void BufferManager::replaceIndexPage(PageGuard &guard, IndexPage contents, PageI
     std::size_t offset = PageHeaderLayout::Size + IndexPageHeader::serializedSize();
     std::size_t end = PAGE_SIZE;
     std::visit([&](const auto &entries)
-    {
+               {
         slots.reserve(entries.size());
         for (const auto &entry : entries)
         {
@@ -423,8 +423,7 @@ void BufferManager::replaceIndexPage(PageGuard &guard, IndexPage contents, PageI
                                  static_cast<std::uint16_t>(size), 0});
             offset += size;
             end -= encodedSlotSize();
-        }
-    }, contents.entries);
+        } }, contents.entries);
     contents.slots = std::move(slots);
 
     auto &page = guard.writePage();
@@ -526,6 +525,61 @@ std::optional<InternalIndexEntry> BufferManager::insertIntoInternal(
     replaceIndexPage(rightPage, std::move(right), 0);
     replaceIndexPage(parentPage, std::move(left), 0);
     return InternalIndexEntry{promoted.separatorKey, promoted.separatorRowId, rightId};
+}
+void BufferManager::truncateTable()
+{
+    if (indexFile_) throw std::logic_error("Expected a table file");
+    resetToEmpty();
+}
+
+void BufferManager::truncateIndex()
+{
+    if (!indexFile_) throw std::logic_error("Expected an index file");
+    resetToEmpty();
+}
+
+void BufferManager::resetToEmpty()
+{
+    requireReadable();
+    for (const auto &[id, frame] : pages)
+    {
+        (void)id;
+        if (frame.pinCount != 0)
+            throw std::logic_error("Cannot truncate a file with pinned pages");
+    }
+    Page header = indexFile_ ? getIndexHeaderPage().page() : getHeaderPage().page();
+    header.header.nextPageId = FirstDataPageId;
+    if (indexFile_)
+    {
+        auto &metadata = std::get<IndexHeaderPage>(header.data);
+        metadata.rootPageId = FirstDataPageId;
+        metadata.nextUnusedPageId = FirstDataPageId + 1;
+    }
+    else
+    {
+        auto &metadata = std::get<HeaderPage>(header.data);
+        metadata.totalRowCount = 0;
+        metadata.firstDataPageId = metadata.lastDataPageId = FirstDataPageId;
+        metadata.nextUnusedPageId = FirstDataPageId + 1;
+    }
+    try
+    {
+        statementRecovery_.captureFileContents(relativeTablePath_);
+        statementRecovery_.ensureDurable();
+        statementRecovery_.trackParticipant(participant_);
+        pages.clear();
+        participant_->dirtyPages.clear();
+        setPage(header, HeaderPageId);
+        setPage(indexFile_ ? makeEmptyPage<IndexPage>(FirstDataPageId)
+                           : makeEmptyPage<DataPage>(FirstDataPageId), FirstDataPageId);
+        participant_->needsSync = true;
+        pageFile_.resize(2 * PAGE_SIZE);
+    }
+    catch (...)
+    {
+        statementRecovery_.statementFailed();
+        throw;
+    }
 }
 
 void BufferManager::createNewRoot(

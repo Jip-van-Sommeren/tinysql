@@ -260,7 +260,76 @@ Statement Parser::parseStatement()
         }
     }
 
+    if (checkKeyword("DROP"))
+    {
+        if (checkKeyword("TABLE", 1))
+        {
+            return parseDropTableStatement();
+        }
+        else if (checkKeyword("INDEX", 1))
+        {
+            return parseDropIndexStatement();
+        }
+    }
+
+    if (checkKeyword("TRUNCATE"))
+        return parseTruncateTableStatement();
+
     throw QueryException(QueryErrorCode::Syntax, "Expected SQL statement, got: " + peek().text);
+}
+
+DropTableStatement Parser::parseDropTableStatement()
+{
+    expectKeyword("DROP");
+
+    expectKeyword("TABLE");
+
+    auto tableNameToken = expect(TokenType::Identifier);
+    std::vector<std::string> tableNames{};
+    tableNames.push_back(std::move(tableNameToken.text));
+
+    while (match(TokenType::Comma))
+    {
+        tableNames.push_back(expect(TokenType::Identifier).text);
+    }
+    auto cascade{false};
+    if (matchKeyword("CASCADE"))
+        cascade = true;
+    finishStatement();
+    return DropTableStatement{std::move(tableNames), cascade};
+}
+
+DropIndexStatement Parser::parseDropIndexStatement()
+{
+    expectKeyword("DROP");
+
+    expectKeyword("INDEX");
+
+    auto indexNameToken = expect(TokenType::Identifier);
+    std::string indexName = std::move(indexNameToken.text);
+    finishStatement();
+    return DropIndexStatement{std::move(indexName)};
+}
+
+TruncateTableStatement Parser::parseTruncateTableStatement()
+{
+    expectKeyword("TRUNCATE");
+
+    expectKeyword("TABLE");
+
+    auto tableNameToken = expect(TokenType::Identifier);
+    std::vector<std::string> tableNames{};
+    tableNames.push_back(std::move(tableNameToken.text));
+
+    while (match(TokenType::Comma))
+    {
+        tableNames.push_back(expect(TokenType::Identifier).text);
+    }
+    auto cascade{false};
+    if (matchKeyword("CASCADE"))
+        cascade = true;
+    finishStatement();
+    return TruncateTableStatement{std::move(tableNames), cascade};
 }
 
 std::int32_t Parser::dateToDays(const std::string &text)

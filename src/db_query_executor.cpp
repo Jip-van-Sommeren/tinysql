@@ -708,3 +708,61 @@ QueryResult QueryExecutor::executeStatement(const BoundUpdate &update)
 
     return queryResult;
 }
+
+QueryResult QueryExecutor::executeStatement(const BoundDropTable &dropTable)
+{
+    storageEngine_.beginStatement();
+    QueryResult queryResult{};
+
+    try
+    {
+        queryResult = storageEngine_.dropTable(dropTable);
+    }
+    catch (...)
+    {
+        storageEngine_.rollbackStatement();
+        throw;
+    }
+
+    storageEngine_.commitStatement();
+
+    return queryResult;
+}
+QueryResult QueryExecutor::executeStatement(const BoundDropIndex &dropIndex)
+{
+    storageEngine_.beginStatement();
+    QueryResult queryResult{};
+
+    try
+    {
+        queryResult = storageEngine_.dropIndex(dropIndex);
+    }
+    catch (...)
+    {
+        storageEngine_.rollbackStatement();
+        throw;
+    }
+
+    storageEngine_.commitStatement();
+
+    return queryResult;
+}
+QueryResult QueryExecutor::executeStatement(const BoundTruncateTable &truncateTable)
+{
+    storageEngine_.beginStatement();
+    QueryResult queryResult{};
+
+    try
+    {
+        queryResult = storageEngine_.truncateTable(truncateTable);
+    }
+    catch (...)
+    {
+        storageEngine_.rollbackStatement();
+        throw;
+    }
+
+    storageEngine_.commitStatement();
+
+    return queryResult;
+}

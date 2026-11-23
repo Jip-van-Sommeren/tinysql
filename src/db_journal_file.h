@@ -59,6 +59,7 @@ enum class JournalRecordType : std::uint8_t
 {
     FileBeforeImage = 1,
     PageBeforeImage = 2,
+    FileDeletion = 3,
 };
 
 struct JournalRecordHeader
@@ -87,10 +88,17 @@ struct FileBeforeImage
     std::size_t size() const;
 };
 
+// Authorizes recreating a deleted file during rollback. Its complete original
+// contents must precede this record as file/page before-images.
+struct FileDeletion
+{
+    std::filesystem::path relativeFilePath;
+};
+
 struct JournalRecord
 {
     JournalRecordHeader header;
-    std::variant<FileBeforeImage, PageBeforeImage> record;
+    std::variant<FileBeforeImage, PageBeforeImage, FileDeletion> record;
 };
 
 // using JournalRecord = std::variant<FileBeforeImage, PageBeforeImage>;
@@ -113,6 +121,9 @@ public:
     static constexpr std::size_t maxPageRecord =
         JournalRecordHeaderBytes + 4 + MaxPathBytes + 4 + PAGE_SIZE;
 
+    static constexpr std::size_t maxDeletionRecord =
+        JournalRecordHeaderBytes + 4 + MaxPathBytes;
+
     // nullopt means EOF between records; truncated records throw.
 
     JournalHeader readJournalHeader();
@@ -133,6 +144,7 @@ public:
     std::uint64_t writeFileBeforeImage(const FileBeforeImage &fileBeforeImage);
 
     std::uint64_t writePage(const PageBeforeImage &pageBeforeImage);
+    std::uint64_t writeFileDeletion(const FileDeletion &deletion);
     void sync();
     std::uint64_t size() const { return file_.size(); }
 

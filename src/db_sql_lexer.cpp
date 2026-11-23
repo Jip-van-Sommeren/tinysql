@@ -227,6 +227,9 @@ bool Lexer::isKeyword(const std::string &word) const
            word == "JOIN" ||
            word == "TRUE" ||
            word == "FALSE" ||
+           word == "DROP" ||
+           word == "CASCADE" ||
+           word == "TRUNCATE" ||
            word == "OR";
 }
 

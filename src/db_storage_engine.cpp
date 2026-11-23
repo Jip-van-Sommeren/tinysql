@@ -10,6 +10,7 @@
 #include "db_page_factory.h"
 
 #include <filesystem>
+#include <format>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -233,6 +234,88 @@ StorageEngine StorageEngine::open(
     return engine;
 }
 
+StorageEngine::TableDdlPlan StorageEngine::planTableDdl(
+    const std::vector<std::string> &requested, bool cascade, TableOperation operation)
+{
+    requireReadable();
+    TableDdlPlan plan{{requested.begin(), requested.end()}, {}};
+    if (plan.targets.empty())
+        throw QueryException(QueryErrorCode::Validation, "Expected at least one table");
+    for (const auto &name : plan.targets)
+        if (!tableExists(name))
+            throw QueryException(QueryErrorCode::Validation, "Table does not exist: " + name);
+
+    std::vector<HeaderPage> schemas;
+    for (const auto &name : extractTableNames(tablesDirectory_.listFileNames()))
+        schemas.push_back(getTableHeader(name));
+
+    // TRUNCATE needs the transitive closure; DROP only removes incoming FKs
+    // from surviving tables. A set handles duplicate targets and FK cycles.
+    bool added;
+    do
+    {
+        added = false;
+        for (const auto &schema : schemas)
+        {
+            if (plan.targets.contains(schema.tableName)) continue;
+            for (const auto &constraint : schema.constraints)
+            {
+                const auto *fk = std::get_if<BoundForeignKeyConstraintExpr>(&constraint);
+                if (!fk || !plan.targets.contains(fk->referencedTableName)) continue;
+                if (!cascade)
+                    throw QueryException(QueryErrorCode::Constraint, std::format(
+                        "FOREIGN KEY constraint '{}' in table '{}' references table '{}'; {} requires CASCADE",
+                        fk->constraintName, schema.tableName, fk->referencedTableName,
+                        operation == TableOperation::Drop ? "DROP TABLE" : "TRUNCATE TABLE"));
+                if (operation == TableOperation::Truncate)
+                    added = plan.targets.insert(schema.tableName).second || added;
+                else
+                    plan.referencingTables.insert(schema.tableName);
+                break;
+            }
+        }
+    } while (added);
+    return plan;
+}
+
+QueryResult StorageEngine::dropTable(const BoundDropTable &drop)
+{
+    const auto plan = planTableDdl(drop.tableNames, drop.cascade, TableOperation::Drop);
+    std::vector<std::string> indexNames;
+    for (const auto &name : plan.targets)
+    {
+        auto names = indexNamesForTable(name);
+        indexNames.insert(indexNames.end(), names.begin(), names.end());
+    }
+    for (const auto &name : plan.referencingTables)
+        openTable(name).removeForeignKeysTo(plan.targets);
+    for (const auto &name : indexNames)
+        statementRecovery_.deleteFile(std::filesystem::path{"indexes"} / (name + ".index"));
+    for (const auto &name : plan.targets)
+        statementRecovery_.deleteFile(name + ".table");
+    return QueryResult{.columns = {}, .rows = {}, .affectedRows = 0, .returnsRows = false};
+}
+
+QueryResult StorageEngine::dropIndex(const BoundDropIndex &drop)
+{
+    if (!indexExists(drop.indexName))
+        throw QueryException(QueryErrorCode::Validation, "Index does not exist: " + drop.indexName);
+    statementRecovery_.deleteFile(std::filesystem::path{"indexes"} / (drop.indexName + ".index"));
+    return QueryResult{.columns = {}, .rows = {}, .affectedRows = 0, .returnsRows = false};
+}
+
+QueryResult StorageEngine::truncateTable(const BoundTruncateTable &truncate)
+{
+    const auto plan = planTableDdl(truncate.tableNames, truncate.cascade, TableOperation::Truncate);
+    for (const auto &name : plan.targets)
+    {
+        openTable(name).truncateTable();
+        for (auto &index : indexesForTable(name))
+            index.truncate();
+    }
+    return QueryResult{.columns = {}, .rows = {}, .affectedRows = 0, .returnsRows = false};
+}
+
 QueryResult StorageEngine::insertRows(const BoundInsert &insert)
 {
     const auto schema = getTableHeader(insert.tableName);
@@ -374,6 +457,12 @@ bool StorageEngine::tableExists(const std::string &name) const
     return tablesDirectory_.entryExists(name + ".table");
 }
 
+bool StorageEngine::indexExists(const std::string &name) const
+{
+    requireReadable();
+    return indexDirectory_.entryExists(name + ".index");
+}
+
 HeaderPage StorageEngine::getTableHeader(const std::string &tableName) const
 {
     requireReadable();
@@ -479,6 +568,25 @@ std::vector<Index> StorageEngine::indexesForTable(const std::string &tableName)
         if (name == tableName)
         {
             result.push_back(std::move(index));
+        }
+    }
+    return result;
+}
+
+std::vector<std::string> StorageEngine::indexNamesForTable(const std::string &tableName)
+{
+    const auto &fileNames = indexDirectory_.listFileNames();
+
+    std::vector<std::string> result;
+    result.reserve(fileNames.size());
+
+    for (const auto &fileName : fileNames)
+    {
+        auto index = openIndex(std::filesystem::path{fileName});
+
+        if (index.getTableName() == tableName)
+        {
+            result.push_back(index.getIndexName());
         }
     }
     return result;
