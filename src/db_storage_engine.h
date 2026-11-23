@@ -73,17 +73,23 @@ public:
     std::vector<Index> indexesForTable(const std::string &indexName);
     std::vector<std::string> indexNamesForTable(const std::string &tableName);
 
+    void createIndexForPkAndUniqueConstraints(const BoundCreateTable &createTable);
+
     // const std::filesystem::path &getTablesPath() const;
 
 private:
-    enum class TableOperation { Drop, Truncate };
+    enum class TableOperation
+    {
+        Drop,
+        Truncate
+    };
     struct TableDdlPlan
     {
         std::set<std::string> targets;
         std::set<std::string> referencingTables;
     };
     TableDdlPlan planTableDdl(const std::vector<std::string> &requested,
-                             bool cascade, TableOperation operation);
+                              bool cascade, TableOperation operation);
 
     void syncDirectory(LinuxDirectory &directory)
     {

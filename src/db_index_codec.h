@@ -9,6 +9,7 @@ int compareIndexKeys(const Row &left, const Row &right);
 int comparePartialIndexKeys(const Row &key, const Row &target);
 bool indexEntryLess(const LeafIndexEntry &left, const LeafIndexEntry &right);
 bool indexKeyHasNull(const Row &key);
+bool indexKeyHasNaN(const Row &key);
 
 LeafIndexEntry decodeLeafIndexEntry(std::span<const std::byte> bytes, const RowSchema &schema);
 InternalIndexEntry decodeInternalIndexEntry(std::span<const std::byte> bytes, const RowSchema &schema);

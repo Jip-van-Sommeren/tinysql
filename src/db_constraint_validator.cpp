@@ -166,6 +166,7 @@ ConstraintValidationResult ConstraintValidator::validateFkConstraintForTableCrea
                                            fk->constraintName, fk->referencedTableName)};
         }
     }
+
     return {.valid = true, .constraintName = std::nullopt, .message = std::nullopt};
 }
 ConstraintValidationResult ConstraintValidator::validateConstraint(

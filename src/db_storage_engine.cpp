@@ -36,6 +36,15 @@
 
 namespace
 {
+
+    std::string uuidToString(const uuid_t &id)
+    {
+        char buffer[37]; // 36 characters + null terminator
+        uuid_unparse_lower(id, buffer);
+        std::string result{buffer};
+        std::erase(result, '-');
+        return result;
+    }
     std::uint32_t checksum(std::span<const std::byte> bytes)
     {
         return static_cast<std::uint32_t>(
@@ -257,16 +266,18 @@ StorageEngine::TableDdlPlan StorageEngine::planTableDdl(
         added = false;
         for (const auto &schema : schemas)
         {
-            if (plan.targets.contains(schema.tableName)) continue;
+            if (plan.targets.contains(schema.tableName))
+                continue;
             for (const auto &constraint : schema.constraints)
             {
                 const auto *fk = std::get_if<BoundForeignKeyConstraintExpr>(&constraint);
-                if (!fk || !plan.targets.contains(fk->referencedTableName)) continue;
+                if (!fk || !plan.targets.contains(fk->referencedTableName))
+                    continue;
                 if (!cascade)
                     throw QueryException(QueryErrorCode::Constraint, std::format(
-                        "FOREIGN KEY constraint '{}' in table '{}' references table '{}'; {} requires CASCADE",
-                        fk->constraintName, schema.tableName, fk->referencedTableName,
-                        operation == TableOperation::Drop ? "DROP TABLE" : "TRUNCATE TABLE"));
+                                                                         "FOREIGN KEY constraint '{}' in table '{}' references table '{}'; {} requires CASCADE",
+                                                                         fk->constraintName, schema.tableName, fk->referencedTableName,
+                                                                         operation == TableOperation::Drop ? "DROP TABLE" : "TRUNCATE TABLE"));
                 if (operation == TableOperation::Truncate)
                     added = plan.targets.insert(schema.tableName).second || added;
                 else
@@ -497,6 +508,59 @@ std::vector<Column> StorageEngine::getTableSchema(const std::string &tableName) 
     return std::get<HeaderPage>(page.data).columns;
 }
 
+void StorageEngine::createIndexForPkAndUniqueConstraints(const BoundCreateTable &createTable)
+{
+    for (const auto &constraint : createTable.constraints)
+    {
+        const auto *pk =
+            std::get_if<BoundPrimaryKeyConstraintExpr>(&constraint);
+        const auto *uc =
+            std::get_if<BoundUniqueConstraintExpr>(&constraint);
+
+        if (pk)
+        {
+            uuid_t pkId;
+            uuid_generate_random(pkId);
+
+            const auto indexName = std::format("pk_{}", uuidToString(pkId));
+            std::vector<Column>
+                selectedColumns{};
+            std::vector<ColumnId> selectedColumnIds = pk->columnIds;
+            for (const auto colId : selectedColumnIds)
+            {
+                selectedColumns.push_back(createTable.columns.at(colId));
+            }
+
+            // Reassigns columnIndex and rebuilds storage offsets.
+
+            CreateIndexPayload createIndexPayload{.indexName = indexName, .tableName = createTable.tableName, .magic = "MYIX", .keyColumns = selectedColumnIds, .columns = buildStoredColumns(selectedColumns), .unique = true};
+            Index::create(indexDirectory_, createIndexPayload, statementRecovery_);
+            continue;
+        }
+
+        if (uc)
+        {
+            uuid_t ucId;
+            uuid_generate_random(ucId);
+
+            const auto indexName = std::format("unique_{}", uuidToString(ucId));
+            std::vector<Column>
+                selectedColumns{};
+            std::vector<ColumnId> selectedColumnIds = uc->columnIds;
+            for (const auto colId : selectedColumnIds)
+            {
+                selectedColumns.push_back(createTable.columns.at(colId));
+            }
+
+            // Reassigns columnIndex and rebuilds storage offsets.
+
+            CreateIndexPayload createIndexPayload{.indexName = indexName, .tableName = createTable.tableName, .magic = "MYIX", .keyColumns = selectedColumnIds, .columns = buildStoredColumns(selectedColumns), .unique = true};
+            Index::create(indexDirectory_, createIndexPayload, statementRecovery_);
+            continue;
+        }
+    }
+}
+
 Table StorageEngine::createTable(
     const BoundCreateTable &createTable)
 {
@@ -510,8 +574,11 @@ Table StorageEngine::createTable(
     ConstraintValidator constraintValidator{lookup};
 
     const auto validationResult = constraintValidator.validateFkConstraintForTableCreation(createTable.constraints, *this);
+
     if (!validationResult.valid)
         throw QueryException(QueryErrorCode::Constraint, validationResult.message.value());
+
+    createIndexForPkAndUniqueConstraints(createTable);
 
     return Table::create(
         tablesDirectory_,

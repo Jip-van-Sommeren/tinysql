@@ -240,7 +240,8 @@ void Index::insertIndex(const LeafIndexEntry &entry)
         throw QueryException(QueryErrorCode::Validation, "Index key is too large for an index page");
 
     const bool unique = bufferManager_.getIndexHeaderPage().as<IndexHeaderPage>().unique;
-    if (unique && !indexKeyHasNull(entry.key))
+    if (unique && !indexKeyHasNull(entry.key) &&
+        !indexKeyHasNaN(entry.key))
     {
         auto existing = seekLowerBound(entry.key);
         const auto match = existing.next();

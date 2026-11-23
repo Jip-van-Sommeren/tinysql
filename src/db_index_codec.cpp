@@ -103,6 +103,19 @@ bool indexKeyHasNull(const Row &key)
                                { return std::holds_alternative<std::monostate>(value); });
 }
 
+bool indexKeyHasNaN(const Row &key)
+{
+    return std::ranges::any_of(key.values, [](const Value &value)
+                               { return std::visit([](const auto &v) -> bool
+                                                   {
+            using T = std::decay_t<decltype(v)>;
+
+            if constexpr (std::is_floating_point_v<T>)
+                return std::isnan(v);
+            else
+                return false; }, value); });
+}
+
 std::size_t LeafIndexEntry::serializedSize(const RowSchema &schema) const
 {
     return KeyLengthBytes + RowWriter::computeSerializedRowSize(schema, key.values) + RowIdBytes;
