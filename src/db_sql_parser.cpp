@@ -275,7 +275,117 @@ Statement Parser::parseStatement()
     if (checkKeyword("TRUNCATE"))
         return parseTruncateTableStatement();
 
+    if (checkKeyword("ALTER"))
+        return parseAlterTableStatement();
+
     throw QueryException(QueryErrorCode::Syntax, "Expected SQL statement, got: " + peek().text);
+}
+
+AlterTableStatement Parser::parseAlterTableStatement()
+{
+    expectKeyword("ALTER");
+    expectKeyword("TABLE");
+    auto tableNameToken = expect(TokenType::Identifier);
+    auto tableName{std::move(tableNameToken.text)};
+    if (matchKeyword("RENAME"))
+    {
+        if (matchKeyword("TO"))
+        {
+            auto newTableNameToken = expect(TokenType::Identifier);
+            auto newTableName{std::move(newTableNameToken.text)};
+            RenameTableAction renameTableAction{tableName, newTableName};
+            return {tableName, renameTableAction};
+        }
+        if (matchKeyword("COLUMN"))
+        {
+            auto oldColumnNameToken = expect(TokenType::Identifier);
+            auto oldColumnName{std::move(oldColumnNameToken.text)};
+            expectKeyword("TO");
+            auto newColumnNameToken = expect(TokenType::Identifier);
+            auto newColumnName{std::move(newColumnNameToken.text)};
+            return {tableName, RenameColumnAction{oldColumnName, newColumnName}};
+        }
+        throw QueryException(QueryErrorCode::Syntax, "Expected TO or COLUMN after RENAME, found: " + peek().text);
+    }
+    if (matchKeyword("ADD"))
+    {
+        if (matchKeyword("COLUMN"))
+        {
+
+            return AlterTableStatement{
+                tableName, AddColumnAction{parseColumnDefinition()}};
+        }
+        if (matchKeyword("CONSTRAINT"))
+        {
+            auto constraintNameToken = expect(TokenType::Identifier);
+            auto constraintName{std::move(constraintNameToken.text)};
+            // only check constraint for now;
+            expectKeyword("CHECK");
+            expect(TokenType::LeftParen);
+
+            auto condition = parseExpression();
+
+            expect(TokenType::RightParen);
+
+            auto constraint = std::make_unique<CheckConstraintExpr>(
+                std::move(condition));
+
+            constraint->constraintName = std::move(constraintName);
+
+            return AlterTableStatement{
+                tableName,
+                AddConstraintAction{std::move(constraint)}};
+        }
+        throw QueryException(QueryErrorCode::Syntax, "Expected COLUMN or CONSTRAINT after ADD, found: " + peek().text);
+    }
+
+    if (matchKeyword("DROP"))
+    {
+        if (matchKeyword("COLUMN"))
+        {
+            auto columnNameToken = expect(TokenType::Identifier);
+            auto columnName{std::move(columnNameToken.text)};
+            auto cascade{false};
+            if (matchKeyword("CASCADE"))
+                cascade = true;
+
+            return AlterTableStatement{
+                tableName, DropColumnAction{columnName, cascade}};
+        }
+        if (matchKeyword("CONSTRAINT"))
+        {
+            auto constraintNameToken = expect(TokenType::Identifier);
+            auto constraintName{std::move(constraintNameToken.text)};
+
+            return AlterTableStatement{
+                tableName, DropConstraintAction{constraintName}};
+        }
+        throw QueryException(QueryErrorCode::Syntax, "Expected COLUMN or CONSTRAINT after DROP, found: " + peek().text);
+    }
+    if (matchKeyword("ALTER"))
+    {
+        expectKeyword("COLUMN");
+        auto columnNameToken = expect(TokenType::Identifier);
+        auto columnName{std::move(columnNameToken.text)};
+        auto setNotNull{false};
+        if (matchKeyword("SET"))
+        {
+            expectKeyword("NOT");
+            expectKeyword("NULL");
+            setNotNull = true;
+            return AlterTableStatement{
+                tableName, AlterColumnAction{columnName, setNotNull}};
+        }
+        else if (matchKeyword("DROP"))
+        {
+            expectKeyword("NOT");
+            expectKeyword("NULL");
+            return AlterTableStatement{
+                tableName, AlterColumnAction{columnName, setNotNull}};
+        }
+        throw QueryException(QueryErrorCode::Syntax, "Expected SET or DROP after ALTER COLUMN, found: " + peek().text);
+    }
+    throw QueryException(QueryErrorCode::Syntax, "Expected RENAME, ADD, DROP, or ALTER found: " + peek().text);
 }
 
 DropTableStatement Parser::parseDropTableStatement()

@@ -523,6 +523,182 @@ namespace
         }
     }
 
+    void testAlterTableValidation()
+    {
+        TestDirectory directory{"db-constraint-alter"};
+        const auto root = directory.path / "db";
+        const std::vector<std::string> tables{
+            "items", "empty_items", "parents", "children", "pairs", "pair_children", "nodes"};
+        {
+            auto db = Database::create(root, "test");
+            db.executeSql("CREATE TABLE items (id INT, amount INT, "
+                          "CONSTRAINT positive CHECK (amount > 0));");
+            db.executeSql("INSERT INTO items VALUES (1, 1), (2, NULL);");
+            db.executeSql("CREATE TABLE empty_items (id INT);");
+            db.executeSql("CREATE TABLE parents (id INT, code INT, "
+                          "CONSTRAINT parent_pk PRIMARY KEY (id), CONSTRAINT parent_code UNIQUE (code));");
+            db.executeSql("INSERT INTO parents VALUES (1, 10);");
+            db.executeSql("CREATE TABLE children (parent_id INT, "
+                          "CONSTRAINT child_fk FOREIGN KEY (parent_id) REFERENCES parents (id));");
+            db.executeSql("CREATE TABLE pairs (a INT, b INT, "
+                          "CONSTRAINT pair_pk PRIMARY KEY (a, b), CONSTRAINT pair_uq UNIQUE (b, a));");
+            db.executeSql("CREATE TABLE pair_children (a INT, b INT, "
+                          "CONSTRAINT pair_fk FOREIGN KEY (a, b) REFERENCES pairs (a, b));");
+            db.executeSql("CREATE TABLE nodes (id INT, parent_id INT, CONSTRAINT node_pk PRIMARY KEY (id));");
+        }
+        // Self-referencing metadata cannot yet be bound by CREATE TABLE.
+        {
+            PageFile file{LinuxDirectory{root / "tables"}, "nodes.table"};
+            auto page = decodeHeaderPage(file.readPage(HeaderPageId));
+            auto &schema = std::get<HeaderPage>(page.data);
+            schema.constraints.push_back(BoundForeignKeyConstraintExpr{"node_fk", {1}, "nodes", {0}});
+            file.writePage(HeaderPageId, encodeHeaderPage(page.header, schema));
+            file.sync();
+        }
+
+        auto engine = StorageEngine::open(root);
+        StorageConstraintLookup lookup{engine};
+        ConstraintValidator validator{lookup};
+        const auto bind = [&](const std::string &sql)
+        {
+            try
+            {
+                Lexer lexer{sql};
+                Parser parser{lexer.tokenize()};
+                QueryValidator binder{engine};
+                return std::get<BoundAlterTable>(binder.validate(parser.parseStatement()));
+            }
+            catch (const QueryException &error)
+            {
+                throw QueryException(error.code(), sql + ": " + error.what());
+            }
+        };
+        const auto check = [&](const std::string &sql, bool valid,
+                               std::optional<std::string> constraintName = std::nullopt)
+        {
+            const auto alter = bind(sql);
+            const auto path = root / "tables" / (alter.name + ".table");
+            const auto before = readFile(path);
+            const auto result = validator.validateAlterTableConstraint(
+                engine.getTableHeader(alter.name), alter, tables, engine);
+            require(result.valid == valid, "Incorrect ALTER validation for " + sql + ": " + result.message.value_or(""));
+            require(readFile(path) == before, "ALTER validation mutated the table: " + sql);
+            if (valid)
+                require(!result.constraintName && !result.message, "Successful ALTER returned error details: " + sql);
+            else
+            {
+                require(result.message && !result.message->empty(), "Missing ALTER rejection reason: " + sql);
+                if (constraintName)
+                    require(result.constraintName == constraintName, "Incorrect blocking constraint for " + sql);
+            }
+        };
+
+        check("ALTER TABLE items RENAME TO renamed_items;", true);
+        check("ALTER TABLE items RENAME COLUMN amount TO quantity;", true);
+        check("ALTER TABLE items ADD CONSTRAINT another_positive CHECK (amount > 0);", true);
+        check("ALTER TABLE items ADD CONSTRAINT too_large CHECK (amount > 5);", false, "too_large");
+        check("ALTER TABLE empty_items ADD CONSTRAINT always_false CHECK (1 = 0);", true);
+        check("ALTER TABLE items ALTER COLUMN id SET NOT NULL;", true);
+        check("ALTER TABLE items ALTER COLUMN amount SET NOT NULL;", false);
+        check("ALTER TABLE empty_items ALTER COLUMN id SET NOT NULL;", true);
+        check("ALTER TABLE items ALTER COLUMN amount DROP NOT NULL;", true);
+        check("ALTER TABLE parents ALTER COLUMN id DROP NOT NULL;", false, "parent_pk");
+
+        check("ALTER TABLE items DROP CONSTRAINT missing;", false, "missing");
+        check("ALTER TABLE items DROP CONSTRAINT positive;", true);
+        check("ALTER TABLE children DROP CONSTRAINT child_fk;", true);
+        check("ALTER TABLE parents DROP CONSTRAINT parent_pk;", false, "child_fk");
+        check("ALTER TABLE parents DROP CONSTRAINT parent_code;", true);
+        check("ALTER TABLE pairs DROP CONSTRAINT pair_pk;", true);
+        check("ALTER TABLE pairs DROP CONSTRAINT pair_uq;", true);
+        check("ALTER TABLE nodes DROP CONSTRAINT node_pk;", false, "node_fk");
+
+        check("ALTER TABLE items DROP COLUMN amount;", true);
+        check("ALTER TABLE parents DROP COLUMN code;", true);
+        check("ALTER TABLE children DROP COLUMN parent_id;", true);
+        check("ALTER TABLE parents DROP COLUMN id;", false, "child_fk");
+        check("ALTER TABLE parents DROP COLUMN id CASCADE;", true);
+        check("ALTER TABLE pairs DROP COLUMN b;", false, "pair_fk");
+        check("ALTER TABLE pairs DROP COLUMN b CASCADE;", true);
+        check("ALTER TABLE nodes DROP COLUMN id;", true);
+
+        check("ALTER TABLE items ADD COLUMN extra INT;", true);
+        check("ALTER TABLE items ADD COLUMN extra INT CONSTRAINT extra_nn NOT NULL;", false, "extra_nn");
+        check("ALTER TABLE empty_items ADD COLUMN extra INT NOT NULL;", true);
+        check("ALTER TABLE items ADD COLUMN extra INT DEFAULT 5 NOT NULL CHECK (extra > id);", true);
+        check("ALTER TABLE items ADD COLUMN extra INT DEFAULT 1 CONSTRAINT extra_check CHECK (extra > id);",
+              false, "extra_check");
+        check("ALTER TABLE items ADD COLUMN extra INT DEFAULT NULL CONSTRAINT extra_nn NOT NULL;", false, "extra_nn");
+        check("ALTER TABLE items ADD COLUMN extra INT UNIQUE;", true);
+        check("ALTER TABLE items ADD COLUMN extra INT DEFAULT 1 CONSTRAINT extra_uq UNIQUE;", false, "extra_uq");
+        check("ALTER TABLE empty_items ADD COLUMN extra INT PRIMARY KEY;", true);
+        check("ALTER TABLE parents ADD COLUMN extra INT CONSTRAINT extra_pk PRIMARY KEY;", false, "extra_pk");
+        check("ALTER TABLE items ADD COLUMN extra INT CONSTRAINT extra_pk PRIMARY KEY;", false, "extra_pk");
+        check("ALTER TABLE items ADD COLUMN extra INT DEFAULT 1 CONSTRAINT extra_fk REFERENCES parents (id);", true);
+        check("ALTER TABLE items ADD COLUMN extra INT DEFAULT 9 CONSTRAINT extra_fk REFERENCES parents (id);",
+              false, "extra_fk");
+        check("ALTER TABLE items ADD COLUMN extra INT REFERENCES parents (id);", true);
+        check("ALTER TABLE empty_items ADD COLUMN extra INT CONSTRAINT no_key REFERENCES items (id);", false, "no_key");
+        check("ALTER TABLE items ADD COLUMN extra INT CONSTRAINT positive NOT NULL;", false, "positive");
+        check("ALTER TABLE items ADD COLUMN extra INT CONSTRAINT repeated UNIQUE CONSTRAINT repeated CHECK (extra > 0);",
+              false, "repeated");
+
+        // Backfilled defaults use the same conversions as INSERT, including
+        // overflow checking and widening integer literals to stored types.
+        check("ALTER TABLE items ADD COLUMN extra BIGINT DEFAULT 5 NOT NULL;", true);
+        check("ALTER TABLE items ADD COLUMN extra DOUBLE DEFAULT 5 NOT NULL;", true);
+        check("ALTER TABLE items ADD COLUMN extra DECIMAL DEFAULT 5 NOT NULL;", true);
+        check("ALTER TABLE items ADD COLUMN extra DATE DEFAULT '2024-01-01' NOT NULL;", true);
+
+        // The typed bound API can add keys even though SQL ADD CONSTRAINT
+        // currently only accepts CHECK. Existing rows must not match themselves.
+        auto schema = engine.getTableHeader("items");
+        auto overflowingDefault = bind("ALTER TABLE items ADD COLUMN extra INT DEFAULT 1;");
+        auto &addColumn = std::get<BoundAddColumnAction>(overflowingDefault.action);
+        auto &defaultConstraint = std::get<BoundDefaultConstraintExpr>(addColumn.constraints.at(0));
+        defaultConstraint.value = std::make_unique<BoundLiteralExpr>(std::int64_t{2147483648}, DataType::BigInt);
+        const auto overflow = validator.validateAlterTableConstraint(schema, overflowingDefault, tables, engine);
+        require(!overflow.valid && overflow.constraintName == defaultConstraint.constraintName,
+                "An overflowing backfill default was accepted");
+        BoundAlterTable addUnique{"items", BoundAddConstraintAction{BoundUniqueConstraintExpr{"new_unique", {0}}}};
+        require(validator.validateAlterTableConstraint(schema, addUnique, tables, engine).valid,
+                "An existing row conflicted with itself while adding UNIQUE");
+        BoundAlterTable addSelfFk{"items", BoundAddConstraintAction{
+            BoundForeignKeyConstraintExpr{"self_fk", {1}, "items", {0}}}};
+        schema.constraints.push_back(BoundUniqueConstraintExpr{"id_unique", {0}});
+        require(validator.validateAlterTableConstraint(schema, addSelfFk, tables, engine).valid,
+                "Adding a self-referencing FK did not use the final rows and schema");
+
+        for (const std::string sql : {
+                 "ALTER TABLE items RENAME TO parents;",
+                 "ALTER TABLE items RENAME COLUMN amount TO id;",
+                 "ALTER TABLE items ADD COLUMN id INT;"})
+        {
+            bool rejected = false;
+            try
+            {
+                bind(sql);
+            }
+            catch (const QueryException &error)
+            {
+                rejected = error.code() == QueryErrorCode::Validation;
+            }
+            require(rejected, "Binder accepted a name collision: " + sql);
+        }
+
+        // Verify the storage entry point propagates the structured rejection.
+        bool rejected = false;
+        try
+        {
+            engine.alterTable(bind("ALTER TABLE items ALTER COLUMN amount SET NOT NULL;"));
+        }
+        catch (const QueryException &error)
+        {
+            rejected = error.code() == QueryErrorCode::Constraint;
+        }
+        require(rejected, "Storage ALTER failed to propagate the constraint rejection");
+    }
+
     void testNonSqlNumericKeys()
     {
         // SQL binding rejects NaN and normalizes decimal literals. Exercise
@@ -581,6 +757,7 @@ int main()
         testForeignKeyDeleteBatchAndReopen();
         testNumericKeyEquality();
         testReferencingTables();
+        testAlterTableValidation();
         testNonSqlNumericKeys();
     }
     catch (const std::exception &error)

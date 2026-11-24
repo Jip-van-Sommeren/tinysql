@@ -495,6 +495,54 @@ struct TruncateTableStatement
         : tableNames(std::move(tableNames)), cascade(cascade) {}
 };
 
+struct RenameTableAction
+{
+    std::string oldName;
+    std::string newName;
+};
+struct RenameColumnAction
+{
+    std::string oldName;
+    std::string newName;
+};
+struct AddColumnAction
+{
+    ParsedColumnDefinition columnDef;
+};
+struct AddConstraintAction
+{
+    std::unique_ptr<ConstraintExpr> constraint;
+};
+struct DropColumnAction
+{
+    std::string columnName;
+    bool cascade = false;
+};
+struct DropConstraintAction
+{
+    std::string constraintName;
+};
+struct AlterColumnAction
+{
+    std::string columnName;
+    bool setNotNull;
+};
+
+using AlterTableAction = std::variant<
+    RenameTableAction,
+    RenameColumnAction,
+    AddColumnAction,
+    AddConstraintAction,
+    DropColumnAction,
+    DropConstraintAction,
+    AlterColumnAction>;
+
+struct AlterTableStatement
+{
+    std::string tableName;
+    AlterTableAction action;
+};
+
 using Statement = std::variant<
     InsertStatement,
     SelectStatement,
@@ -504,7 +552,8 @@ using Statement = std::variant<
     CreateIndexStatement,
     DropTableStatement,
     DropIndexStatement,
-    TruncateTableStatement
+    TruncateTableStatement,
+    AlterTableStatement
 
     >;
 
@@ -520,6 +569,8 @@ public:
     UpdateStatement parseUpdateStatement();
     CreateTableStatement parseCreateTableStatement();
     CreateIndexStatement parseCreateIndexStatement(bool unique);
+
+    AlterTableStatement parseAlterTableStatement();
 
     DropTableStatement parseDropTableStatement();
 

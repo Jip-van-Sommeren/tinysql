@@ -230,6 +230,11 @@ bool Lexer::isKeyword(const std::string &word) const
            word == "DROP" ||
            word == "CASCADE" ||
            word == "TRUNCATE" ||
+           word == "ADD" ||
+           word == "COLUMN" ||
+           word == "ALTER" ||
+           word == "RENAME" ||
+           word == "TO" ||
            word == "OR";
 }
 

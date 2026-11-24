@@ -20,6 +20,7 @@ struct BoundCreateIndex;
 struct BoundDropTable;
 struct BoundTruncateTable;
 struct BoundDropIndex;
+struct BoundAlterTable;
 
 class StorageEngine final : public Catalog
 {
@@ -66,6 +67,7 @@ public:
     QueryResult dropTable(const BoundDropTable &dropTable);
     QueryResult dropIndex(const BoundDropIndex &dropIndex);
     QueryResult truncateTable(const BoundTruncateTable &truncateTable);
+    QueryResult alterTable(const BoundAlterTable &alter);
 
     Index createIndex(const BoundCreateIndex &createIndex, const IndexBulkLoadOptions &options = {});
     Index openIndex(const std::string &indexName);

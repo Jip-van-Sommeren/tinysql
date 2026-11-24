@@ -41,4 +41,6 @@ private:
     QueryResult executeStatement(const BoundDropTable &dropTable);
     QueryResult executeStatement(const BoundDropIndex &dropIndex);
     QueryResult executeStatement(const BoundTruncateTable &truncateTable);
+
+    QueryResult executeStatement(const BoundAlterTable &alterTable);
 };

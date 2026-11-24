@@ -283,4 +283,3 @@ ConstraintValidationResult ConstraintValidator::validateConstraint(
     }
     return {.valid = true, .constraintName = std::nullopt, .message = std::nullopt};
 }
-

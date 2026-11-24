@@ -1,6 +1,7 @@
 #include "db_constraint_validator.h"
 
 #include "db_expression_evaluator.h"
+#include "db_query_validator.h"
 #include "db_row_validator.h"
 #include "db_storage_engine.h"
 
@@ -34,6 +35,234 @@ namespace
         return false;
     }
 
+}
+
+ConstraintValidationResult ConstraintValidator::validateAlterTableConstraint(
+    const HeaderPage &schema, const BoundAlterTable &alter,
+    const std::vector<std::string> &tableNames, StorageEngine &storageEngine)
+{
+    const ConstraintValidationResult success{
+        .valid = true, .constraintName = std::nullopt, .message = std::nullopt};
+    const auto nameOf = [](const BoundConstraint &constraint) -> const std::string &
+    {
+        return std::visit([](const auto &value) -> const std::string &
+                          { return value.constraintName; }, constraint);
+    };
+
+    const auto validateAddition = [&](const std::vector<BoundConstraint> &added,
+                                      const Column *newColumn) -> ConstraintValidationResult
+    {
+        auto proposed = schema;
+        if (newColumn)
+            proposed.columns.push_back(*newColumn);
+        std::set<std::string> names;
+        bool hasPrimaryKey = false;
+        for (const auto &constraint : schema.constraints)
+        {
+            names.insert(nameOf(constraint));
+            hasPrimaryKey = hasPrimaryKey ||
+                            std::holds_alternative<BoundPrimaryKeyConstraintExpr>(constraint);
+        }
+        for (const auto &constraint : added)
+        {
+            const auto &name = nameOf(constraint);
+            if (!names.insert(name).second)
+                return {false, name, "Constraint already exists: " + name};
+            if (std::holds_alternative<BoundPrimaryKeyConstraintExpr>(constraint))
+            {
+                if (hasPrimaryKey)
+                    return {false, name, "A table can have only one PRIMARY KEY"};
+                hasPrimaryKey = true;
+            }
+            proposed.constraints.push_back(constraint);
+        }
+
+        // Check referenced keys even for an empty table. A self-reference must
+        // resolve against the proposed schema, which may contain the new key.
+        for (const auto &constraint : added)
+        {
+            const auto *fk = std::get_if<BoundForeignKeyConstraintExpr>(&constraint);
+            if (!fk)
+                continue;
+            const auto referenced = fk->referencedTableName == schema.tableName
+                                        ? proposed
+                                        : storageEngine.getTableHeader(fk->referencedTableName);
+            if (!std::ranges::any_of(referenced.constraints, [&](const BoundConstraint &candidate)
+                                    { return matchesReferencedKey(candidate, fk->referencedColumnIds); }))
+                return {false, fk->constraintName,
+                        std::format("FOREIGN KEY '{}' must reference a PRIMARY KEY or UNIQUE key in table '{}'",
+                                    fk->constraintName, fk->referencedTableName)};
+        }
+
+        const BoundDefaultConstraintExpr *defaultValue = nullptr;
+        if (newColumn)
+        {
+            for (const auto &constraint : added)
+            {
+                const auto *candidate = std::get_if<BoundDefaultConstraintExpr>(&constraint);
+                if (candidate && candidate->columnId == newColumn->columnIndex)
+                {
+                    if (defaultValue)
+                        return {false, candidate->constraintName,
+                                "Multiple DEFAULT constraints for column: " + newColumn->name};
+                    defaultValue = candidate;
+                }
+            }
+        }
+
+        // Validate the final row set as a batch. Exclude all original rows so
+        // UNIQUE/PK checks do not mistake a stored row for its own duplicate.
+        std::vector<Row> rows;
+        std::set<RowId> excludedRows;
+        auto table = storageEngine.openTable(schema.tableName);
+        auto cursor = table.scan();
+        while (auto located = cursor.nextLocated())
+        {
+            excludedRows.insert(located->id);
+            auto &row = located->row;
+            if (newColumn)
+            {
+                Value value{std::monostate{}};
+                if (defaultValue)
+                {
+                    try
+                    {
+                        // Let the constraint validator report NOT NULL/PK
+                        // violations with the actual constraint's name.
+                        auto nullableColumn = *newColumn;
+                        nullableColumn.nullable = true;
+                        value = QueryValidator::convertForColumn(
+                            evaluateValue(*defaultValue->value, Row{}), nullableColumn);
+                    }
+                    catch (const QueryException &error)
+                    {
+                        return {false, defaultValue->constraintName, error.what()};
+                    }
+                    catch (const QueryNumericOverflow &error)
+                    {
+                        return {false, defaultValue->constraintName, error.what()};
+                    }
+                }
+                row.values.push_back(std::move(value));
+            }
+            rows.push_back(std::move(row));
+        }
+
+        proposed.constraints = added;
+        auto result = validateConstraint(proposed, rows, excludedRows);
+        if (!result.valid)
+            return result;
+        // Also honor nullability supplied directly in a typed Column, without
+        // an accompanying named NOT NULL constraint.
+        if (newColumn && !newColumn->nullable &&
+            std::ranges::any_of(rows, [&](const Row &row)
+                                { return std::holds_alternative<std::monostate>(row.values.at(newColumn->columnIndex)); }))
+            return {false, std::nullopt,
+                    "Cannot add NOT NULL column without a non-NULL value for existing rows: " + newColumn->name};
+        return success;
+    };
+
+    const auto validateIncomingReferences = [&](const auto &blocks,
+                                                const std::string &operation) -> ConstraintValidationResult
+    {
+        std::set<std::string> tables{tableNames.begin(), tableNames.end()};
+        tables.insert(schema.tableName);
+        for (const auto &name : tables)
+        {
+            const auto childSchema = name == schema.tableName ? schema : storageEngine.getTableHeader(name);
+            for (const auto &constraint : childSchema.constraints)
+            {
+                const auto *fk = std::get_if<BoundForeignKeyConstraintExpr>(&constraint);
+                if (fk && fk->referencedTableName == schema.tableName && blocks(name, *fk))
+                    return {false, fk->constraintName,
+                            std::format("{} is blocked by FOREIGN KEY constraint '{}' in table '{}'",
+                                        operation, fk->constraintName, name)};
+            }
+        }
+        return success;
+    };
+
+    return std::visit(
+        [&](const auto &action) -> ConstraintValidationResult
+        {
+            using T = std::decay_t<decltype(action)>;
+            if constexpr (std::is_same_v<T, BoundRenameTableAction> ||
+                          std::is_same_v<T, BoundRenameColumnAction>)
+            {
+                // Name checks belong to binding. Applying a rename must update
+                // dependent metadata; it does not invalidate any stored values.
+                return success;
+            }
+            else if constexpr (std::is_same_v<T, BoundAddColumnAction>)
+            {
+                return validateAddition(action.constraints, &action.column);
+            }
+            else if constexpr (std::is_same_v<T, BoundAddConstraintAction>)
+            {
+                return validateAddition({action.constraint}, nullptr);
+            }
+            else if constexpr (std::is_same_v<T, BoundDropColumnAction>)
+            {
+                // Local constraints and indexes, including self-referencing
+                // FKs, are removed with the column. External FKs need CASCADE.
+                if (action.cascade)
+                    return success;
+                return validateIncomingReferences(
+                    [&](const std::string &child, const BoundForeignKeyConstraintExpr &fk)
+                    {
+                        return child != schema.tableName &&
+                               std::ranges::find(fk.referencedColumnIds, action.column.columnIndex) !=
+                                   fk.referencedColumnIds.end();
+                    },
+                    "DROP COLUMN '" + action.column.name + "' without CASCADE");
+            }
+            else if constexpr (std::is_same_v<T, BoundDropConstraintAction>)
+            {
+                const auto target = std::ranges::find_if(schema.constraints, [&](const BoundConstraint &constraint)
+                                                        { return nameOf(constraint) == action.constraintName; });
+                if (target == schema.constraints.end())
+                    return {false, action.constraintName, "Constraint does not exist: " + action.constraintName};
+                return validateIncomingReferences(
+                    [&](const std::string &, const BoundForeignKeyConstraintExpr &fk)
+                    {
+                        if (!matchesReferencedKey(*target, fk.referencedColumnIds))
+                            return false;
+                        // FKs identify referenced columns, not a particular key
+                        // constraint. An equivalent surviving key is sufficient.
+                        return !std::ranges::any_of(schema.constraints, [&](const BoundConstraint &candidate)
+                                                   {
+                                                       return &candidate != &*target &&
+                                                              matchesReferencedKey(candidate, fk.referencedColumnIds);
+                                                   });
+                    },
+                    "DROP CONSTRAINT '" + action.constraintName + "'");
+            }
+            else if constexpr (std::is_same_v<T, BoundAlterColumnAction>)
+            {
+                const auto columnId = action.column.columnIndex;
+                if (action.setNotNull)
+                {
+                    auto table = storageEngine.openTable(schema.tableName);
+                    auto cursor = table.scan();
+                    while (auto row = cursor.next())
+                        if (std::holds_alternative<std::monostate>(row->values.at(columnId)))
+                            return {false, std::nullopt,
+                                    "Cannot SET NOT NULL: column '" + action.column.name + "' contains NULL values"};
+                }
+                else
+                {
+                    for (const auto &constraint : schema.constraints)
+                    {
+                        const auto *pk = std::get_if<BoundPrimaryKeyConstraintExpr>(&constraint);
+                        if (pk && std::ranges::find(pk->columnIds, columnId) != pk->columnIds.end())
+                            return {false, pk->constraintName,
+                                    "Cannot DROP NOT NULL from PRIMARY KEY column: " + action.column.name};
+                    }
+                }
+                return success;
+            }
+        },
+        alter.action);
 }
 
 std::pair<ConstraintValidationResult, std::vector<std::string>> ConstraintValidator::findReferencingTables(

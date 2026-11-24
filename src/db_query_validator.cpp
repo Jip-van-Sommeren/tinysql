@@ -937,6 +937,10 @@ BoundQuery QueryValidator::validate(const Statement &statement)
             {
                 return validateStatement(value);
             }
+            else if constexpr (std::is_same_v<T, AlterTableStatement>)
+            {
+                return validateStatement(value);
+            }
             else
             {
                 throw std::runtime_error("Unknown Statement Type");
@@ -1504,6 +1508,101 @@ BoundConstraint QueryValidator::bindConstraintExpr(
     }
 }
 
+BoundAlterTable QueryValidator::validateStatement(const AlterTableStatement &statement)
+{
+    if (!catalog_.tableExists(statement.tableName))
+    {
+        throw QueryException(QueryErrorCode::Validation, "Table does not exist: " + statement.tableName);
+    }
+    const auto tableName = statement.tableName;
+    bContext_ = createBindContext(tableName);
+    auto result = std::visit(
+        [&](const auto &alterTableAction) -> BoundAlterTableAction
+        {
+            using T = std::decay_t<decltype(alterTableAction)>;
+            if constexpr (std::is_same_v<T, RenameTableAction>)
+            {
+                if (catalog_.tableExists(alterTableAction.newName))
+                {
+                    throw QueryException(QueryErrorCode::Validation, "Table already exists: " + alterTableAction.newName);
+                }
+                return BoundRenameTableAction{std::move(alterTableAction.oldName), std::move(alterTableAction.newName)};
+            }
+            else if constexpr (std::is_same_v<T, RenameColumnAction>)
+            {
+                const auto &col = bContext_.resolveColumn(alterTableAction.oldName, tableName);
+                if (bContext_.resolveColumnExists(alterTableAction.newName, tableName))
+                {
+                    throw QueryException(QueryErrorCode::Validation, "Column already exists: " + alterTableAction.newName);
+                }
+                return BoundRenameColumnAction{std::move(alterTableAction.oldName), std::move(alterTableAction.newName), col.columnIndex};
+            }
+            else if constexpr (std::is_same_v<T, AddColumnAction>)
+            {
+                auto &addColumnAction = alterTableAction.columnDef;
+                const auto &colDef = addColumnAction.column;
+
+                // this needs to be rebuilt later, for now put it at the end of the list;
+                auto column = bindColumnDefinition(*colDef, static_cast<std::uint32_t>(bContext_.getColumns(tableName).size()));
+                if (bContext_.resolveColumnExists(column.name, tableName))
+                {
+                    throw QueryException(QueryErrorCode::Validation, "Column already exists: " + column.name);
+                }
+                auto proposedSchema = catalog_.getTableHeader(tableName);
+                proposedSchema.columns.push_back(column);
+                bContext_ = BindContext{};
+                bContext_.insert(tableName, std::nullopt, proposedSchema);
+                std::vector<BoundConstraint> boundConstraints{};
+                boundConstraints.reserve(addColumnAction.constraints.size());
+                for (auto &constraint : addColumnAction.constraints)
+                {
+                    auto bound = bindConstraintExpr(*constraint, tableName);
+                    bContext_.insertConstraints({bound}, tableName);
+                    boundConstraints.push_back(std::move(bound));
+                }
+                column = bContext_.resolveColumn(column.name, tableName);
+                return BoundAddColumnAction{std::move(column), std::move(boundConstraints)};
+            }
+
+            else if constexpr (std::is_same_v<T, AddConstraintAction>)
+            {
+                auto boundConstraint = bindConstraintExpr(
+                    *alterTableAction.constraint, tableName);
+                const auto *checkConstraint = std::get_if<BoundCheckConstraintExpr>(&boundConstraint);
+                if (!checkConstraint)
+                {
+                    throw QueryException(
+                        QueryErrorCode::Validation,
+                        "Only CHECK constraints can be added to existing columns");
+                }
+                if (bContext_.resolveConstraintExists(checkConstraint->constraintName, tableName))
+                {
+                    throw QueryException(QueryErrorCode::Validation, "Constraint already exists: " + checkConstraint->constraintName);
+                }
+                return BoundAddConstraintAction{boundConstraint};
+            }
+            else if constexpr (std::is_same_v<T, DropColumnAction>)
+            {
+                const auto &col = bContext_.resolveColumn(alterTableAction.columnName, tableName);
+                return BoundDropColumnAction{col, alterTableAction.cascade};
+            }
+            else if constexpr (std::is_same_v<T, DropConstraintAction>)
+            {
+                return BoundDropConstraintAction{alterTableAction.constraintName};
+            }
+
+            else if constexpr (std::is_same_v<T, AlterColumnAction>)
+            {
+                const auto &col = bContext_.resolveColumn(alterTableAction.columnName, tableName);
+
+                return BoundAlterColumnAction{col, alterTableAction.setNotNull};
+            }
+        },
+        statement.action);
+
+    return {statement.tableName, std::move(result)};
+}
+
 BoundDropTable QueryValidator::validateStatement(const DropTableStatement &statement)
 {
     for (auto tableName : statement.tableNames)
@@ -1648,7 +1747,7 @@ Value QueryValidator::bindLiteralValue(
 
 Value QueryValidator::convertForColumn(
     const Value &value,
-    const Column &targetColumn) const
+    const Column &targetColumn)
 {
     if (std::holds_alternative<std::monostate>(value))
     {

@@ -666,6 +666,30 @@ QueryResult QueryExecutor::executeStatement(
 }
 
 QueryResult QueryExecutor::executeStatement(
+    const BoundAlterTable &alterTable)
+{
+    storageEngine_.beginStatement();
+
+    try
+    {
+        storageEngine_.alterTable(alterTable);
+    }
+    catch (...)
+    {
+        storageEngine_.rollbackStatement();
+        throw;
+    }
+
+    storageEngine_.commitStatement();
+
+    return QueryResult{
+        .columns = {},
+        .rows = {},
+        .affectedRows = 0,
+        .returnsRows = false};
+}
+
+QueryResult QueryExecutor::executeStatement(
     const BoundCreateIndex &createIndex)
 {
     storageEngine_.beginStatement();

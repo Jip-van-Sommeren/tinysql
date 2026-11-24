@@ -182,6 +182,16 @@ public:
         return *column;
     }
 
+    bool resolveColumnExists(const std::string &name, const std::string &qualifier)
+    {
+        auto &columns = tables_[tableIndex(qualifier)].columns;
+        const auto column = std::find_if(columns.begin(), columns.end(), [&](const ColumnContext &c)
+                                         { return c.column.name == name; });
+        if (column == columns.end())
+            return false;
+        return true;
+    }
+
     const Column &resolveColumn(const std::string &name, const std::string &qualifier) const
     {
         return resolveColumnContext(name, qualifier).column;
@@ -217,6 +227,17 @@ public:
         if (constraint == constraints.end())
             throw QueryException(QueryErrorCode::Validation, std::format("Unknown constraint '{}.{}'", qualifier, name));
         return *constraint;
+    }
+
+    bool resolveConstraintExists(const std::string &name, const std::string &qualifier) const
+    {
+        const auto &constraints = getConstraints(qualifier);
+        const auto constraint = std::find_if(constraints.begin(), constraints.end(), [&](const BoundConstraint &c)
+                                             { return std::visit([&](const auto &value)
+                                                                 { return value.constraintName == name; }, c); });
+        if (constraint == constraints.end())
+            return false;
+        return true;
     }
 
     const BoundDefaultConstraintExpr *findDefaultConstraint(ColumnId columnId, const std::string &qualifier) const
@@ -366,6 +387,58 @@ struct BoundCreateIndex
     bool unique;
 };
 
+struct BoundRenameTableAction
+{
+    std::string oldName;
+    std::string newName;
+};
+struct BoundRenameColumnAction
+{
+    std::string oldName;
+    std::string newName;
+    ColumnId colId;
+};
+
+struct BoundAddColumnAction
+{
+    Column column;
+    std::vector<BoundConstraint> constraints;
+};
+struct BoundAddConstraintAction
+{
+    BoundConstraint constraint;
+};
+struct BoundDropColumnAction
+{
+    Column column;
+    bool cascade = false;
+};
+struct BoundDropConstraintAction
+{
+    std::string constraintName;
+};
+struct BoundAlterColumnAction
+{
+    Column column;
+    bool setNotNull;
+};
+
+using BoundAlterTableAction = std::variant<
+    BoundRenameTableAction,
+    BoundRenameColumnAction,
+    BoundAddColumnAction,
+    BoundAddConstraintAction,
+    BoundDropColumnAction,
+    BoundDropConstraintAction,
+    BoundAlterColumnAction>;
+
+struct BoundAlterTable
+{
+    std::string name;
+
+    BoundAlterTableAction action;
+};
+
 struct BoundAssignment
 {
     ColumnId columnId;
@@ -380,7 +453,7 @@ struct BoundUpdate
 };
 
 using BoundQuery = std::variant<BoundSelect, BoundInsert, BoundDelete, BoundCreateTable, BoundCreateIndex, BoundUpdate,
-                               BoundDropTable, BoundDropIndex, BoundTruncateTable>;
+                                BoundDropTable, BoundDropIndex, BoundTruncateTable, BoundAlterTable>;
 
 enum class SerializedExprType : std::uint8_t
 {
@@ -397,6 +470,9 @@ public:
 
     BoundQuery validate(const Statement &statement);
 
+    // Shared by INSERT binding and validation of ADD COLUMN backfills.
+    static Value convertForColumn(const Value &value, const Column &targetColumn);
+
 private:
     const Catalog &catalog_;
     BindContext bContext_{};
@@ -412,6 +488,8 @@ private:
     BoundDropIndex validateStatement(const DropIndexStatement &statement);
     BoundTruncateTable validateStatement(const TruncateTableStatement &statement);
 
+    BoundAlterTable validateStatement(const AlterTableStatement &statement);
+
     BoundTableRef bindTableRef(const TableRef &tableRef);
     BoundConstraint bindConstraintExpr(const ConstraintExpr &expr, const std::string &tableName);
     std::unique_ptr<BoundExpr> bindExpr(
@@ -426,10 +504,6 @@ private:
 
     Value bindLiteralValue(
         const Expr &expr,
-        const Column &targetColumn) const;
-
-    Value convertForColumn(
-        const Value &value,
         const Column &targetColumn) const;
 
     BindContext createBindContext(const std::string &name) const

@@ -8,6 +8,7 @@
 #include <utility>
 
 class StorageEngine;
+struct BoundAlterTable;
 
 struct KeyPart
 {
@@ -60,6 +61,12 @@ public:
     ConstraintValidationResult validateFkConstraintForTableCreation(
         const std::vector<BoundConstraint> &constraints,
         const StorageEngine &storageEngine);
+
+    // Read-only preflight against stored rows and all table schemas. The caller
+    // must subsequently apply schema/index changes and CASCADE removals.
+    ConstraintValidationResult validateAlterTableConstraint(
+        const HeaderPage &schema, const BoundAlterTable &alter,
+        const std::vector<std::string> &tableNames, StorageEngine &storageEngine);
 
     // Returns validation and sorted, distinct names of all direct referencing tables,
     // including self-references, regardless of rows. Without cascade, references

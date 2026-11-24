@@ -33,6 +33,7 @@
 #include <array>
 #include <cstddef>
 #include <cstring>
+#include <iostream>
 
 namespace
 {
@@ -304,6 +305,19 @@ QueryResult StorageEngine::dropTable(const BoundDropTable &drop)
         statementRecovery_.deleteFile(std::filesystem::path{"indexes"} / (name + ".index"));
     for (const auto &name : plan.targets)
         statementRecovery_.deleteFile(name + ".table");
+    return QueryResult{.columns = {}, .rows = {}, .affectedRows = 0, .returnsRows = false};
+}
+
+QueryResult StorageEngine::alterTable(const BoundAlterTable &alter)
+{
+    const auto schema = getTableHeader(alter.name);
+    StorageConstraintLookup lookup{*this};
+    ConstraintValidator constraintValidator{lookup};
+    const auto tableNames = extractTableNames(tablesDirectory_.listFileNames());
+    const auto validationResult = constraintValidator.validateAlterTableConstraint(
+        schema, alter, tableNames, *this);
+    if (!validationResult.valid)
+        throw QueryException(QueryErrorCode::Constraint, validationResult.message.value());
     return QueryResult{.columns = {}, .rows = {}, .affectedRows = 0, .returnsRows = false};
 }
 
