@@ -50,6 +50,10 @@ namespace
     {
     public:
         bool indexExists(const std::string &) const override { return false; }
+        IndexHeaderPage getIndexHeader(const std::string &name) const override
+        {
+            throw QueryException(QueryErrorCode::Validation, "Index does not exist: " + name);
+        }
         bool tableExists(const std::string &name) const override
         {
             return tables.contains(name);
