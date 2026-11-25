@@ -14,9 +14,11 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -25,6 +27,125 @@
 
 namespace
 {
+    using ColumnRefs =
+        std::vector<std::reference_wrapper<BoundColumnExpr>>;
+
+    void collectColumnExprs(BoundExpr &expr, ColumnRefs &columns)
+    {
+        switch (expr.kind())
+        {
+        case BoundExprKind::ColumnReference:
+            columns.emplace_back(static_cast<BoundColumnExpr &>(expr));
+            return;
+
+        case BoundExprKind::Literal:
+            return;
+
+        case BoundExprKind::FunctionCall:
+        {
+            auto &function = static_cast<BoundFunctionCall &>(expr);
+            for (auto &argument : function.arguments)
+                collectColumnExprs(*argument, columns);
+            return;
+        }
+
+        case BoundExprKind::IsNull:
+        {
+            auto &isNull = static_cast<BoundIsNullExpr &>(expr);
+            collectColumnExprs(*isNull.operand, columns);
+            return;
+        }
+
+        case BoundExprKind::Unary:
+        {
+            auto &unary = static_cast<BoundUnaryExpr &>(expr);
+            collectColumnExprs(*unary.operand, columns);
+            return;
+        }
+
+        case BoundExprKind::Binary:
+        {
+            auto &binary = static_cast<BoundBinaryExpr &>(expr);
+            collectColumnExprs(*binary.left, columns);
+            collectColumnExprs(*binary.right, columns);
+            return;
+        }
+        }
+
+        throw std::logic_error("Unknown bound expression kind");
+    }
+
+    void remapOrDeleteConstraints(HeaderPage &schema, const std::string &targetTable,
+                                  ColumnId droppedId, bool cascade)
+    {
+        const bool local = schema.tableName == targetTable;
+        for (auto it = schema.constraints.begin(); it != schema.constraints.end();)
+        {
+            std::vector<std::reference_wrapper<ColumnId>> columnIds;
+            const auto append = [&](std::vector<ColumnId> &ids)
+            {
+                for (auto &id : ids)
+                    columnIds.emplace_back(id);
+            };
+            std::visit(
+                [&](auto &constraint)
+                {
+                    using T = std::decay_t<decltype(constraint)>;
+                    if constexpr (std::is_same_v<T, BoundForeignKeyConstraintExpr>)
+                    {
+                        if (local)
+                            append(constraint.localColumnIds);
+                        if (constraint.referencedTableName == targetTable)
+                            append(constraint.referencedColumnIds);
+                    }
+                    else if (local)
+                    {
+                        if constexpr (std::is_same_v<T, BoundNotNullConstraintExpr> ||
+                                      std::is_same_v<T, BoundNullConstraintExpr> ||
+                                      std::is_same_v<T, BoundDefaultConstraintExpr>)
+                            columnIds.emplace_back(constraint.columnId);
+                        else if constexpr (std::is_same_v<T, BoundPrimaryKeyConstraintExpr> ||
+                                           std::is_same_v<T, BoundUniqueConstraintExpr>)
+                            append(constraint.columnIds);
+                        else if constexpr (std::is_same_v<T, BoundCheckConstraintExpr>)
+                        {
+                            ColumnRefs columns;
+                            collectColumnExprs(*constraint.condition, columns);
+                            for (auto &column : columns)
+                                columnIds.emplace_back(column.get().columnIndex);
+                        }
+                    }
+                },
+                *it);
+
+            // Inspect original IDs before changing any of them. Erase only
+            // after the visitor has finished using the contained expression.
+            const bool dependsOnColumn = std::ranges::any_of(columnIds, [&](const auto &id)
+                                                            { return id.get() == droppedId; });
+            if (dependsOnColumn)
+            {
+                if (!local && !cascade)
+                {
+                    const auto &fk = std::get<BoundForeignKeyConstraintExpr>(*it);
+                    throw QueryException(QueryErrorCode::Constraint,
+                                         "DROP COLUMN requires CASCADE: FOREIGN KEY '" + fk.constraintName +
+                                             "' in table '" + schema.tableName + "' references the column");
+                }
+                it = schema.constraints.erase(it);
+            }
+            else
+            {
+                for (auto &reference : columnIds)
+                {
+                    auto &id = reference.get();
+                    if (id > droppedId)
+                        --id;
+                }
+                ++it;
+            }
+        }
+    }
+
     PageFile openPageFile(const LinuxDirectory &tablesDir,
                           const std::filesystem::path &relativePath,
                           LinuxFile::OpenMode mode,
@@ -528,14 +649,209 @@ std::optional<InternalIndexEntry> BufferManager::insertIntoInternal(
 }
 void BufferManager::truncateTable()
 {
-    if (indexFile_) throw std::logic_error("Expected a table file");
+    if (indexFile_)
+        throw std::logic_error("Expected a table file");
     resetToEmpty();
 }
 
 void BufferManager::truncateIndex()
 {
-    if (!indexFile_) throw std::logic_error("Expected an index file");
+    if (!indexFile_)
+        throw std::logic_error("Expected an index file");
     resetToEmpty();
+}
+
+void BufferManager::addColumn(const Column &column)
+{
+    if (indexFile_)
+        throw std::logic_error("Expected a table file");
+    requireReadable();
+    auto header = getHeaderPage();
+
+    HeaderPage &headerPage = header.write<HeaderPage>();
+    PageHeader &headerPageHeader = header.writePage().header;
+
+    headerPage.columns.push_back(column);
+    headerPage.columns = buildStoredColumns(headerPage.columns);
+
+    headerPageHeader.freeSpaceStart =
+        calculateHeaderFreeSpaceStart(headerPageHeader, headerPage);
+
+    schema_.columns = headerPage.columns;
+}
+
+void BufferManager::dropColumn(const Column &column)
+{
+    if (indexFile_)
+        throw std::logic_error("Expected a table file");
+    requireReadable();
+    auto header = getHeaderPage();
+
+    HeaderPage &headerPage = header.write<HeaderPage>();
+    PageHeader &headerPageHeader = header.writePage().header;
+
+    remapOrDeleteConstraints(headerPage, headerPage.tableName, column.columnIndex, true);
+
+    headerPage.columns.erase(headerPage.columns.begin() + column.columnIndex);
+    headerPage.columns = buildStoredColumns(headerPage.columns);
+
+    headerPageHeader.freeSpaceStart =
+        calculateHeaderFreeSpaceStart(headerPageHeader, headerPage);
+
+    schema_.columns = headerPage.columns;
+}
+
+void BufferManager::updateForeignKeysForDroppedColumn(
+    const std::string &targetTable, ColumnId columnId, bool cascade)
+{
+    if (indexFile_)
+        throw std::logic_error("Expected a table file");
+    requireReadable();
+    auto header = getHeaderPage();
+    auto &metadata = header.write<HeaderPage>();
+    remapOrDeleteConstraints(metadata, targetTable, columnId, cascade);
+    auto &pageHeader = header.writePage().header;
+    pageHeader.freeSpaceStart = calculateHeaderFreeSpaceStart(pageHeader, metadata);
+}
+
+void BufferManager::addConstraint(const BoundConstraint &constraint)
+{
+    if (indexFile_)
+        throw std::logic_error("Expected a table file");
+    requireReadable();
+    auto header = getHeaderPage();
+
+    HeaderPage &headerPage = header.write<HeaderPage>();
+    PageHeader &headerPageHeader = header.writePage().header;
+
+    headerPage.constraints.push_back(constraint);
+
+    headerPageHeader.freeSpaceStart =
+        calculateHeaderFreeSpaceStart(headerPageHeader, headerPage);
+}
+
+void BufferManager::renameTable(const std::string &newTableName)
+{
+    requireReadable();
+
+    auto header = indexFile_ ? getIndexHeaderPage() : getHeaderPage();
+    PageHeader &headerPageHeader = header.writePage().header;
+
+    if (indexFile_)
+    {
+        auto &metadata = header.write<IndexHeaderPage>();
+
+        metadata.tableName = newTableName;
+        calculateHeaderFreeSpaceStart(headerPageHeader, metadata);
+    }
+    else
+    {
+        auto &metadata = header.write<HeaderPage>();
+
+        metadata.tableName = newTableName;
+        calculateHeaderFreeSpaceStart(headerPageHeader, metadata);
+    }
+}
+
+void BufferManager::dropConstraint(const std::string &constraintName)
+{
+
+    requireReadable();
+    if (indexFile_)
+    {
+        throw std::logic_error("Drop Constraint On Index File Should not be possible");
+    }
+
+    auto header = getHeaderPage();
+    auto &metadata = header.write<HeaderPage>();
+    auto &pageHeader = header.writePage().header;
+
+    auto it = std::find_if(
+        metadata.constraints.begin(),
+        metadata.constraints.end(),
+        [&](const BoundConstraint &constraint)
+        {
+            return std::visit(
+                [&](const BoundConstraintExpr &expr)
+                {
+                    return expr.constraintName == constraintName;
+                },
+                constraint);
+        });
+
+    if (it != metadata.constraints.end())
+    {
+        auto notNullConstraint = std::get_if<BoundNotNullConstraintExpr>(&*it);
+        if (notNullConstraint)
+        {
+
+            auto col = std::find_if(
+                metadata.columns.begin(),
+                metadata.columns.end(),
+                [&](const Column &column)
+                {
+                    return column.columnIndex == notNullConstraint->columnId;
+                });
+            if (col != metadata.columns.end())
+            {
+                col->nullable = true;
+            }
+        }
+        metadata.constraints.erase(it);
+
+        pageHeader.freeSpaceStart = calculateHeaderFreeSpaceStart(pageHeader, metadata);
+    }
+    else
+    {
+        throw std::logic_error("Constraint should exist, this should have been checked in validation");
+    }
+}
+
+void BufferManager::renameColumn(const ColumnId colId, const std::string &newColumnName)
+{
+    requireReadable();
+
+    auto header = indexFile_ ? getIndexHeaderPage() : getHeaderPage();
+    auto &pageHeader = header.writePage().header;
+
+    if (indexFile_)
+    {
+        auto &metadata = header.write<IndexHeaderPage>();
+
+        auto it = std::find(
+            metadata.keyColumns.begin(),
+            metadata.keyColumns.end(),
+            colId);
+
+        if (it != metadata.keyColumns.end())
+        {
+            const auto position = static_cast<std::size_t>(
+                std::distance(metadata.keyColumns.begin(), it));
+
+            metadata.columns.at(position).name = newColumnName;
+
+            pageHeader.freeSpaceStart =
+                calculateHeaderFreeSpaceStart(pageHeader, metadata);
+        }
+    }
+    else
+    {
+        auto &metadata = header.write<HeaderPage>();
+
+        auto it = std::find_if(
+            metadata.columns.begin(),
+            metadata.columns.end(),
+            [&](const Column &column)
+            {
+                return column.columnIndex == colId;
+            });
+
+        if (it != metadata.columns.end())
+        {
+            it->name = newColumnName;
+            pageHeader.freeSpaceStart = calculateHeaderFreeSpaceStart(pageHeader, metadata);
+        }
+    }
 }
 
 void BufferManager::resetToEmpty()
@@ -571,7 +887,8 @@ void BufferManager::resetToEmpty()
         participant_->dirtyPages.clear();
         setPage(header, HeaderPageId);
         setPage(indexFile_ ? makeEmptyPage<IndexPage>(FirstDataPageId)
-                           : makeEmptyPage<DataPage>(FirstDataPageId), FirstDataPageId);
+                           : makeEmptyPage<DataPage>(FirstDataPageId),
+                FirstDataPageId);
         participant_->needsSync = true;
         pageFile_.resize(2 * PAGE_SIZE);
     }

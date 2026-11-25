@@ -417,11 +417,6 @@ struct BoundDropConstraintAction
 {
     std::string constraintName;
 };
-struct BoundAlterColumnAction
-{
-    Column column;
-    bool setNotNull;
-};
 
 using BoundAlterTableAction = std::variant<
     BoundRenameTableAction,
@@ -429,8 +424,7 @@ using BoundAlterTableAction = std::variant<
     BoundAddColumnAction,
     BoundAddConstraintAction,
     BoundDropColumnAction,
-    BoundDropConstraintAction,
-    BoundAlterColumnAction>;
+    BoundDropConstraintAction>;
 
 struct BoundAlterTable
 {

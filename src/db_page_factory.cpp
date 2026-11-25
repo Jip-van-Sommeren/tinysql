@@ -9,59 +9,55 @@
 #include <variant>
 #include <vector>
 
-namespace
+std::uint16_t calculateHeaderFreeSpaceStart(
+    const PageHeader &pageHeader,
+    const HeaderPage &headerPage)
 {
+    ByteWriter writer(PAGE_SIZE);
 
-    std::uint16_t calculateHeaderFreeSpaceStart(
-        const PageHeader &pageHeader,
-        const HeaderPage &headerPage)
+    PageHeaderWriter pageHeaderWriter(writer);
+    pageHeaderWriter.write(pageHeader);
+
+    writer.seek(PageHeaderLayout::Size);
+
+    HeaderPageWriter headerPageWriter(writer);
+    headerPageWriter.write(headerPage);
+
+    std::size_t freeSpaceStart = writer.position();
+
+    if (freeSpaceStart > std::numeric_limits<std::uint16_t>::max())
     {
-        ByteWriter writer(PAGE_SIZE);
-
-        PageHeaderWriter pageHeaderWriter(writer);
-        pageHeaderWriter.write(pageHeader);
-
-        writer.seek(PageHeaderLayout::Size);
-
-        HeaderPageWriter headerPageWriter(writer);
-        headerPageWriter.write(headerPage);
-
-        std::size_t freeSpaceStart = writer.position();
-
-        if (freeSpaceStart > std::numeric_limits<std::uint16_t>::max())
-        {
-            throw std::runtime_error(
-                "Header page freeSpaceStart too large for uint16_t");
-        }
-
-        return static_cast<std::uint16_t>(freeSpaceStart);
+        throw std::runtime_error(
+            "Header page freeSpaceStart too large for uint16_t");
     }
 
-    std::uint16_t calculateHeaderFreeSpaceStart(
-        const PageHeader &pageHeader,
-        const IndexHeaderPage &headerPage)
+    return static_cast<std::uint16_t>(freeSpaceStart);
+}
+
+std::uint16_t calculateHeaderFreeSpaceStart(
+    const PageHeader &pageHeader,
+    const IndexHeaderPage &headerPage)
+{
+    ByteWriter writer(PAGE_SIZE);
+
+    PageHeaderWriter pageHeaderWriter(writer);
+    pageHeaderWriter.write(pageHeader);
+
+    writer.seek(PageHeaderLayout::Size);
+
+    IndexHeaderPageWriter headerPageWriter(writer);
+
+    headerPageWriter.write(headerPage);
+
+    std::size_t freeSpaceStart = writer.position();
+
+    if (freeSpaceStart > std::numeric_limits<std::uint16_t>::max())
     {
-        ByteWriter writer(PAGE_SIZE);
-
-        PageHeaderWriter pageHeaderWriter(writer);
-        pageHeaderWriter.write(pageHeader);
-
-        writer.seek(PageHeaderLayout::Size);
-
-        IndexHeaderPageWriter headerPageWriter(writer);
-
-        headerPageWriter.write(headerPage);
-
-        std::size_t freeSpaceStart = writer.position();
-
-        if (freeSpaceStart > std::numeric_limits<std::uint16_t>::max())
-        {
-            throw std::runtime_error(
-                "Header page freeSpaceStart too large for uint16_t");
-        }
-
-        return static_cast<std::uint16_t>(freeSpaceStart);
+        throw std::runtime_error(
+            "Header page freeSpaceStart too large for uint16_t");
     }
+
+    return static_cast<std::uint16_t>(freeSpaceStart);
 }
 
 Page makeEmptyDataPage(std::uint32_t pageId)

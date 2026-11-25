@@ -73,6 +73,32 @@ namespace
         return result;
     };
 
+    std::vector<Row> insertDefaultValueIntoRows(
+        const Value &defaultValue, Table &table)
+    {
+        auto cursor = table.scan();
+        std::vector<Row> result;
+        while (auto row = cursor.next())
+        {
+            row->values.push_back(defaultValue);
+            result.push_back(Row{std::move(row->values)});
+        }
+        return result;
+    }
+
+    std::vector<Row> removeValueFromRows(
+        const ColumnId &colId, Table &table)
+    {
+        auto cursor = table.scan();
+        std::vector<Row> result;
+        while (auto row = cursor.next())
+        {
+            row->values.erase(row->values.begin() + colId);
+            result.push_back(Row{std::move(row->values)});
+        }
+        return result;
+    }
+
     std::vector<LocatedRow> getLocatedRowsFromWhereExpr(
         const std::unique_ptr<BoundExpr> &where, Table &table)
     {
@@ -308,6 +334,45 @@ QueryResult StorageEngine::dropTable(const BoundDropTable &drop)
     return QueryResult{.columns = {}, .rows = {}, .affectedRows = 0, .returnsRows = false};
 }
 
+void StorageEngine::executeAction(const BoundAlterTable &alter)
+{
+    std::visit(
+        [&](const auto &action)
+        {
+            using T = std::decay_t<decltype(action)>;
+            if constexpr (std::is_same_v<T, BoundRenameTableAction>)
+            {
+                renameTable(alter);
+            }
+            else if constexpr (std::is_same_v<T, BoundRenameColumnAction>)
+            {
+                renameColumn(alter);
+            }
+            else if constexpr (std::is_same_v<T, BoundAddColumnAction>)
+            {
+                addColumn(alter);
+            }
+
+            else if constexpr (std::is_same_v<T, BoundAddConstraintAction>)
+            {
+                addConstraint(alter);
+            }
+            else if constexpr (std::is_same_v<T, BoundDropColumnAction>)
+            {
+                dropColumn(alter);
+            }
+            else if constexpr (std::is_same_v<T, BoundDropConstraintAction>)
+            {
+                dropConstraint(alter);
+            }
+            else
+            {
+                throw std::logic_error("Unreachable");
+            }
+        },
+        alter.action);
+}
+
 QueryResult StorageEngine::alterTable(const BoundAlterTable &alter)
 {
     const auto schema = getTableHeader(alter.name);
@@ -318,6 +383,7 @@ QueryResult StorageEngine::alterTable(const BoundAlterTable &alter)
         schema, alter, tableNames, *this);
     if (!validationResult.valid)
         throw QueryException(QueryErrorCode::Constraint, validationResult.message.value());
+    executeAction(alter);
     return QueryResult{.columns = {}, .rows = {}, .affectedRows = 0, .returnsRows = false};
 }
 
@@ -327,6 +393,164 @@ QueryResult StorageEngine::dropIndex(const BoundDropIndex &drop)
         throw QueryException(QueryErrorCode::Validation, "Index does not exist: " + drop.indexName);
     statementRecovery_.deleteFile(std::filesystem::path{"indexes"} / (drop.indexName + ".index"));
     return QueryResult{.columns = {}, .rows = {}, .affectedRows = 0, .returnsRows = false};
+}
+
+void StorageEngine::renameTable(const BoundAlterTable &alter)
+{
+    const auto *action = std::get_if<BoundRenameTableAction>(&alter.action);
+    if (!action)
+    {
+        throw std::logic_error("Action should always be a rename table action here\n");
+    }
+    openTable(alter.name).renameTable(action->newName);
+    for (auto &index : indexesForTable(alter.name))
+        index.renameTable(action->newName);
+
+    tablesDirectory_.renameFile(action->oldName, action->newName);
+}
+
+void StorageEngine::renameColumn(const BoundAlterTable &alter)
+{
+    const auto *action = std::get_if<BoundRenameColumnAction>(&alter.action);
+    if (!action)
+    {
+        throw std::logic_error("Action should always be a rename column action here\n");
+    }
+    openTable(alter.name).renameColumn(action->colId, action->newName);
+    for (auto &index : indexesForTable(alter.name))
+        index.renameColumn(action->colId, action->newName);
+}
+
+void StorageEngine::addColumn(const BoundAlterTable &alter)
+{
+    const auto *action = std::get_if<BoundAddColumnAction>(&alter.action);
+    if (!action)
+    {
+        throw std::logic_error("Action should always be add column action  here\n");
+    }
+    auto table = openTable(alter.name);
+
+    Value defaultValue{std::monostate{}};
+
+    for (const auto &constraint : action->constraints)
+    {
+        const auto *defaultConstraint =
+            std::get_if<BoundDefaultConstraintExpr>(&constraint);
+
+        if (!defaultConstraint)
+            continue;
+
+        // Existing-row nullability was checked by constraint validation.
+        // This also permits adding a NOT NULL column to an empty table.
+        auto targetColumn = action->column;
+        targetColumn.nullable = true;
+
+        defaultValue = QueryValidator::convertForColumn(
+            evaluateValue(*defaultConstraint->value, Row{}),
+            targetColumn);
+        break;
+    }
+
+    // Read all rows while the old schema is still installed.
+    auto updatedRows = insertDefaultValueIntoRows(defaultValue, table);
+
+    table.truncateTable();
+    table.addColumn(action->column);
+
+    for (const auto &constraint : action->constraints)
+    {
+        table.addConstraint(constraint);
+    }
+
+    const auto locatedRows = table.insertRows(updatedRows);
+
+    // Create backing indexes for newly added PK/UNIQUE constraints only.
+    // The loop below populates these along with rebuilding existing indexes.
+    createIndexForPkAndUniqueConstraints(BoundCreateTable{
+        .tableName = alter.name,
+        .columns = getTableSchema(alter.name),
+        .constraints = action->constraints});
+
+    for (auto &index : indexesForTable(alter.name))
+    {
+        index.truncate();
+        index.insertIndexes(locatedRows);
+    }
+}
+
+void StorageEngine::dropColumn(const BoundAlterTable &alter)
+{
+    const auto *action = std::get_if<BoundDropColumnAction>(&alter.action);
+    if (!action)
+    {
+        throw std::logic_error("Expected a drop column action");
+    }
+    auto table = openTable(alter.name);
+
+    // Read all rows while the old schema is still installed.
+    auto updatedRows = removeValueFromRows(action->column.columnIndex, table);
+
+    table.truncateTable();
+    table.dropColumn(action->column);
+
+    const auto locatedRows = table.insertRows(updatedRows);
+
+    for (auto &index : indexesForTable(alter.name))
+    {
+        const auto &indexName = index.getIndexName();
+        auto header = getIndexHeader(indexName);
+        if (std::ranges::find(header.keyColumns, action->column.columnIndex) != header.keyColumns.end())
+        {
+            statementRecovery_.deleteFile(std::filesystem::path{"indexes"} / (indexName + ".index"));
+        }
+        else
+        {
+            index.truncate();
+            index.remapTableColumnIdsAfterDrop(action->column.columnIndex);
+            index.insertIndexes(locatedRows);
+        }
+    }
+
+    // The changed table already handled its outgoing and self-referencing FKs.
+    // Other tables retain their local IDs; only references into this table move.
+    for (const auto &name : extractTableNames(tablesDirectory_.listFileNames()))
+    {
+        if (name == alter.name)
+            continue;
+        const auto schema = getTableHeader(name);
+        const bool referencesTarget = std::ranges::any_of(schema.constraints, [&](const BoundConstraint &constraint)
+                                                         {
+                                                             const auto *fk = std::get_if<BoundForeignKeyConstraintExpr>(&constraint);
+                                                             return fk && fk->referencedTableName == alter.name;
+                                                         });
+        if (referencesTarget)
+            openTable(name).updateForeignKeysForDroppedColumn(
+                alter.name, action->column.columnIndex, action->cascade);
+    }
+}
+
+void StorageEngine::dropConstraint(const BoundAlterTable &alter)
+{
+    const auto *action = std::get_if<BoundDropConstraintAction>(&alter.action);
+    if (!action)
+    {
+        throw std::logic_error("Action should always be add column action  here\n");
+    }
+    auto table = openTable(alter.name);
+
+    // Read all rows while the old schema is still installed.
+
+    table.dropConstraint(action->constraintName);
+}
+
+void StorageEngine::addConstraint(const BoundAlterTable &alter)
+{
+    const auto *action = std::get_if<BoundAddConstraintAction>(&alter.action);
+    if (!action)
+    {
+        throw std::logic_error("Action should always be a add constraint action here\n");
+    }
+    openTable(alter.name).addConstraint(action->constraint);
 }
 
 QueryResult StorageEngine::truncateTable(const BoundTruncateTable &truncate)
@@ -503,6 +727,23 @@ HeaderPage StorageEngine::getTableHeader(const std::string &tableName) const
     Page page = decodeHeaderPage(rawPage);
 
     return std::get<HeaderPage>(page.data);
+}
+
+IndexHeaderPage StorageEngine::getIndexHeader(const std::string &indexName) const
+{
+    requireReadable();
+
+    const auto fileName = indexName + ".index";
+
+    if (!indexExists(indexName))
+    {
+        throw QueryException(QueryErrorCode::Validation, "Index does not exist: " + indexName);
+    }
+
+    RawPage rawPage = readPageFromFile(indexDirectory_, fileName, HeaderPageId);
+    Page page = decodeIndexHeaderPage(rawPage);
+
+    return std::get<IndexHeaderPage>(page.data);
 }
 
 std::vector<Column> StorageEngine::getTableSchema(const std::string &tableName) const

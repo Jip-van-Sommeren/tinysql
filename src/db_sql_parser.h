@@ -522,11 +522,6 @@ struct DropConstraintAction
 {
     std::string constraintName;
 };
-struct AlterColumnAction
-{
-    std::string columnName;
-    bool setNotNull;
-};
 
 using AlterTableAction = std::variant<
     RenameTableAction,
@@ -534,8 +529,7 @@ using AlterTableAction = std::variant<
     AddColumnAction,
     AddConstraintAction,
     DropColumnAction,
-    DropConstraintAction,
-    AlterColumnAction>;
+    DropConstraintAction>;
 
 struct AlterTableStatement
 {

@@ -90,6 +90,20 @@ public:
     void truncateTable();
     void truncateIndex();
 
+    void renameTable(const std::string &newTableName);
+    void renameColumn(const ColumnId colId, const std::string &newColumnName);
+
+    void addColumn(const Column &column);
+
+    void addConstraint(const BoundConstraint &constraint);
+
+    void dropColumn(const Column &column);
+
+    void updateForeignKeysForDroppedColumn(
+        const std::string &targetTable, ColumnId columnId, bool cascade);
+
+    void dropConstraint(const std::string &constraintName);
+
     void initializeNewTable(const CreateTablePayload &createTablePayload);
     void initializeNewIndex(const CreateIndexPayload &CreateIndexPayload);
 

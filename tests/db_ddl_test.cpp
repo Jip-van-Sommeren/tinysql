@@ -3,7 +3,9 @@
 #include "db_test_directory.h"
 #include "db_test_journal.h"
 #include "db_write.h"
+#include "db_page_factory.h"
 
+#include <algorithm>
 #include <iostream>
 #include <map>
 #include <string>
@@ -236,6 +238,178 @@ namespace
             db.executeSql("DROP TABLE a, b;");
         }
     }
+
+    HeaderPage readSchema(const Path &root, const std::string &table)
+    {
+        return std::get<HeaderPage>(decodeHeaderPage(readPageFromFile(
+            LinuxDirectory{root / "tables"}, table + ".table", HeaderPageId)).data);
+    }
+
+    const BoundConstraint *findConstraint(const HeaderPage &schema, const std::string &name)
+    {
+        const auto it = std::ranges::find_if(schema.constraints, [&](const BoundConstraint &constraint)
+                                            {
+                                                return std::visit([&](const BoundConstraintExpr &value)
+                                                                  { return value.constraintName == name; }, constraint);
+                                            });
+        return it == schema.constraints.end() ? nullptr : &*it;
+    }
+
+    void testDropColumnLocalConstraints()
+    {
+        TestDirectory directory{"db-ddl-drop-column-local"};
+        const auto root = directory.path / "db";
+        {
+            auto db = Database::create(root, "test");
+            db.executeSql("CREATE TABLE items (removed INT CONSTRAINT removed_null NULL "
+                          "CONSTRAINT removed_default DEFAULT 1, "
+                          "kept INT CONSTRAINT kept_nn NOT NULL CONSTRAINT kept_default DEFAULT 7, label TEXT, "
+                          "CONSTRAINT removed_check CHECK (removed > 0), "
+                          "CONSTRAINT kept_check CHECK (-kept < 0 AND label IS NOT NULL), "
+                          "CONSTRAINT removed_unique UNIQUE (kept, removed), "
+                          "CONSTRAINT kept_unique UNIQUE (label, kept));");
+            db.executeSql("CREATE INDEX by_removed ON items(removed);");
+            db.executeSql("CREATE INDEX by_label ON items(label);");
+            db.executeSql("INSERT INTO items VALUES (1, 2, 'first'), (2, 3, 'second');");
+            db.executeSql("ALTER TABLE items DROP COLUMN removed;");
+            const auto schema = readSchema(root, "items");
+            for (const std::string name : {"removed_null", "removed_default", "removed_check", "removed_unique"})
+                require(!findConstraint(schema, name), "Retained a constraint on the dropped column: " + name);
+            require(std::get<BoundNotNullConstraintExpr>(*findConstraint(schema, "kept_nn")).columnId == 0 &&
+                        std::get<BoundDefaultConstraintExpr>(*findConstraint(schema, "kept_default")).columnId == 0 &&
+                        std::get<BoundUniqueConstraintExpr>(*findConstraint(schema, "kept_unique")).columnIds ==
+                            std::vector<ColumnId>{1, 0}, "Surviving constraint IDs were not remapped");
+            require(!std::filesystem::exists(root / "indexes/by_removed.index"), "Kept an index on the removed column");
+            db.executeSql("INSERT INTO items (label) VALUES ('defaulted');");
+            reject(db, "INSERT INTO items VALUES (0, 'bad');", QueryErrorCode::Constraint);
+            reject(db, "INSERT INTO items VALUES (3, NULL);", QueryErrorCode::Constraint);
+            reject(db, "INSERT INTO items VALUES (2, 'first');", QueryErrorCode::Constraint);
+            require(db.executeSql("SELECT * FROM items;").rows.size() == 3, "DROP COLUMN lost rows");
+        }
+        auto engine = StorageEngine::open(root);
+        require(engine.getIndexHeader("by_label").keyColumns == std::vector<ColumnId>{1},
+                "Surviving index retained the old table column ID");
+        for (auto &index : engine.indexesForTable("items"))
+        {
+            auto cursor = index.scan();
+            std::size_t count = 0;
+            while (cursor.next()) ++count;
+            require(count == 3, "An index was not rebuilt after dropping a column");
+        }
+    }
+
+    void seedColumnReferences(const Path &root)
+    {
+        auto db = Database::create(root, "test");
+        db.executeSql("CREATE TABLE parents (padding INT, id INT PRIMARY KEY, code INT UNIQUE);");
+        db.executeSql("CREATE TABLE other_parents (id INT PRIMARY KEY);");
+        db.executeSql("CREATE TABLE children (padding INT, parent_id INT, code INT, other_id INT, "
+                      "CONSTRAINT fk_id FOREIGN KEY (parent_id) REFERENCES parents(id), "
+                      "CONSTRAINT fk_code FOREIGN KEY (code) REFERENCES parents(code), "
+                      "CONSTRAINT fk_other FOREIGN KEY (other_id) REFERENCES other_parents(id));");
+        db.executeSql("INSERT INTO parents VALUES (0, 1, 10);");
+        db.executeSql("INSERT INTO other_parents VALUES (5);");
+        db.executeSql("INSERT INTO children VALUES (0, 1, 10, 5);");
+    }
+
+    void testDropColumnForeignKeys()
+    {
+        TestDirectory directory{"db-ddl-drop-column-fk"};
+        const auto root = directory.path / "db";
+        seedColumnReferences(root);
+        {
+            auto db = Database::open(root, "test");
+            // Dropping an unrelated column still moves referenced IDs.
+            db.executeSql("ALTER TABLE parents DROP COLUMN padding;");
+            auto schema = readSchema(root, "children");
+            const auto &idFk = std::get<BoundForeignKeyConstraintExpr>(*findConstraint(schema, "fk_id"));
+            const auto &codeFk = std::get<BoundForeignKeyConstraintExpr>(*findConstraint(schema, "fk_code"));
+            require(idFk.localColumnIds == std::vector<ColumnId>{1} && idFk.referencedColumnIds == std::vector<ColumnId>{0} &&
+                        codeFk.localColumnIds == std::vector<ColumnId>{2} && codeFk.referencedColumnIds == std::vector<ColumnId>{1},
+                    "Incoming FKs did not remap referenced IDs independently of local IDs");
+            // Changing the child only moves local IDs, even when numeric IDs overlap.
+            db.executeSql("ALTER TABLE children DROP COLUMN padding;");
+            db.executeSql("INSERT INTO children VALUES (1, 10, 5);");
+            reject(db, "INSERT INTO children VALUES (9, 10, 5);", QueryErrorCode::Constraint);
+
+            const auto before = files(root);
+            reject(db, "ALTER TABLE parents DROP COLUMN id;", QueryErrorCode::Constraint);
+            require(files(root) == before, "Rejected DROP COLUMN changed files");
+
+            const auto childrenBefore = db.executeSql("SELECT * FROM children;").rows;
+            db.executeSql("ALTER TABLE parents DROP COLUMN id CASCADE;");
+            schema = readSchema(root, "children");
+            require(!findConstraint(schema, "fk_id") && findConstraint(schema, "fk_code") && findConstraint(schema, "fk_other"),
+                    "CASCADE removed the wrong foreign keys");
+            const auto &remaining = std::get<BoundForeignKeyConstraintExpr>(*findConstraint(schema, "fk_code"));
+            require(remaining.localColumnIds == std::vector<ColumnId>{1} && remaining.referencedColumnIds == std::vector<ColumnId>{0},
+                    "CASCADE did not remap the surviving referenced key");
+            const auto childrenAfter = db.executeSql("SELECT * FROM children;").rows;
+            require(childrenAfter.size() == childrenBefore.size(), "CASCADE deleted referencing rows");
+            for (std::size_t i = 0; i < childrenBefore.size(); ++i)
+                require(childrenBefore[i].values == childrenAfter[i].values, "CASCADE changed referencing row values");
+            db.executeSql("INSERT INTO children VALUES (999, 10, 5);");
+            reject(db, "INSERT INTO children VALUES (999, 99, 5);", QueryErrorCode::Constraint);
+            reject(db, "INSERT INTO children VALUES (999, 10, 99);", QueryErrorCode::Constraint);
+        }
+        auto reopened = Database::open(root, "test");
+        reopened.executeSql("INSERT INTO children VALUES (999, 10, 5);");
+        reject(reopened, "INSERT INTO children VALUES (999, 99, 5);", QueryErrorCode::Constraint);
+    }
+
+    void testDropColumnSelfReferences()
+    {
+        TestDirectory directory{"db-ddl-drop-column-self"};
+        const auto root = directory.path / "db";
+        {
+            auto db = Database::create(root, "test");
+            db.executeSql("CREATE TABLE nodes (padding INT, id INT PRIMARY KEY, parent_id INT);");
+            db.executeSql("INSERT INTO nodes VALUES (0, 1, 1);");
+        }
+        {
+            PageFile file{LinuxDirectory{root / "tables"}, "nodes.table"};
+            auto page = decodeHeaderPage(file.readPage(HeaderPageId));
+            auto &schema = std::get<HeaderPage>(page.data);
+            schema.constraints.push_back(BoundForeignKeyConstraintExpr{"self_fk", {2}, "nodes", {1}});
+            page.header.freeSpaceStart = calculateHeaderFreeSpaceStart(page.header, schema);
+            file.writePage(HeaderPageId, encodeHeaderPage(page.header, schema));
+            file.sync();
+        }
+        auto db = Database::open(root, "test");
+        db.executeSql("ALTER TABLE nodes DROP COLUMN padding;");
+        const auto schema = readSchema(root, "nodes");
+        const auto &fk = std::get<BoundForeignKeyConstraintExpr>(*findConstraint(schema, "self_fk"));
+        require(fk.localColumnIds == std::vector<ColumnId>{1} && fk.referencedColumnIds == std::vector<ColumnId>{0},
+                "Self-reference did not remap both sides");
+        db.executeSql("INSERT INTO nodes VALUES (2, 1);");
+        reject(db, "INSERT INTO nodes VALUES (3, 99);", QueryErrorCode::Constraint);
+        // A self-reference is local and does not require CASCADE.
+        db.executeSql("ALTER TABLE nodes DROP COLUMN id;");
+        require(!findConstraint(readSchema(root, "nodes"), "self_fk"), "Kept a self-FK referencing the dropped column");
+        db.executeSql("INSERT INTO nodes VALUES (99);");
+    }
+
+    void testDropColumnRecovery()
+    {
+        for (const bool reopen : {false, true})
+        {
+            TestDirectory directory{"db-ddl-drop-column-recovery"};
+            const auto root = directory.path / "db";
+            seedColumnReferences(root);
+            const auto before = files(root);
+            {
+                auto engine = StorageEngine::open(root);
+                const auto schema = engine.getTableHeader("parents");
+                engine.beginStatement();
+                engine.alterTable(BoundAlterTable{"parents", BoundDropColumnAction{schema.columns.at(1), true}});
+                require(files(root) != before, "DROP COLUMN recovery fixture made no changes");
+                if (!reopen) engine.rollbackStatement();
+            }
+            auto db = Database::open(root, "test");
+            require(files(root) == before, "DROP COLUMN recovery did not restore exact table/index bytes");
+            reject(db, "INSERT INTO children VALUES (0, 99, 10, 5);", QueryErrorCode::Constraint);
+        }
+    }
 }
 
 int main()
@@ -247,6 +421,10 @@ int main()
         testTruncateCascade();
         testRecovery();
         testCyclesAndHandles();
+        testDropColumnLocalConstraints();
+        testDropColumnForeignKeys();
+        testDropColumnSelfReferences();
+        testDropColumnRecovery();
     }
     catch (const std::exception &error)
     {

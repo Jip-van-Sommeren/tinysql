@@ -371,6 +371,37 @@ void Index::initializeNewIndex(const CreateIndexPayload &createIndexPayload)
     bufferManager_.sync();
 }
 
+void Index::renameTable(const std::string &newTableName)
+{
+    bufferManager_.renameTable(newTableName);
+    bufferManager_.flushAll();
+    bufferManager_.sync();
+}
+
+void Index::renameColumn(const ColumnId colId, const std::string &newColumnName)
+{
+    bufferManager_.renameColumn(colId, newColumnName);
+    bufferManager_.flushAll();
+    bufferManager_.sync();
+}
+
+void Index::remapTableColumnIdsAfterDrop(ColumnId droppedId)
+{
+    {
+        auto header = bufferManager_.getIndexHeaderPage();
+        const auto &keyColumns = header.as<IndexHeaderPage>().keyColumns;
+        if (std::ranges::find(keyColumns, droppedId) != keyColumns.end())
+            throw std::logic_error("An index on a dropped column must be removed");
+        auto &metadata = header.write<IndexHeaderPage>();
+        for (auto &id : metadata.keyColumns)
+            if (id > droppedId)
+                --id;
+    }
+    // Key order, types and the index's own physical column positions are unchanged.
+    bufferManager_.flushAll();
+    bufferManager_.sync();
+}
+
 void Index::deleteIndexes(const std::vector<LocatedRow> &rows)
 {
     bufferManager_.requireReadable();

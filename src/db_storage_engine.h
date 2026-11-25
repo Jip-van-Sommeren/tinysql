@@ -31,6 +31,7 @@ public:
     bool tableExists(const std::string &name) const override;
     bool indexExists(const std::string &name) const override;
     HeaderPage getTableHeader(const std::string &name) const override;
+    IndexHeaderPage getIndexHeader(const std::string &name) const override;
     std::vector<Column> getTableSchema(const std::string &tableName) const;
 
     Table createTable(
@@ -132,4 +133,14 @@ private:
                                 std::string{operation} + " failed: " + path.string());
     }
     static void createMetaFile(const std::filesystem::path &dbPath, const uuid_t &dbId);
+
+    void renameTable(const BoundAlterTable &alter);
+    void renameColumn(const BoundAlterTable &alter);
+    void addColumn(const BoundAlterTable &alter);
+    void addConstraint(const BoundAlterTable &alter);
+
+    void dropColumn(const BoundAlterTable &alter);
+    void dropConstraint(const BoundAlterTable &alter);
+
+    void executeAction(const BoundAlterTable &alter);
 };

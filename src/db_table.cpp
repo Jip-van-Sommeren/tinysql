@@ -147,6 +147,19 @@ std::vector<LocatedRow> Table::insertRows(const BoundInsert &insert)
     return locatedRows;
 }
 
+std::vector<LocatedRow> Table::insertRows(const std::vector<Row> &rows)
+{
+    bufferManager.requireReadable();
+    if (rows.empty())
+    {
+        return {};
+    }
+    const auto &locatedRows = bufferManager.insertRows(rows);
+    bufferManager.flushAll();
+    bufferManager.sync();
+    return locatedRows;
+}
+
 std::vector<LocatedRow> Table::updateRows(const std::vector<LocatedRow> &updateRows)
 {
     bufferManager.requireReadable();
@@ -205,6 +218,56 @@ void Table::truncateTable()
     bufferManager.sync();
 }
 
+void Table::renameTable(const std::string &newTableName)
+{
+    bufferManager.renameTable(newTableName);
+    bufferManager.flushAll();
+    bufferManager.sync();
+}
+
+void Table::renameColumn(const ColumnId colId, const std::string &newColumnName)
+{
+    bufferManager.renameColumn(colId, newColumnName);
+    bufferManager.flushAll();
+    bufferManager.sync();
+}
+
+void Table::addColumn(const Column &column)
+{
+    bufferManager.addColumn(column);
+    bufferManager.flushAll();
+    bufferManager.sync();
+}
+
+void Table::dropColumn(const Column &column)
+{
+    bufferManager.dropColumn(column);
+    bufferManager.flushAll();
+    bufferManager.sync();
+}
+
+void Table::addConstraint(const BoundConstraint &constraint)
+{
+    bufferManager.addConstraint(constraint);
+    bufferManager.flushAll();
+    bufferManager.sync();
+}
+
+void Table::dropConstraint(const std::string &constraintName)
+{
+    bufferManager.dropConstraint(constraintName);
+    bufferManager.flushAll();
+    bufferManager.sync();
+}
+
+void Table::updateForeignKeysForDroppedColumn(
+    const std::string &targetTable, ColumnId columnId, bool cascade)
+{
+    bufferManager.updateForeignKeysForDroppedColumn(targetTable, columnId, cascade);
+    bufferManager.flushAll();
+    bufferManager.sync();
+}
+
 void Table::removeForeignKeysTo(const std::set<std::string> &tableNames)
 {
     {
@@ -212,10 +275,9 @@ void Table::removeForeignKeysTo(const std::set<std::string> &tableNames)
         auto &page = guard.writePage();
         auto &schema = std::get<HeaderPage>(page.data);
         std::erase_if(schema.constraints, [&](const BoundConstraint &constraint)
-        {
+                      {
             const auto *fk = std::get_if<BoundForeignKeyConstraintExpr>(&constraint);
-            return fk && tableNames.contains(fk->referencedTableName);
-        });
+            return fk && tableNames.contains(fk->referencedTableName); });
         ByteWriter writer(PAGE_SIZE);
         writer.seek(PageHeaderLayout::Size);
         HeaderPageWriter(writer).write(schema);

@@ -84,6 +84,11 @@ public:
     std::string getTableName() { return tableName_; };
     std::string getIndexName() { return indexName_; };
 
+    void renameTable(const std::string &newTableName);
+    void renameColumn(const ColumnId colId, const std::string &newColumnName);
+    // The index must not contain the dropped table column.
+    void remapTableColumnIdsAfterDrop(ColumnId droppedId);
+
 private:
     friend class IndexCursor;
     BufferManager bufferManager_;

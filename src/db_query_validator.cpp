@@ -1590,13 +1590,6 @@ BoundAlterTable QueryValidator::validateStatement(const AlterTableStatement &sta
             {
                 return BoundDropConstraintAction{alterTableAction.constraintName};
             }
-
-            else if constexpr (std::is_same_v<T, AlterColumnAction>)
-            {
-                const auto &col = bContext_.resolveColumn(alterTableAction.columnName, tableName);
-
-                return BoundAlterColumnAction{col, alterTableAction.setNotNull};
-            }
         },
         statement.action);
 

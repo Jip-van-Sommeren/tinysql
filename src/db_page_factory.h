@@ -11,6 +11,14 @@
 
 Page makeEmptyDataPage(std::uint32_t pageId);
 
+std::uint16_t calculateHeaderFreeSpaceStart(
+    const PageHeader &pageHeader,
+    const IndexHeaderPage &headerPage);
+
+std::uint16_t calculateHeaderFreeSpaceStart(
+    const PageHeader &pageHeader,
+    const HeaderPage &headerPage);
+
 template <typename T>
 Page makeEmptyPage(std::uint32_t pageId)
 {
@@ -39,4 +47,5 @@ Page makeHeaderPage(
     const CreateIndexPayload &payload);
 Page makeHeaderPage(
     const CreateTablePayload &payload);
+
 std::vector<Column> buildStoredColumns(const std::vector<Column> &columns);

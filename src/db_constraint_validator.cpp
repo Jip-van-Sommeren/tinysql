@@ -88,7 +88,7 @@ ConstraintValidationResult ConstraintValidator::validateAlterTableConstraint(
                                         ? proposed
                                         : storageEngine.getTableHeader(fk->referencedTableName);
             if (!std::ranges::any_of(referenced.constraints, [&](const BoundConstraint &candidate)
-                                    { return matchesReferencedKey(candidate, fk->referencedColumnIds); }))
+                                     { return matchesReferencedKey(candidate, fk->referencedColumnIds); }))
                 return {false, fk->constraintName,
                         std::format("FOREIGN KEY '{}' must reference a PRIMARY KEY or UNIQUE key in table '{}'",
                                     fk->constraintName, fk->referencedTableName)};
@@ -219,7 +219,7 @@ ConstraintValidationResult ConstraintValidator::validateAlterTableConstraint(
             else if constexpr (std::is_same_v<T, BoundDropConstraintAction>)
             {
                 const auto target = std::ranges::find_if(schema.constraints, [&](const BoundConstraint &constraint)
-                                                        { return nameOf(constraint) == action.constraintName; });
+                                                         { return nameOf(constraint) == action.constraintName; });
                 if (target == schema.constraints.end())
                     return {false, action.constraintName, "Constraint does not exist: " + action.constraintName};
                 return validateIncomingReferences(
@@ -230,36 +230,10 @@ ConstraintValidationResult ConstraintValidator::validateAlterTableConstraint(
                         // FKs identify referenced columns, not a particular key
                         // constraint. An equivalent surviving key is sufficient.
                         return !std::ranges::any_of(schema.constraints, [&](const BoundConstraint &candidate)
-                                                   {
-                                                       return &candidate != &*target &&
-                                                              matchesReferencedKey(candidate, fk.referencedColumnIds);
-                                                   });
+                                                    { return &candidate != &*target &&
+                                                             matchesReferencedKey(candidate, fk.referencedColumnIds); });
                     },
                     "DROP CONSTRAINT '" + action.constraintName + "'");
-            }
-            else if constexpr (std::is_same_v<T, BoundAlterColumnAction>)
-            {
-                const auto columnId = action.column.columnIndex;
-                if (action.setNotNull)
-                {
-                    auto table = storageEngine.openTable(schema.tableName);
-                    auto cursor = table.scan();
-                    while (auto row = cursor.next())
-                        if (std::holds_alternative<std::monostate>(row->values.at(columnId)))
-                            return {false, std::nullopt,
-                                    "Cannot SET NOT NULL: column '" + action.column.name + "' contains NULL values"};
-                }
-                else
-                {
-                    for (const auto &constraint : schema.constraints)
-                    {
-                        const auto *pk = std::get_if<BoundPrimaryKeyConstraintExpr>(&constraint);
-                        if (pk && std::ranges::find(pk->columnIds, columnId) != pk->columnIds.end())
-                            return {false, pk->constraintName,
-                                    "Cannot DROP NOT NULL from PRIMARY KEY column: " + action.column.name};
-                    }
-                }
-                return success;
             }
         },
         alter.action);

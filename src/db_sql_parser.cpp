@@ -362,29 +362,7 @@ AlterTableStatement Parser::parseAlterTableStatement()
         }
         throw QueryException(QueryErrorCode::Syntax, "Expected COLUMN or CONSTRAINT after DROP, found: " + peek().text);
     }
-    if (matchKeyword("ALTER"))
-    {
-        expectKeyword("COLUMN");
-        auto columnNameToken = expect(TokenType::Identifier);
-        auto columnName{std::move(columnNameToken.text)};
-        auto setNotNull{false};
-        if (matchKeyword("SET"))
-        {
-            expectKeyword("NOT");
-            expectKeyword("NULL");
-            setNotNull = true;
-            return AlterTableStatement{
-                tableName, AlterColumnAction{columnName, setNotNull}};
-        }
-        else if (matchKeyword("DROP"))
-        {
-            expectKeyword("NOT");
-            expectKeyword("NULL");
-            return AlterTableStatement{
-                tableName, AlterColumnAction{columnName, setNotNull}};
-        }
-        throw QueryException(QueryErrorCode::Syntax, "Expected SET or DROP after ALTER COLUMN, found: " + peek().text);
-    }
+
     throw QueryException(QueryErrorCode::Syntax, "Expected RENAME, ADD, DROP, or ALTER found: " + peek().text);
 }
 

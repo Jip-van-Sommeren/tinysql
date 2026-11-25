@@ -49,6 +49,7 @@ public:
     static Table open(const LinuxDirectory &dbRoot, const std::filesystem::path &relTablePath, StatementRecovery &statementRecovery);
 
     std::vector<LocatedRow> insertRows(const BoundInsert &insert);
+    std::vector<LocatedRow> insertRows(const std::vector<Row> &rows);
     // Replacements may move; return their actual stored RowIds.
     std::vector<LocatedRow> updateRows(const std::vector<LocatedRow> &updateRows);
 
@@ -56,7 +57,17 @@ public:
     std::uint64_t deleteRows(const std::vector<LocatedRow> &delRows);
     std::vector<BoundConstraint> getConstraints();
     void truncateTable();
+    void renameTable(const std::string &newTableName);
+    void renameColumn(const ColumnId colId, const std::string &newName);
     void removeForeignKeysTo(const std::set<std::string> &tableNames);
+    void addColumn(const Column &column);
+    void addConstraint(const BoundConstraint &constraint);
+
+    void dropColumn(const Column &column);
+    // Remap surviving incoming references and remove dependencies with CASCADE.
+    void updateForeignKeysForDroppedColumn(
+        const std::string &targetTable, ColumnId columnId, bool cascade);
+    void dropConstraint(const std::string &constraintName);
 
 private:
     friend class TableCursor;
